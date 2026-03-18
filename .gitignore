@@ -6,5 +6,6 @@ docker/litellm/.env
 data/raw/*
 data/parsed/*
 data/samples/eval_report.json
+data/samples/eval_report_api.json
 !data/raw/.gitkeep
 !data/parsed/.gitkeep

@@ -10,6 +10,8 @@ services:
       APP_CONFIG_DIR: /workspace/configs
       VECTORSTORE_BACKEND: ${VECTORSTORE_BACKEND:-memory}
       MILVUS_URI: ${MILVUS_URI:-http://milvus:19530}
+      MODEL_GATEWAY_MODE: ${MODEL_GATEWAY_MODE:-mock}
+      PARSED_OUTPUT_DIR: /workspace/data/parsed
     volumes:
       - ../configs:/workspace/configs
       - ../data:/workspace/data

@@ -29,6 +29,10 @@ class VectorRepository(ABC):
     def search(self, vector: list[float], top_k: int) -> list[SearchHit]:
         raise NotImplementedError
 
+    @abstractmethod
+    def stats(self) -> dict[str, object]:
+        raise NotImplementedError
+
 
 class InMemoryVectorRepository(VectorRepository):
     def __init__(self) -> None:
@@ -45,6 +49,13 @@ class InMemoryVectorRepository(VectorRepository):
             for chunk, embedding in self.entries
         ]
         return sorted(scored, key=lambda item: item.score, reverse=True)[:top_k]
+
+    def stats(self) -> dict[str, object]:
+        return {
+            "backend": "memory",
+            "documents": len(self.documents),
+            "chunks": len(self.entries),
+        }
 
 
 class MilvusVectorRepository(VectorRepository):
@@ -111,6 +122,15 @@ class MilvusVectorRepository(VectorRepository):
                 )
             )
         return hits
+
+    def stats(self) -> dict[str, object]:
+        collection = self.client.describe_collection(collection_name=CHUNKS_COLLECTION)
+        return {
+            "backend": "milvus",
+            "collection_name": CHUNKS_COLLECTION,
+            "dimension": self.dimension,
+            "collection": collection,
+        }
 
 
 def _cosine_similarity(lhs: list[float], rhs: list[float]) -> float:

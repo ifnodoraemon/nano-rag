@@ -7,6 +7,7 @@ class TraceSummary(BaseModel):
     query: str | None = None
     model_alias: str | None = None
     prompt_version: str | None = None
+    context_count: int | None = None
 
 
 class TraceRecord(BaseModel):

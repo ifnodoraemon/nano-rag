@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING, Any
 import httpx
 
 from app.core.exceptions import ModelGatewayError
+from app.model_client.mock_gateway import mock_chat, mock_embeddings, mock_rerank
 
 if TYPE_CHECKING:
     from app.core.config import AppConfig
@@ -12,6 +13,7 @@ if TYPE_CHECKING:
 
 class GatewayClient:
     def __init__(self, config: AppConfig, timeout_seconds: int) -> None:
+        self.config = config
         self.base_url = config.gateway_base_url.rstrip("/")
         self.api_key = config.gateway_api_key
         self.timeout = timeout_seconds
@@ -24,6 +26,8 @@ class GatewayClient:
         }
 
     async def post(self, path: str, payload: dict[str, Any]) -> dict[str, Any]:
+        if self.config.gateway_mode == "mock":
+            return self._mock_post(path, payload)
         try:
             async with httpx.AsyncClient(timeout=self.timeout) as client:
                 response = await client.post(f"{self.base_url}{path}", headers=self.headers, json=payload)
@@ -36,3 +40,12 @@ class GatewayClient:
             raise ModelGatewayError(f"Model gateway request failed on {path}: {exc.response.status_code} {detail}") from exc
         except httpx.HTTPError as exc:
             raise ModelGatewayError(f"Model gateway connection failed on {path}: {exc}") from exc
+
+    def _mock_post(self, path: str, payload: dict[str, Any]) -> dict[str, Any]:
+        if path == "/embeddings":
+            return mock_embeddings(payload.get("input", []))
+        if path == "/rerank":
+            return mock_rerank(payload.get("query", ""), payload.get("documents", []), int(payload.get("top_n", 5)))
+        if path == "/chat/completions":
+            return mock_chat(payload.get("messages", []))
+        raise ModelGatewayError(f"Mock model gateway does not support {path}")

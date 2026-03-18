@@ -52,10 +52,13 @@ async def health(request: Request) -> dict[str, object]:
         "status": status,
         "service": "nano-rag",
         "vectorstore_backend": os.getenv("VECTORSTORE_BACKEND", "memory"),
+        "gateway_mode": container.config.gateway_mode,
         "gateway": {
             "base_url": container.config.gateway_base_url,
             "reachable": gateway_ok,
             "error": gateway_error,
         },
+        "vectorstore": container.repository.stats(),
+        "parsed_dir": str(container.config.parsed_dir),
         "trace_count": len(container.trace_store.list()),
     }

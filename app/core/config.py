@@ -51,6 +51,14 @@ class AppConfig:
     def gateway_api_key(self) -> str:
         return self.models["model_gateway"]["api_key"]
 
+    @property
+    def gateway_mode(self) -> str:
+        return os.getenv("MODEL_GATEWAY_MODE", "mock").lower()
+
+    @property
+    def parsed_dir(self) -> Path:
+        return Path(os.getenv("PARSED_OUTPUT_DIR", self.config_dir.parent / "data" / "parsed"))
+
 
 def load_config() -> AppConfig:
     config_dir = Path(os.getenv("APP_CONFIG_DIR", Path(__file__).resolve().parents[2] / "configs"))

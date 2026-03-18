@@ -49,6 +49,7 @@ class TraceStore:
                     query=record.query,
                     model_alias=record.model_alias,
                     prompt_version=record.prompt_version,
+                    context_count=len(record.contexts),
                 )
             )
         return summaries

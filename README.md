@@ -7,6 +7,7 @@
 - `FastAPI` 服务，包含 `/health`、`/ingest`、`/chat`、`/retrieve/debug`、`/traces`
 - `ingestion / retrieval / generation` 主链路模块拆分
 - 统一 `model_client`，所有模型调用都走 OpenAI-compatible Gateway
+- 默认 `mock gateway` 模式，可在没有真实模型 API 时先跑通本地自助迭代闭环
 - `Milvus` 仓储抽象，默认带内存回退，方便本地调试
 - `Docker Compose` 骨架，包含 `app / milvus / litellm / phoenix`
 - 基础测试、trace 存储、配置模板和离线评测脚手架
@@ -74,11 +75,26 @@ curl -X POST http://127.0.0.1:8000/retrieve/debug \
   -d '{"query":"差旅报销多久内提交？","top_k":10}'
 ```
 
+### run eval by API
+
+```bash
+curl -X POST http://127.0.0.1:8000/eval/run \
+  -H 'Content-Type: application/json' \
+  -d '{"dataset_path":"data/samples/eval_sample.jsonl","output_path":"data/samples/eval_report_api.json"}'
+```
+
 ### traces
 
 ```bash
 curl http://127.0.0.1:8000/traces
 curl http://127.0.0.1:8000/traces/<trace_id>
+```
+
+### storage debug
+
+```bash
+curl http://127.0.0.1:8000/debug/storage
+curl http://127.0.0.1:8000/debug/parsed/<doc_id>
 ```
 
 ### offline eval
@@ -102,7 +118,8 @@ python3 scripts/run_eval.py \
 - PDF 优先走 `Docling`，未安装时回退 `pypdf`
 - `Phoenix` 已在运行环境中拉起，当前代码侧仍以本地 trace store 为最小实现
 - `RAGAS` 相关脚本已接入离线评测入口，当前默认使用确定性聚合指标，后续可替换成真实 RAGAS 流程
-- 当前真实阻塞项是 `docker/litellm/.env` 里的上游 provider 仍是占位配置，未填真实 embedding / rerank / chat API
+- 默认 `MODEL_GATEWAY_MODE=mock`，所以在没有真实 provider 时也能先跑通本地循环
+- 切到真实模型时，将 `MODEL_GATEWAY_MODE=live` 并填好 `docker/litellm/.env`
 
 ## 测试
 
