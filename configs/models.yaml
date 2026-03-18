@@ -1,0 +1,12 @@
+model_gateway:
+  base_url: ${MODEL_GATEWAY_BASE_URL:-http://litellm-gateway:4000}
+  api_key: ${LITELLM_MASTER_KEY:-change-me}
+
+embedding:
+  default_alias: qwen3-embed
+
+rerank:
+  default_alias: qwen3-rerank
+
+generation:
+  default_alias: main-chat-model

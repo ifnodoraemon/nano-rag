@@ -1,0 +1,10 @@
+.venv/
+__pycache__/
+.pytest_cache/
+*.pyc
+docker/litellm/.env
+data/raw/*
+data/parsed/*
+data/samples/eval_report.json
+!data/raw/.gitkeep
+!data/parsed/.gitkeep

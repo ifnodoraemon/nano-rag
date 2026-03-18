@@ -1,0 +1,16 @@
+chunk:
+  size: 800
+  overlap: 120
+
+retrieval:
+  top_k: 20
+  rerank_top_k: 10
+  final_contexts: 6
+
+prompt:
+  version: v1
+
+timeout:
+  embeddings_seconds: 30
+  rerank_seconds: 30
+  generation_seconds: 60
