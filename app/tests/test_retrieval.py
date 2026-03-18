@@ -1,7 +1,7 @@
 import pytest
 
 from app.core.config import AppConfig
-from app.core.tracing import TraceStore
+from app.core.tracing import TraceStore, TracingManager
 from app.model_client.embeddings import EmbeddingClient
 from app.model_client.rerank import RerankClient
 from app.retrieval.pipeline import RetrievalPipeline
@@ -48,7 +48,14 @@ async def test_retrieval_pipeline_returns_contexts() -> None:
         models={"model_gateway": {"base_url": "", "api_key": ""}},
         prompts={},
     )
-    pipeline = RetrievalPipeline(config, repository, FakeEmbeddingClient(), FakeRerankClient(), TraceStore())
+    pipeline = RetrievalPipeline(
+        config,
+        repository,
+        FakeEmbeddingClient(),
+        FakeRerankClient(),
+        TraceStore(),
+        TracingManager("test-service", ""),
+    )
 
     contexts, trace = await pipeline.run("aaa", 2)
 

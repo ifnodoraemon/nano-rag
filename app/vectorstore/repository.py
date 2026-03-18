@@ -5,6 +5,8 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
+from pymilvus import DataType
+
 from app.schemas.chunk import Chunk
 from app.schemas.document import Document
 from app.vectorstore.collections import CHUNKS_COLLECTION
@@ -71,13 +73,31 @@ class MilvusVectorRepository(VectorRepository):
 
     def _ensure_collection(self) -> None:
         if self.client.has_collection(CHUNKS_COLLECTION):
+            collection = self.client.describe_collection(collection_name=CHUNKS_COLLECTION)
+            vector_field = next(
+                (field for field in collection.get("fields", []) if field.get("name") == "vector"),
+                None,
+            )
+            current_dim = int((vector_field or {}).get("params", {}).get("dim", self.dimension))
+            if current_dim == self.dimension:
+                return
+            self.client.drop_collection(collection_name=CHUNKS_COLLECTION)
+        if self.client.has_collection(CHUNKS_COLLECTION):
             return
+        schema = self.client.create_schema(auto_id=False, enable_dynamic_field=True)
+        schema.add_field(
+            field_name="chunk_id",
+            datatype=DataType.VARCHAR,
+            is_primary=True,
+            max_length=256,
+        )
+        schema.add_field(field_name="vector", datatype=DataType.FLOAT_VECTOR, dim=self.dimension)
+        index_params = self.client.prepare_index_params()
+        index_params.add_index(field_name="vector", index_type="AUTOINDEX", metric_type="COSINE")
         self.client.create_collection(
             collection_name=CHUNKS_COLLECTION,
-            dimension=self.dimension,
-            auto_id=False,
-            primary_field_name="chunk_id",
-            id_type="string",
+            schema=schema,
+            index_params=index_params,
         )
 
     def upsert(self, document: Document, chunks: list[Chunk], embeddings: list[list[float]]) -> None:

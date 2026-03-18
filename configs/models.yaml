@@ -4,6 +4,7 @@ model_gateway:
 
 embedding:
   default_alias: qwen3-embed
+  dimension: 32
 
 rerank:
   default_alias: qwen3-rerank

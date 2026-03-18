@@ -9,7 +9,7 @@ from typing import Any
 import yaml
 
 from app.eval.ragas_runner import RagasRunner
-from app.core.tracing import TraceStore
+from app.core.tracing import TraceStore, TracingManager
 from app.generation.answer_formatter import AnswerFormatter
 from app.generation.prompt_builder import PromptBuilder
 from app.generation.service import GenerationService
@@ -59,6 +59,14 @@ class AppConfig:
     def parsed_dir(self) -> Path:
         return Path(os.getenv("PARSED_OUTPUT_DIR", self.config_dir.parent / "data" / "parsed"))
 
+    @property
+    def phoenix_collector_endpoint(self) -> str:
+        return os.getenv("PHOENIX_COLLECTOR_ENDPOINT", "http://phoenix:4317")
+
+    @property
+    def phoenix_ui_endpoint(self) -> str:
+        return os.getenv("PHOENIX_UI_ENDPOINT", "http://phoenix:6006")
+
 
 def load_config() -> AppConfig:
     config_dir = Path(os.getenv("APP_CONFIG_DIR", Path(__file__).resolve().parents[2] / "configs"))
@@ -88,6 +96,7 @@ class AppContainer:
     chat_pipeline: GenerationService
     ragas_runner: RagasRunner
     trace_store: TraceStore
+    tracing_manager: TracingManager
 
     @classmethod
     def from_env(cls) -> "AppContainer":
@@ -97,7 +106,15 @@ class AppContainer:
         rerank_client = RerankClient(config)
         generation_client = GenerationClient(config)
         trace_store = TraceStore()
-        retrieval_pipeline = RetrievalPipeline(config, repository, embedding_client, rerank_client, trace_store)
+        tracing_manager = TracingManager("nano-rag", config.phoenix_collector_endpoint)
+        retrieval_pipeline = RetrievalPipeline(
+            config,
+            repository,
+            embedding_client,
+            rerank_client,
+            trace_store,
+            tracing_manager,
+        )
         chat_pipeline = GenerationService(
             config=config,
             retrieval_pipeline=retrieval_pipeline,
@@ -105,6 +122,7 @@ class AppContainer:
             prompt_builder=PromptBuilder(config.prompts),
             answer_formatter=AnswerFormatter(),
             trace_store=trace_store,
+            tracing_manager=tracing_manager,
         )
         return cls(
             config=config,
@@ -112,9 +130,10 @@ class AppContainer:
             embedding_client=embedding_client,
             rerank_client=rerank_client,
             generation_client=generation_client,
-            ingestion_pipeline=IngestionPipeline(config, repository, embedding_client),
+            ingestion_pipeline=IngestionPipeline(config, repository, embedding_client, tracing_manager),
             retrieval_pipeline=retrieval_pipeline,
             chat_pipeline=chat_pipeline,
             ragas_runner=RagasRunner(),
             trace_store=trace_store,
+            tracing_manager=tracing_manager,
         )

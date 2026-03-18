@@ -43,7 +43,8 @@ class GatewayClient:
 
     def _mock_post(self, path: str, payload: dict[str, Any]) -> dict[str, Any]:
         if path == "/embeddings":
-            return mock_embeddings(payload.get("input", []))
+            dimension = int(self.config.models.get("embedding", {}).get("dimension", 32))
+            return mock_embeddings(payload.get("input", []), dimensions=dimension)
         if path == "/rerank":
             return mock_rerank(payload.get("query", ""), payload.get("documents", []), int(payload.get("top_n", 5)))
         if path == "/chat/completions":

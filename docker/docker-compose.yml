@@ -8,10 +8,12 @@ services:
       - "8000:8000"
     environment:
       APP_CONFIG_DIR: /workspace/configs
-      VECTORSTORE_BACKEND: ${VECTORSTORE_BACKEND:-memory}
+      VECTORSTORE_BACKEND: ${VECTORSTORE_BACKEND:-milvus}
       MILVUS_URI: ${MILVUS_URI:-http://milvus:19530}
       MODEL_GATEWAY_MODE: ${MODEL_GATEWAY_MODE:-mock}
       PARSED_OUTPUT_DIR: /workspace/data/parsed
+      PHOENIX_COLLECTOR_ENDPOINT: ${PHOENIX_COLLECTOR_ENDPOINT:-http://phoenix:4317}
+      PHOENIX_UI_ENDPOINT: ${PHOENIX_UI_ENDPOINT:-http://phoenix:6006}
     volumes:
       - ../configs:/workspace/configs
       - ../data:/workspace/data
