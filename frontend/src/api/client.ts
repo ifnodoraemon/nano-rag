@@ -7,7 +7,7 @@ import type {
   ChatRequest,
   ChatResponse,
   RetrievalDebugResponse,
-  TraceSummary,
+  PaginatedTracesResponse,
   TraceRecord,
   EvalDatasetSummary,
   EvalReportSummary,
@@ -129,7 +129,7 @@ export const debugApi = {
 export const traceApi = {
   list: (apiKey?: string) =>
     api
-      .get<TraceSummary[]>('/traces', { headers: authHeaders(apiKey) })
+      .get<PaginatedTracesResponse>('/traces', { headers: authHeaders(apiKey) })
       .then((r) => r.data),
   get: (traceId: string, apiKey?: string) =>
     api

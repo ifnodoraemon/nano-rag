@@ -295,7 +295,7 @@ export const useAppStore = create<AppState>((set, get) => ({
     try {
       const { workspace } = get();
       const data = await traceApi.list(workspace.apiKey);
-      set({ traces: data, tracesLoading: false });
+      set({ traces: data.items || [], tracesLoading: false });
     } catch (e) {
       set({ tracesError: formatApiError(e), tracesLoading: false });
     }

@@ -81,6 +81,14 @@ export interface TraceSummary {
   session_id?: string | null;
 }
 
+export interface PaginatedTracesResponse {
+  items: TraceSummary[];
+  total: number;
+  page: number;
+  page_size: number;
+  total_pages: number;
+}
+
 export interface TraceRecord {
   trace_id: string;
   latency_seconds?: number;
