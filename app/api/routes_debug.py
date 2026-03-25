@@ -7,6 +7,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
 from app.api.auth import require_api_key
 from app.eval.dataset import (
+    ROOT,
     get_eval_report_dir,
     list_benchmark_reports,
     list_eval_datasets,
@@ -219,7 +220,7 @@ async def diagnose_auto(
     reports = list_eval_reports()
     if reports:
         latest_report = reports[0]
-        report = load_json(str(resolve_eval_report_path(str(latest_report["path"]))))
+        report = load_json(str(ROOT / latest_report["path"]))
         results = report.get("results", []) if isinstance(report, dict) else []
         for index, result in enumerate(results):
             if (
