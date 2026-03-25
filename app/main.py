@@ -97,18 +97,22 @@ async def health(request: Request) -> dict[str, object]:
         required_capabilities.append("rerank")
 
     gateway_ok = True
-    for capability in required_capabilities:
-        gateway = container.config.gateway_for(capability)
-        reachable, error = await _probe_gateway(
-            gateway["base_url"],
-            gateway["api_key"],
-            container.config.gateway_models_probe_paths,
-        )
-        capability_gateways[capability] = {
-            "reachable": reachable,
-            "error": error,
-        }
-        gateway_ok = gateway_ok and reachable
+    if container.config.gateway_mode == "mock":
+        for capability in required_capabilities:
+            capability_gateways[capability] = {"reachable": True, "error": None}
+    else:
+        for capability in required_capabilities:
+            gateway = container.config.gateway_for(capability)
+            reachable, error = await _probe_gateway(
+                gateway["base_url"],
+                gateway["api_key"],
+                container.config.gateway_models_probe_paths,
+            )
+            capability_gateways[capability] = {
+                "reachable": reachable,
+                "error": error,
+            }
+            gateway_ok = gateway_ok and reachable
 
     try:
         async with httpx.AsyncClient(timeout=5) as client:
