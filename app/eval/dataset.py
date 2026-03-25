@@ -19,11 +19,17 @@ def get_benchmark_report_dir() -> Path:
 
 
 def load_jsonl_dataset(path: str) -> list[dict]:
-    return [json.loads(line) for line in Path(path).read_text(encoding="utf-8").splitlines() if line.strip()]
+    return [
+        json.loads(line)
+        for line in Path(path).read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
 
 
 def save_json(path: str, payload: dict) -> None:
-    Path(path).write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    Path(path).write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
 
 
 def load_json(path: str) -> dict[str, Any]:
@@ -40,7 +46,11 @@ def resolve_data_path(raw_path: str) -> Path:
 
 def _resolve_within(base_dir: Path, raw_path: str, label: str) -> Path:
     base = base_dir.resolve()
-    target = resolve_data_path(raw_path).resolve()
+    path = Path(raw_path)
+    if path.is_absolute():
+        target = path.resolve()
+    else:
+        target = (base_dir / raw_path).resolve()
     try:
         target.relative_to(base)
     except ValueError as exc:
@@ -62,7 +72,11 @@ def resolve_benchmark_report_path(raw_path: str) -> Path:
 
 def summarize_jsonl_dataset(path: Path) -> dict[str, Any]:
     records = load_jsonl_dataset(str(path))
-    sample_queries = [str(record.get("query", "")).strip() for record in records[:3] if str(record.get("query", "")).strip()]
+    sample_queries = [
+        str(record.get("query", "")).strip()
+        for record in records[:3]
+        if str(record.get("query", "")).strip()
+    ]
     return {
         "name": path.name,
         "path": str(path.relative_to(ROOT)),
@@ -76,7 +90,9 @@ def list_eval_datasets() -> list[dict[str, Any]]:
     dataset_dir = get_eval_dataset_dir()
     if not dataset_dir.exists():
         return []
-    return [summarize_jsonl_dataset(path) for path in sorted(dataset_dir.glob("*.jsonl"))]
+    return [
+        summarize_jsonl_dataset(path) for path in sorted(dataset_dir.glob("*.jsonl"))
+    ]
 
 
 def summarize_eval_report(path: Path) -> dict[str, Any]:
@@ -86,7 +102,9 @@ def summarize_eval_report(path: Path) -> dict[str, Any]:
         "name": path.name,
         "path": str(path.relative_to(ROOT)),
         "records": int(payload.get("records", 0)) if isinstance(payload, dict) else 0,
-        "status": str(payload.get("status", "unknown")) if isinstance(payload, dict) else "unknown",
+        "status": str(payload.get("status", "unknown"))
+        if isinstance(payload, dict)
+        else "unknown",
         "aggregate": aggregate if isinstance(aggregate, dict) else {},
         "updated_at": int(path.stat().st_mtime),
     }
@@ -96,7 +114,9 @@ def list_eval_reports() -> list[dict[str, Any]]:
     report_dir = get_eval_report_dir()
     if not report_dir.exists():
         return []
-    reports = [summarize_eval_report(path) for path in sorted(report_dir.glob("*.json"))]
+    reports = [
+        summarize_eval_report(path) for path in sorted(report_dir.glob("*.json"))
+    ]
     reports.sort(key=lambda item: int(item["updated_at"]), reverse=True)
     return reports
 
@@ -105,6 +125,8 @@ def list_benchmark_reports() -> list[dict[str, Any]]:
     report_dir = get_benchmark_report_dir()
     if not report_dir.exists():
         return []
-    reports = [summarize_eval_report(path) for path in sorted(report_dir.glob("*.json"))]
+    reports = [
+        summarize_eval_report(path) for path in sorted(report_dir.glob("*.json"))
+    ]
     reports.sort(key=lambda item: int(item["updated_at"]), reverse=True)
     return reports

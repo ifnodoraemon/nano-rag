@@ -25,8 +25,12 @@ services:
       PHOENIX_COLLECTOR_ENDPOINT: ${PHOENIX_COLLECTOR_ENDPOINT:-http://phoenix:4317}
       PHOENIX_UI_ENDPOINT: ${PHOENIX_UI_ENDPOINT:-http://phoenix:6006}
       PHOENIX_UI_HOST_HEADER: ${PHOENIX_UI_HOST_HEADER:-localhost}
+      RAG_INGEST_ALLOWED_DIRS: /workspace/data/raw
+      EVAL_DATASET_DIR: /workspace/data/eval
     volumes:
       - ../configs:/workspace/configs
+      - ../data/raw:/workspace/data/raw:ro
+      - ../data/eval:/workspace/data/eval:ro
       - app-parsed-data:/workspace/data/parsed
       - app-report-data:/workspace/data/reports
     depends_on:
