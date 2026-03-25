@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+import fcntl
 import json
+import os
+import threading
 from collections import OrderedDict
 from contextlib import contextmanager
 from pathlib import Path
 from time import time
+from typing import Generic, TypeVar
 from uuid import uuid4
 
 from opentelemetry import trace as otel_trace
@@ -14,7 +18,18 @@ from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import BatchSpanProcessor
 
 from app.schemas.business import FeedbackRecord
+from app.schemas.common import PaginatedResponse
 from app.schemas.trace import TraceRecord, TraceSummary
+
+T = TypeVar("T")
+
+TRACE_MAX_RECORDS = int(os.getenv("RAG_TRACE_MAX_RECORDS", "200"))
+FEEDBACK_MAX_RECORDS = int(os.getenv("RAG_FEEDBACK_MAX_RECORDS", "500"))
+OTLP_TLS_ENABLED = os.getenv("OTLP_TLS_ENABLED", "false").lower() in (
+    "true",
+    "1",
+    "yes",
+)
 
 
 class TraceSession:
@@ -36,41 +51,121 @@ class TraceSession:
         return self.events
 
 
-class TraceStore:
-    def __init__(self, max_records: int = 200, persist_dir: Path | None = None) -> None:
+class _PersistedStore(Generic[T]):
+    def __init__(
+        self, max_records: int, persist_dir: Path | None, record_id_field: str
+    ) -> None:
         self.max_records = max_records
         self.persist_dir = persist_dir
-        self._records: OrderedDict[str, TraceRecord] = OrderedDict()
+        self._record_id_field = record_id_field
+        self._records: OrderedDict[str, T] = OrderedDict()
+        self._lock = threading.Lock()
         if self.persist_dir is not None:
             self.persist_dir.mkdir(parents=True, exist_ok=True)
             self._load_persisted()
 
+    @contextmanager
+    def _file_lock(self):
+        if self.persist_dir is None:
+            yield
+            return
+        lock_path = self.persist_dir / ".lock"
+        with open(lock_path, "a") as lock_file:
+            try:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+                yield
+            finally:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+
+    def _load_persisted(self) -> None:
+        assert self.persist_dir is not None
+        files = sorted(
+            self.persist_dir.glob("*.json"), key=lambda path: path.stat().st_mtime
+        )
+        for path in files[-self.max_records :]:
+            try:
+                payload = json.loads(path.read_text(encoding="utf-8"))
+            except json.JSONDecodeError:
+                continue
+            record = self._validate_record(payload)
+            record_id = getattr(record, self._record_id_field)
+            self._records[record_id] = record
+        self._prune_persisted()
+
+    def _prune_persisted(self) -> None:
+        assert self.persist_dir is not None
+        files = sorted(
+            self.persist_dir.glob("*.json"), key=lambda path: path.stat().st_mtime
+        )
+        for path in files[: -self.max_records]:
+            path.unlink(missing_ok=True)
+
+    def _validate_record(self, payload: dict) -> T:
+        raise NotImplementedError
+
+    def _get_record_id(self, record: T) -> str:
+        return getattr(record, self._record_id_field)
+
+    def _write_record(self, record: T) -> None:
+        assert self.persist_dir is not None
+        record_id = self._get_record_id(record)
+        path = self.persist_dir / f"{record_id}.json"
+        path.write_text(record.model_dump_json(indent=2), encoding="utf-8")
+
+    def _save_internal(self, record: T) -> str | None:
+        record_id = self._get_record_id(record)
+        removed_id: str | None = None
+        if record_id in self._records:
+            self._records.pop(record_id)
+        self._records[record_id] = record
+        while len(self._records) > self.max_records:
+            removed_id, _ = self._records.popitem(last=False)
+        return removed_id
+
+    def save(self, record: T) -> T:
+        with self._lock:
+            removed_id = self._save_internal(record)
+            if self.persist_dir is not None:
+                with self._file_lock():
+                    self._write_record(record)
+                    if removed_id:
+                        stale_file = self.persist_dir / f"{removed_id}.json"
+                        if stale_file.exists():
+                            stale_file.unlink()
+                    self._prune_persisted()
+        return record
+
+
+class TraceStore(_PersistedStore[TraceRecord]):
+    def __init__(
+        self, max_records: int = TRACE_MAX_RECORDS, persist_dir: Path | None = None
+    ) -> None:
+        super().__init__(max_records, persist_dir, "trace_id")
+
+    def _validate_record(self, payload: dict) -> TraceRecord:
+        return TraceRecord.model_validate(payload)
+
     def save(self, record: dict[str, object]) -> TraceRecord:
         trace = TraceRecord.model_validate(record)
-        removed_trace_id: str | None = None
-        if trace.trace_id in self._records:
-            self._records.pop(trace.trace_id)
-        self._records[trace.trace_id] = trace
-        while len(self._records) > self.max_records:
-            removed_trace_id, _ = self._records.popitem(last=False)
-        if self.persist_dir is not None:
-            (self.persist_dir / f"{trace.trace_id}.json").write_text(
-                trace.model_dump_json(indent=2),
-                encoding="utf-8",
-            )
-            if removed_trace_id:
-                stale_file = self.persist_dir / f"{removed_trace_id}.json"
-                if stale_file.exists():
-                    stale_file.unlink()
-            self._prune_persisted()
-        return trace
+        return super().save(trace)
+
+    def update(self, record: TraceRecord) -> TraceRecord:
+        return super().save(record)
 
     def get(self, trace_id: str) -> TraceRecord | None:
-        return self._records.get(trace_id)
+        with self._lock:
+            return self._records.get(trace_id)
 
-    def list(self) -> list[TraceSummary]:
+    def list(
+        self, page: int = 1, page_size: int = 20
+    ) -> PaginatedResponse[TraceSummary]:
+        with self._lock:
+            all_records = list(reversed(self._records.values()))
+        total = len(all_records)
+        start = (page - 1) * page_size
+        end = start + page_size
         summaries: list[TraceSummary] = []
-        for record in reversed(self._records.values()):
+        for record in all_records[start:end]:
             summaries.append(
                 TraceSummary(
                     trace_id=record.trace_id,
@@ -84,76 +179,25 @@ class TraceStore:
                     context_count=len(record.contexts),
                 )
             )
-        return summaries
-
-    def _load_persisted(self) -> None:
-        assert self.persist_dir is not None
-        files = sorted(self.persist_dir.glob("*.json"), key=lambda path: path.stat().st_mtime)
-        for path in files[-self.max_records :]:
-            try:
-                payload = json.loads(path.read_text(encoding="utf-8"))
-            except json.JSONDecodeError:
-                continue
-            trace = TraceRecord.model_validate(payload)
-            self._records[trace.trace_id] = trace
-        self._prune_persisted()
-
-    def _prune_persisted(self) -> None:
-        assert self.persist_dir is not None
-        files = sorted(self.persist_dir.glob("*.json"), key=lambda path: path.stat().st_mtime)
-        for path in files[:-self.max_records]:
-            path.unlink(missing_ok=True)
+        return PaginatedResponse.create(summaries, total, page, page_size)
 
 
-class FeedbackStore:
-    def __init__(self, max_records: int = 500, persist_dir: Path | None = None) -> None:
-        self.max_records = max_records
-        self.persist_dir = persist_dir
-        self._records: OrderedDict[str, FeedbackRecord] = OrderedDict()
-        if self.persist_dir is not None:
-            self.persist_dir.mkdir(parents=True, exist_ok=True)
-            self._load_persisted()
+class FeedbackStore(_PersistedStore[FeedbackRecord]):
+    def __init__(
+        self, max_records: int = FEEDBACK_MAX_RECORDS, persist_dir: Path | None = None
+    ) -> None:
+        super().__init__(max_records, persist_dir, "feedback_id")
+
+    def _validate_record(self, payload: dict) -> FeedbackRecord:
+        return FeedbackRecord.model_validate(payload)
 
     def save(self, record: dict[str, object]) -> FeedbackRecord:
         feedback = FeedbackRecord.model_validate(record)
-        removed_feedback_id: str | None = None
-        if feedback.feedback_id in self._records:
-            self._records.pop(feedback.feedback_id)
-        self._records[feedback.feedback_id] = feedback
-        while len(self._records) > self.max_records:
-            removed_feedback_id, _ = self._records.popitem(last=False)
-        if self.persist_dir is not None:
-            (self.persist_dir / f"{feedback.feedback_id}.json").write_text(
-                feedback.model_dump_json(indent=2),
-                encoding="utf-8",
-            )
-            if removed_feedback_id:
-                stale_file = self.persist_dir / f"{removed_feedback_id}.json"
-                if stale_file.exists():
-                    stale_file.unlink()
-            self._prune_persisted()
-        return feedback
+        return super().save(feedback)
 
     def list(self) -> list[FeedbackRecord]:
-        return list(reversed(self._records.values()))
-
-    def _load_persisted(self) -> None:
-        assert self.persist_dir is not None
-        files = sorted(self.persist_dir.glob("*.json"), key=lambda path: path.stat().st_mtime)
-        for path in files[-self.max_records :]:
-            try:
-                payload = json.loads(path.read_text(encoding="utf-8"))
-            except json.JSONDecodeError:
-                continue
-            feedback = FeedbackRecord.model_validate(payload)
-            self._records[feedback.feedback_id] = feedback
-        self._prune_persisted()
-
-    def _prune_persisted(self) -> None:
-        assert self.persist_dir is not None
-        files = sorted(self.persist_dir.glob("*.json"), key=lambda path: path.stat().st_mtime)
-        for path in files[:-self.max_records]:
-            path.unlink(missing_ok=True)
+        with self._lock:
+            return list(reversed(self._records.values()))
 
 
 class TracingManager:
@@ -161,8 +205,16 @@ class TracingManager:
         self.service_name = service_name
         self.collector_endpoint = collector_endpoint
         if collector_endpoint:
-            provider = TracerProvider(resource=Resource.create({"service.name": service_name}))
-            provider.add_span_processor(BatchSpanProcessor(OTLPSpanExporter(endpoint=collector_endpoint, insecure=True)))
+            provider = TracerProvider(
+                resource=Resource.create({"service.name": service_name})
+            )
+            provider.add_span_processor(
+                BatchSpanProcessor(
+                    OTLPSpanExporter(
+                        endpoint=collector_endpoint, insecure=not OTLP_TLS_ENABLED
+                    )
+                )
+            )
             otel_trace.set_tracer_provider(provider)
         self.tracer = otel_trace.get_tracer(service_name)
 

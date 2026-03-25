@@ -14,13 +14,28 @@ class RerankClient(GatewayClient):
         super().__init__(config, config.settings["timeout"]["rerank_seconds"], "rerank")
         self.alias = config.models["rerank"]["default_alias"]
 
-    async def rerank(self, query: str, documents: list[str], top_k: int) -> list[RerankResult]:
+    async def rerank(
+        self, query: str, documents: list[str], top_k: int
+    ) -> list[RerankResult]:
         if not documents:
             return []
-        payload = {"model": self.alias, "query": query, "documents": documents, "top_n": top_k}
+        payload = {
+            "model": self.alias,
+            "query": query,
+            "documents": documents,
+            "top_n": top_k,
+        }
         data = await self.post("/rerank", payload)
         results = data.get("results", [])
-        return [
-            RerankResult(index=result["index"], score=float(result["relevance_score"]), document=documents[result["index"]])
-            for result in results
-        ]
+        valid_results: list[RerankResult] = []
+        for result in results:
+            idx = result.get("index", -1)
+            if 0 <= idx < len(documents):
+                valid_results.append(
+                    RerankResult(
+                        index=idx,
+                        score=float(result.get("relevance_score", 0.0)),
+                        document=documents[idx],
+                    )
+                )
+        return valid_results

@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+import logging
+
 from fastapi import Header, HTTPException, Request
+
+logger = logging.getLogger(__name__)
 
 
 def require_api_key(
@@ -11,6 +15,10 @@ def require_api_key(
     container = request.app.state.container
     keys = container.config.business_api_keys
     if not keys:
+        logger.warning(
+            "RAG_API_KEYS not configured. API authentication is disabled. "
+            "This is not recommended for production environments."
+        )
         return
     token = x_api_key
     if authorization and authorization.lower().startswith("bearer "):

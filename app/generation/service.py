@@ -34,7 +34,9 @@ class GenerationService:
         self.tracing_manager = tracing_manager
 
     async def run(self, payload: ChatRequest) -> ChatResponse:
-        with self.tracing_manager.span("generation.run", {"generation.query": payload.query}):
+        with self.tracing_manager.span(
+            "generation.run", {"generation.query": payload.query}
+        ):
             contexts, trace = await self.retrieval_pipeline.run(
                 payload.query,
                 payload.top_k,
@@ -55,7 +57,9 @@ class GenerationService:
             record = self.trace_store.get(str(trace["trace_id"]))
             if record is not None:
                 record.answer = response.answer
-                record.citations = [citation.model_dump() for citation in response.citations]
+                record.citations = [
+                    citation.model_dump() for citation in response.citations
+                ]
                 record.model_alias = self.generation_client.alias
                 record.kb_id = payload.kb_id or record.kb_id
                 record.tenant_id = payload.tenant_id or record.tenant_id
@@ -64,7 +68,9 @@ class GenerationService:
                 record.prompt_version = str(self.config.settings["prompt"]["version"])
                 record.prompt_messages = messages
                 record.generation_finish_reason = (
-                    str(result["finish_reason"]) if result.get("finish_reason") is not None else None
+                    str(result["finish_reason"])
+                    if result.get("finish_reason") is not None
+                    else None
                 )
                 record.generation_usage = result.get("usage") or {}
                 record.step_latencies = {
@@ -72,4 +78,5 @@ class GenerationService:
                     "generation_seconds": generation_seconds,
                     "end_to_end_seconds": float(record.latency_seconds or 0.0),
                 }
+                self.trace_store.update(record)
             return response

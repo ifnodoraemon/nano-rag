@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from time import time
 from uuid import uuid4
 
@@ -29,14 +30,24 @@ from app.benchmark.service import build_benchmark_report
 
 router = APIRouter(prefix="/v1/rag", tags=["rag"])
 
-SUPPORTED_KB_ID = "default"
+
+def _get_supported_kb_ids() -> set[str]:
+    raw = os.getenv("RAG_SUPPORTED_KB_IDS", "default")
+    return {item.strip() for item in raw.split(",") if item.strip()}
+
+
+SUPPORTED_KB_IDS = _get_supported_kb_ids()
 
 
 def _ensure_supported_kb_id(kb_id: str) -> None:
-    if kb_id != SUPPORTED_KB_ID:
+    if kb_id not in SUPPORTED_KB_IDS:
         raise HTTPException(
             status_code=400,
-            detail=f"kb_id '{kb_id}' is not supported yet; current deployment only supports '{SUPPORTED_KB_ID}'",
+            detail=(
+                f"kb_id '{kb_id}' is not supported. "
+                f"Supported kb_ids: {', '.join(sorted(SUPPORTED_KB_IDS))}. "
+                "Set RAG_SUPPORTED_KB_IDS env var to configure additional knowledge bases."
+            ),
         )
 
 
@@ -48,15 +59,27 @@ def _ensure_trace_scope(
 ) -> None:
     trace_kb_id = trace.kb_id or "default"
     if trace_kb_id != kb_id:
-        raise HTTPException(status_code=403, detail="trace does not belong to the requested kb_id")
+        raise HTTPException(
+            status_code=403, detail="trace does not belong to the requested kb_id"
+        )
     if (trace.tenant_id or None) != (tenant_id or None):
-        raise HTTPException(status_code=403, detail="trace does not belong to the requested tenant_id")
+        raise HTTPException(
+            status_code=403, detail="trace does not belong to the requested tenant_id"
+        )
     if trace.session_id and trace.session_id != session_id:
-        raise HTTPException(status_code=403, detail="trace does not belong to the requested session_id")
+        raise HTTPException(
+            status_code=403, detail="trace does not belong to the requested session_id"
+        )
 
 
-@router.post("/chat", response_model=BusinessChatResponse, dependencies=[Depends(require_api_key)])
-async def rag_chat(payload: BusinessChatRequest, request: Request) -> BusinessChatResponse:
+@router.post(
+    "/chat",
+    response_model=BusinessChatResponse,
+    dependencies=[Depends(require_api_key)],
+)
+async def rag_chat(
+    payload: BusinessChatRequest, request: Request
+) -> BusinessChatResponse:
     _ensure_supported_kb_id(payload.kb_id)
     container = request.app.state.container
     response = await container.chat_pipeline.run(
@@ -79,8 +102,14 @@ async def rag_chat(payload: BusinessChatRequest, request: Request) -> BusinessCh
     )
 
 
-@router.post("/ingest", response_model=BusinessIngestResponse, dependencies=[Depends(require_api_key)])
-async def rag_ingest(payload: BusinessIngestRequest, request: Request) -> BusinessIngestResponse:
+@router.post(
+    "/ingest",
+    response_model=BusinessIngestResponse,
+    dependencies=[Depends(require_api_key)],
+)
+async def rag_ingest(
+    payload: BusinessIngestRequest, request: Request
+) -> BusinessIngestResponse:
     _ensure_supported_kb_id(payload.kb_id)
     container = request.app.state.container
     response = await container.ingestion_pipeline.run(
@@ -97,13 +126,19 @@ async def rag_ingest(payload: BusinessIngestRequest, request: Request) -> Busine
     )
 
 
-@router.post("/feedback", response_model=FeedbackResponse, dependencies=[Depends(require_api_key)])
+@router.post(
+    "/feedback",
+    response_model=FeedbackResponse,
+    dependencies=[Depends(require_api_key)],
+)
 async def rag_feedback(payload: FeedbackRequest, request: Request) -> FeedbackResponse:
     _ensure_supported_kb_id(payload.kb_id)
     container = request.app.state.container
     trace = container.trace_store.get(payload.trace_id)
     if trace is None:
-        raise HTTPException(status_code=404, detail=f"trace not found: {payload.trace_id}")
+        raise HTTPException(
+            status_code=404, detail=f"trace not found: {payload.trace_id}"
+        )
     _ensure_trace_scope(trace, payload.kb_id, payload.tenant_id, payload.session_id)
     feedback_id = f"fb-{uuid4().hex[:16]}"
     container.feedback_store.save(
@@ -122,7 +157,11 @@ async def rag_feedback(payload: FeedbackRequest, request: Request) -> FeedbackRe
     return FeedbackResponse(status="ok", feedback_id=feedback_id)
 
 
-@router.get("/traces/{trace_id}", response_model=TraceRecord, dependencies=[Depends(require_api_key)])
+@router.get(
+    "/traces/{trace_id}",
+    response_model=TraceRecord,
+    dependencies=[Depends(require_api_key)],
+)
 async def rag_trace(
     trace_id: str,
     request: Request,
@@ -139,8 +178,14 @@ async def rag_trace(
     return record
 
 
-@router.post("/benchmark/run", response_model=BenchmarkRunResponse, dependencies=[Depends(require_api_key)])
-async def rag_benchmark(payload: BenchmarkRunRequest, request: Request) -> BenchmarkRunResponse:
+@router.post(
+    "/benchmark/run",
+    response_model=BenchmarkRunResponse,
+    dependencies=[Depends(require_api_key)],
+)
+async def rag_benchmark(
+    payload: BenchmarkRunRequest, request: Request
+) -> BenchmarkRunResponse:
     container = request.app.state.container
     try:
         dataset_path = resolve_eval_dataset_path(payload.dataset_path)
@@ -165,4 +210,6 @@ async def rag_benchmark(payload: BenchmarkRunRequest, request: Request) -> Bench
         report_dir.mkdir(parents=True, exist_ok=True)
         output_path = str(report_dir / f"{uuid4().hex[:12]}_benchmark.json")
     save_json(output_path, benchmark_report)
-    return BenchmarkRunResponse(status="ok", output_path=output_path, report=benchmark_report)
+    return BenchmarkRunResponse(
+        status="ok", output_path=output_path, report=benchmark_report
+    )

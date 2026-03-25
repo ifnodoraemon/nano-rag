@@ -1,13 +1,21 @@
 from __future__ import annotations
 
+DEFAULT_SYSTEM_PROMPT = """你是一个专业的问答助手。请基于提供的上下文回答问题，并在答案中标注引用来源。
+如果上下文中没有足够的信息回答问题，请明确说明。"""
+
 
 class PromptBuilder:
     def __init__(self, prompts: dict) -> None:
-        self.system_prompt = prompts["chat"]["system"]
+        self.system_prompt = prompts.get("chat", {}).get(
+            "system", DEFAULT_SYSTEM_PROMPT
+        )
 
-    def build_messages(self, query: str, contexts: list[dict[str, object]]) -> list[dict[str, str]]:
+    def build_messages(
+        self, query: str, contexts: list[dict[str, object]]
+    ) -> list[dict[str, str]]:
         context_text = "\n\n".join(
-            f"[{item['chunk_id']}] {item['text']}" for item in contexts
+            f"[{item.get('chunk_id', 'unknown')}] {item.get('text', '')}"
+            for item in contexts
         )
         return [
             {"role": "system", "content": self.system_prompt},

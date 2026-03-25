@@ -1,5 +1,6 @@
 import argparse
 import asyncio
+import logging
 import sys
 from pathlib import Path
 
@@ -12,6 +13,9 @@ from app.core.config import AppContainer
 from app.eval.dataset import get_eval_report_dir, load_jsonl_dataset, save_json
 from app.eval.service import materialize_eval_records
 
+logging.basicConfig(level=logging.INFO, format="%(message)s")
+logger = logging.getLogger(__name__)
+
 
 def resolve_project_path(raw_path: str) -> Path:
     path = Path(raw_path)
@@ -23,7 +27,9 @@ def resolve_project_path(raw_path: str) -> Path:
 def main() -> int:
     parser = argparse.ArgumentParser(description="Run benchmark for nano-rag.")
     parser.add_argument("--dataset", required=True, help="Path to JSONL dataset.")
-    parser.add_argument("--output", required=False, help="Path to output benchmark JSON.")
+    parser.add_argument(
+        "--output", required=False, help="Path to output benchmark JSON."
+    )
     args = parser.parse_args()
 
     dataset_path = resolve_project_path(args.dataset)
@@ -46,7 +52,7 @@ def main() -> int:
     )
     output_path.parent.mkdir(parents=True, exist_ok=True)
     save_json(str(output_path), benchmark_report)
-    print(output_path)
+    logger.info("%s", output_path)
     return 0
 
 

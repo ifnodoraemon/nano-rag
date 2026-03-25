@@ -8,7 +8,8 @@ def test_trace_store_saves_and_lists_latest_first() -> None:
     store.save({"trace_id": "t1", "query": "q1", "latency_seconds": 0.1})
     store.save({"trace_id": "t2", "query": "q2", "latency_seconds": 0.2})
 
-    summaries = store.list()
+    result = store.list()
+    summaries = result.items
 
     assert summaries[0].trace_id == "t2"
     assert store.get("t1") is not None
@@ -25,7 +26,8 @@ def test_trace_store_loads_persisted_records(tmp_path) -> None:
     store = TraceStore(persist_dir=trace_dir)
 
     assert store.get("trace-1") is not None
-    assert store.list()[0].trace_id == "trace-1"
+    result = store.list()
+    assert result.items[0].trace_id == "trace-1"
 
 
 def test_trace_store_prunes_old_persisted_files(tmp_path) -> None:

@@ -1,5 +1,23 @@
 import axios, { AxiosError } from 'axios';
 
+import type {
+  HealthResponse,
+  IngestRequest,
+  IngestResponse,
+  ChatRequest,
+  ChatResponse,
+  RetrievalDebugResponse,
+  TraceSummary,
+  TraceRecord,
+  EvalDatasetSummary,
+  EvalReportSummary,
+  EvalReportDetail,
+  EvalRunResponse,
+  BenchmarkRunResponse,
+  BenchmarkReportSummary,
+  DiagnosisResponse,
+} from '../types';
+
 const API_BASE = import.meta.env.VITE_API_BASE || '';
 
 const api = axios.create({
@@ -46,18 +64,18 @@ export function formatApiError(error: unknown): string {
 }
 
 export const healthApi = {
-  get: () => api.get<import('../types').HealthResponse>('/health').then((r) => r.data),
+  get: () => api.get<HealthResponse>('/health').then((r) => r.data),
 };
 
 export const ingestApi = {
   run: (path: string) =>
-    api.post<import('../types').IngestResponse>('/ingest', { path }).then((r) => r.data),
+    api.post<IngestResponse>('/ingest', { path }).then((r) => r.data),
 };
 
 export const businessIngestApi = {
-  run: (payload: import('../types').IngestRequest, apiKey?: string) =>
+  run: (payload: IngestRequest, apiKey?: string) =>
     api
-      .post<import('../types').IngestResponse>('/v1/rag/ingest', payload, {
+      .post<IngestResponse>('/v1/rag/ingest', payload, {
         headers: authHeaders(apiKey),
       })
       .then((r) => r.data),
@@ -66,14 +84,14 @@ export const businessIngestApi = {
 export const chatApi = {
   send: (query: string, topK?: number) =>
     api
-      .post<import('../types').ChatResponse>('/chat', { query, top_k: topK })
+      .post<ChatResponse>('/chat', { query, top_k: topK })
       .then((r) => r.data),
 };
 
 export const businessChatApi = {
-  send: (payload: import('../types').ChatRequest, apiKey?: string) =>
+  send: (payload: ChatRequest, apiKey?: string) =>
     api
-      .post<import('../types').ChatResponse>('/v1/rag/chat', payload, {
+      .post<ChatResponse>('/v1/rag/chat', payload, {
         headers: authHeaders(apiKey),
       })
       .then((r) => r.data),
@@ -100,9 +118,9 @@ export const businessFeedbackApi = {
 };
 
 export const debugApi = {
-  retrieve: (payload: import('../types').ChatRequest, apiKey?: string) =>
+  retrieve: (payload: ChatRequest, apiKey?: string) =>
     api
-      .post<import('../types').RetrievalDebugResponse>('/retrieve/debug', payload, {
+      .post<RetrievalDebugResponse>('/retrieve/debug', payload, {
         headers: authHeaders(apiKey),
       })
       .then((r) => r.data),
@@ -111,33 +129,33 @@ export const debugApi = {
 export const traceApi = {
   list: (apiKey?: string) =>
     api
-      .get<import('../types').TraceSummary[]>('/traces', { headers: authHeaders(apiKey) })
+      .get<TraceSummary[]>('/traces', { headers: authHeaders(apiKey) })
       .then((r) => r.data),
   get: (traceId: string, apiKey?: string) =>
     api
-      .get<import('../types').TraceRecord>(`/traces/${traceId}`, { headers: authHeaders(apiKey) })
+      .get<TraceRecord>(`/traces/${traceId}`, { headers: authHeaders(apiKey) })
       .then((r) => r.data),
 };
 
 export const evalApi = {
   listDatasets: (apiKey?: string) =>
     api
-      .get<import('../types').EvalDatasetSummary[]>('/eval/datasets', { headers: authHeaders(apiKey) })
+      .get<EvalDatasetSummary[]>('/eval/datasets', { headers: authHeaders(apiKey) })
       .then((r) => r.data),
   listReports: (apiKey?: string) =>
     api
-      .get<import('../types').EvalReportSummary[]>('/eval/reports', { headers: authHeaders(apiKey) })
+      .get<EvalReportSummary[]>('/eval/reports', { headers: authHeaders(apiKey) })
       .then((r) => r.data),
   getReport: (path: string, apiKey?: string) =>
     api
-      .get<import('../types').EvalReportDetail>('/eval/reports/detail', {
+      .get<EvalReportDetail>('/eval/reports/detail', {
         params: { path },
         headers: authHeaders(apiKey),
       })
       .then((r) => r.data),
   run: (datasetPath: string, outputPath?: string, apiKey?: string) =>
     api
-      .post<import('../types').EvalRunResponse>(
+      .post<EvalRunResponse>(
         '/eval/run',
         {
           dataset_path: datasetPath,
@@ -153,7 +171,7 @@ export const evalApi = {
 export const benchmarkApi = {
   listReports: (apiKey?: string) =>
     api
-      .get<import('../types').BenchmarkReportSummary[]>('/benchmark/reports', { headers: authHeaders(apiKey) })
+      .get<BenchmarkReportSummary[]>('/benchmark/reports', { headers: authHeaders(apiKey) })
       .then((r) => r.data),
   getReport: (path: string, apiKey?: string) =>
     api
@@ -164,7 +182,7 @@ export const benchmarkApi = {
       .then((r) => r.data),
   run: (datasetPath: string, outputPath?: string, apiKey?: string) =>
     api
-      .post<import('../types').BenchmarkRunResponse>(
+      .post<BenchmarkRunResponse>(
         '/v1/rag/benchmark/run',
         {
           dataset_path: datasetPath,
@@ -180,7 +198,7 @@ export const benchmarkApi = {
 export const diagnosisApi = {
   auto: (includeAi = true, apiKey?: string) =>
     api
-      .post<import('../types').DiagnosisResponse>(
+      .post<DiagnosisResponse>(
         '/diagnose/auto',
         {
           include_ai: includeAi,
@@ -192,7 +210,7 @@ export const diagnosisApi = {
       .then((r) => r.data),
   trace: (traceId: string, includeAi = false, apiKey?: string) =>
     api
-      .post<import('../types').DiagnosisResponse>(
+      .post<DiagnosisResponse>(
         '/diagnose/trace',
         {
           trace_id: traceId,
@@ -205,7 +223,7 @@ export const diagnosisApi = {
       .then((r) => r.data),
   eval: (reportPath: string, resultIndex: number, includeAi = false, apiKey?: string) =>
     api
-      .post<import('../types').DiagnosisResponse>(
+      .post<DiagnosisResponse>(
         '/diagnose/eval',
         {
           report_path: reportPath,

@@ -8,6 +8,7 @@ from app.main import health
 
 @pytest.mark.asyncio
 async def test_health_route() -> None:
+    fake_trace_list = SimpleNamespace(total=0, items=[])
     fake_container = SimpleNamespace(
         config=SimpleNamespace(
             gateway_models_probe_paths=("/v1/models", "/models"),
@@ -22,8 +23,10 @@ async def test_health_route() -> None:
             parsed_dir="/tmp/parsed",
             rerank_enabled=False,
         ),
-        repository=SimpleNamespace(stats=lambda: {"backend": "memory", "documents": 0, "chunks": 0}),
-        trace_store=SimpleNamespace(list=lambda: []),
+        repository=SimpleNamespace(
+            stats=lambda: {"backend": "memory", "documents": 0, "chunks": 0}
+        ),
+        trace_store=SimpleNamespace(list=lambda: fake_trace_list),
     )
 
     class FakeResponse:
@@ -45,7 +48,9 @@ async def test_health_route() -> None:
                 return FakeResponse(200)
             return FakeResponse(404)
 
-    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(container=fake_container)))
+    request = SimpleNamespace(
+        app=SimpleNamespace(state=SimpleNamespace(container=fake_container))
+    )
 
     with patch("app.main.httpx.AsyncClient", FakeAsyncClient):
         payload = await health(request)

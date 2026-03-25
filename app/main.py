@@ -6,10 +6,8 @@ import httpx
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
-from app.api.routes_chat import router as chat_router
 from app.api.routes_business import router as business_router
 from app.api.routes_debug import router as debug_router
-from app.api.routes_ingest import router as ingest_router
 from app.core.config import AppContainer
 from app.core.exceptions import ModelGatewayError
 from app.core.logging import configure_logging
@@ -20,16 +18,17 @@ async def lifespan(app: FastAPI):
     configure_logging()
     app.state.container = AppContainer.from_env()
     yield
+    await app.state.container.close()
 
 
 app = FastAPI(title="nano-rag", version="0.1.0", lifespan=lifespan)
-app.include_router(chat_router)
-app.include_router(ingest_router)
 app.include_router(debug_router)
 app.include_router(business_router)
 
 
-async def _probe_gateway(base_url: str, api_key: str, probe_paths: tuple[str, ...]) -> tuple[bool, str | None]:
+async def _probe_gateway(
+    base_url: str, api_key: str, probe_paths: tuple[str, ...]
+) -> tuple[bool, str | None]:
     try:
         async with httpx.AsyncClient(timeout=5) as client:
             errors: list[str] = []
@@ -47,7 +46,9 @@ async def _probe_gateway(base_url: str, api_key: str, probe_paths: tuple[str, ..
 
 
 @app.exception_handler(ModelGatewayError)
-async def handle_model_gateway_error(_: Request, exc: ModelGatewayError) -> JSONResponse:
+async def handle_model_gateway_error(
+    _: Request, exc: ModelGatewayError
+) -> JSONResponse:
     return JSONResponse(status_code=502, content={"detail": str(exc)})
 
 
@@ -71,7 +72,6 @@ async def health(request: Request) -> dict[str, object]:
             container.config.gateway_models_probe_paths,
         )
         capability_gateways[capability] = {
-            "base_url": gateway["base_url"],
             "reachable": reachable,
             "error": error,
         }
@@ -82,7 +82,9 @@ async def health(request: Request) -> dict[str, object]:
             headers = {}
             if container.config.phoenix_ui_host_header:
                 headers["Host"] = container.config.phoenix_ui_host_header
-            response = await client.get(container.config.phoenix_ui_endpoint, headers=headers)
+            response = await client.get(
+                container.config.phoenix_ui_endpoint, headers=headers
+            )
             phoenix_ok = response.status_code < 500
     except httpx.HTTPError as exc:
         phoenix_error = str(exc)
@@ -96,24 +98,26 @@ async def health(request: Request) -> dict[str, object]:
         vectorstore_status = "error"
         vectorstore_error = str(exc)
 
-    status = "ok" if gateway_ok and phoenix_ok and vectorstore_status == "ok" else "degraded"
+    status = (
+        "ok" if gateway_ok and phoenix_ok and vectorstore_status == "ok" else "degraded"
+    )
     return {
         "status": status,
         "service": "nano-rag",
         "vectorstore_backend": os.getenv("VECTORSTORE_BACKEND", "memory"),
         "gateway_mode": container.config.gateway_mode,
         "gateway": {
-            "base_url": container.config.gateway_for("generation")["base_url"],
             "reachable": gateway_ok,
             "error": next(
-                (details["error"] for details in capability_gateways.values() if details["error"]),
+                (
+                    details["error"]
+                    for details in capability_gateways.values()
+                    if details["error"]
+                ),
                 None,
             ),
-            "capabilities": capability_gateways,
         },
         "phoenix": {
-            "collector_endpoint": container.config.phoenix_collector_endpoint,
-            "ui_endpoint": container.config.phoenix_ui_endpoint,
             "reachable": phoenix_ok,
             "error": phoenix_error,
         },
@@ -122,6 +126,5 @@ async def health(request: Request) -> dict[str, object]:
             "error": vectorstore_error,
             "details": vectorstore_stats,
         },
-        "parsed_dir": str(container.config.parsed_dir),
-        "trace_count": len(container.trace_store.list()),
+        "trace_count": container.trace_store.list().total,
     }

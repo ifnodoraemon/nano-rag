@@ -1,6 +1,11 @@
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 from app.schemas.chat import ChatRequest
+
+if TYPE_CHECKING:
+    from app.core.config import AppContainer
 
 
 def _context_to_text(context: object) -> str:
@@ -11,7 +16,9 @@ def _context_to_text(context: object) -> str:
     return str(context)
 
 
-async def materialize_eval_records(container, records: list[dict]) -> list[dict]:
+async def materialize_eval_records(
+    container: AppContainer, records: list[dict]
+) -> list[dict]:
     prepared_records: list[dict] = []
     for index, record in enumerate(records):
         prepared = dict(record)
@@ -46,7 +53,9 @@ async def materialize_eval_records(container, records: list[dict]) -> list[dict]
                 if trace is not None:
                     trace.sample_id = str(prepared["sample_id"])
             if not retrieved_contexts:
-                prepared["retrieved_contexts"] = [_context_to_text(context) for context in chat_response.contexts]
+                prepared["retrieved_contexts"] = [
+                    _context_to_text(context) for context in chat_response.contexts
+                ]
                 retrieved_contexts = prepared["retrieved_contexts"]
 
         if not retrieved_contexts:
@@ -57,7 +66,9 @@ async def materialize_eval_records(container, records: list[dict]) -> list[dict]
                 tenant_id=tenant_id,
                 session_id=session_id,
             )
-            prepared["retrieved_contexts"] = [_context_to_text(context) for context in retrieval.contexts]
+            prepared["retrieved_contexts"] = [
+                _context_to_text(context) for context in retrieval.contexts
+            ]
 
         prepared_records.append(prepared)
     return prepared_records

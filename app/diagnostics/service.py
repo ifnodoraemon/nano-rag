@@ -1,22 +1,18 @@
 from __future__ import annotations
 
 import json
-import re
+import logging
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 from app.schemas.diagnosis import DiagnosisFinding, DiagnosisResponse
 from app.schemas.trace import TraceRecord
+from app.utils.text import normalize_text
 
+logger = logging.getLogger(__name__)
 
-def _normalize_text(raw: object) -> str:
-    text = str(raw or "").strip()
-    if not text:
-        return ""
-    text = re.sub(r"(\*\*|__|`)", "", text)
-    text = re.sub(r"\s*\[[^\[\]]+:[^\[\]]+\](?=[。！？.!?]?\s*$)", "", text)
-    text = re.sub(r"[。！？.!?]+\s*$", "", text)
-    text = re.sub(r"\s+", "", text)
-    return text.strip()
+if TYPE_CHECKING:
+    from app.model_client.generation import GenerationClient
 
 
 def _looks_like_refusal(answer: str) -> bool:
@@ -32,7 +28,7 @@ def _looks_like_refusal(answer: str) -> bool:
 
 @dataclass
 class DiagnosisService:
-    generation_client: object | None = None
+    generation_client: GenerationClient | None = None
 
     def diagnose_trace(self, trace: TraceRecord) -> DiagnosisResponse:
         findings: list[DiagnosisFinding] = []
@@ -153,7 +149,9 @@ class DiagnosisService:
             findings=findings,
         )
 
-    def diagnose_eval_result(self, report: dict, result_index: int) -> DiagnosisResponse:
+    def diagnose_eval_result(
+        self, report: dict, result_index: int
+    ) -> DiagnosisResponse:
         results = report.get("results", []) if isinstance(report, dict) else []
         if result_index < 0 or result_index >= len(results):
             raise IndexError(f"eval result index out of range: {result_index}")
@@ -240,7 +238,9 @@ class DiagnosisService:
             findings=findings,
         )
 
-    async def add_ai_suggestion(self, diagnosis: DiagnosisResponse, payload: dict) -> DiagnosisResponse:
+    async def add_ai_suggestion(
+        self, diagnosis: DiagnosisResponse, payload: dict
+    ) -> DiagnosisResponse:
         if self.generation_client is None:
             return diagnosis
 
@@ -267,5 +267,6 @@ class DiagnosisService:
             result = await self.generation_client.generate(messages)
             diagnosis.ai_suggestion = str(result.get("content", "")).strip() or None
         except Exception as exc:  # pragma: no cover
+            logger.debug("ai diagnosis suggestion failed: %s", exc)
             diagnosis.ai_suggestion = f"AI diagnosis unavailable: {exc}"
         return diagnosis

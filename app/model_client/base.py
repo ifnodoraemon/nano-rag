@@ -12,13 +12,16 @@ if TYPE_CHECKING:
 
 
 class GatewayClient:
-    def __init__(self, config: AppConfig, timeout_seconds: int, capability: str) -> None:
+    def __init__(
+        self, config: AppConfig, timeout_seconds: int, capability: str
+    ) -> None:
         self.config = config
         self.capability = capability
         gateway = config.gateway_for(capability)
         self.base_url = gateway["base_url"].rstrip("/")
         self.api_key = gateway["api_key"]
         self.timeout = timeout_seconds
+        self._client: httpx.AsyncClient | None = None
 
     @property
     def headers(self) -> dict[str, str]:
@@ -27,14 +30,26 @@ class GatewayClient:
             "Content-Type": "application/json",
         }
 
+    def _get_client(self) -> httpx.AsyncClient:
+        if self._client is None:
+            self._client = httpx.AsyncClient(timeout=self.timeout)
+        return self._client
+
+    async def close(self) -> None:
+        if self._client is not None:
+            await self._client.aclose()
+            self._client = None
+
     async def post(self, path: str, payload: dict[str, Any]) -> dict[str, Any]:
         if self.config.gateway_mode == "mock":
             return self._mock_post(path, payload)
         try:
-            async with httpx.AsyncClient(timeout=self.timeout) as client:
-                response = await client.post(f"{self.base_url}{path}", headers=self.headers, json=payload)
-                response.raise_for_status()
-                return response.json()
+            client = self._get_client()
+            response = await client.post(
+                f"{self.base_url}{path}", headers=self.headers, json=payload
+            )
+            response.raise_for_status()
+            return response.json()
         except httpx.TimeoutException as exc:
             raise ModelGatewayError(
                 f"{self.capability} gateway timeout on {path}. Check upstream provider settings."
@@ -45,14 +60,36 @@ class GatewayClient:
                 f"{self.capability} gateway request failed on {path}: {exc.response.status_code} {detail}"
             ) from exc
         except httpx.HTTPError as exc:
-            raise ModelGatewayError(f"{self.capability} gateway connection failed on {path}: {exc}") from exc
+            raise ModelGatewayError(
+                f"{self.capability} gateway connection failed on {path}: {exc}"
+            ) from exc
 
     def _mock_post(self, path: str, payload: dict[str, Any]) -> dict[str, Any]:
         if path == "/embeddings":
-            dimension = int(self.config.models.get("embedding", {}).get("dimension", 32))
-            return mock_embeddings(payload.get("input", []), dimensions=dimension)
+            texts = payload.get("input", []) or []
+            if not texts:
+                return {"data": []}
+            dimension = int(
+                self.config.models.get("embedding", {}).get("dimension", 32)
+            )
+            return mock_embeddings(texts, dimensions=dimension)
         if path == "/rerank":
-            return mock_rerank(payload.get("query", ""), payload.get("documents", []), int(payload.get("top_n", 5)))
+            query = payload.get("query", "") or ""
+            documents = payload.get("documents", []) or []
+            top_n = int(payload.get("top_n", 5) or 5)
+            if not documents:
+                return {"results": []}
+            return mock_rerank(query, documents, top_n)
         if path == "/chat/completions":
-            return mock_chat(payload.get("messages", []))
+            messages = payload.get("messages", []) or []
+            if not messages:
+                return {
+                    "choices": [
+                        {
+                            "message": {"role": "assistant", "content": ""},
+                            "finish_reason": "stop",
+                        }
+                    ]
+                }
+            return mock_chat(messages)
         raise ModelGatewayError(f"Mock model gateway does not support {path}")

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import math
+import re
+import threading
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
@@ -16,6 +18,14 @@ if TYPE_CHECKING:
     from app.core.config import AppConfig
 
 
+def _escape_milvus_string(value: str) -> str:
+    escaped = value.replace("\\", "\\\\")
+    escaped = escaped.replace('"', '\\"')
+    escaped = escaped.replace("'", "\\'")
+    escaped = re.sub(r"[\x00-\x1f]", lambda m: f"\\x{ord(m.group()):02x}", escaped)
+    return escaped
+
+
 @dataclass
 class SearchHit:
     chunk: Chunk
@@ -24,11 +34,15 @@ class SearchHit:
 
 class VectorRepository(ABC):
     @abstractmethod
-    def upsert(self, document: Document, chunks: list[Chunk], embeddings: list[list[float]]) -> None:
+    def upsert(
+        self, document: Document, chunks: list[Chunk], embeddings: list[list[float]]
+    ) -> None:
         raise NotImplementedError
 
     @abstractmethod
-    def delete_by_source(self, source_path: str, kb_id: str, tenant_id: str | None = None) -> None:
+    def delete_by_source(
+        self, source_path: str, kb_id: str, tenant_id: str | None = None
+    ) -> None:
         raise NotImplementedError
 
     @abstractmethod
@@ -50,34 +64,46 @@ class InMemoryVectorRepository(VectorRepository):
     def __init__(self) -> None:
         self.documents: dict[str, Document] = {}
         self.entries: list[tuple[Chunk, list[float]]] = []
+        self._lock = threading.Lock()
 
-    def upsert(self, document: Document, chunks: list[Chunk], embeddings: list[list[float]]) -> None:
-        self.documents[document.doc_id] = document
-        self.entries.extend(zip(chunks, embeddings, strict=True))
+    def upsert(
+        self, document: Document, chunks: list[Chunk], embeddings: list[list[float]]
+    ) -> None:
+        with self._lock:
+            self.documents[document.doc_id] = document
+            self.entries.extend(zip(chunks, embeddings, strict=True))
 
-    def delete_by_source(self, source_path: str, kb_id: str, tenant_id: str | None = None) -> None:
-        removed_doc_ids = {
-            doc_id
-            for doc_id, document in self.documents.items()
-            if document.source_path == source_path
-            and document.metadata.get("kb_id", "default") == kb_id
-            and document.metadata.get("tenant_id") == tenant_id
-        }
-        if removed_doc_ids:
-            self.documents = {
-                doc_id: document
+    def delete_by_source(
+        self, source_path: str, kb_id: str, tenant_id: str | None = None
+    ) -> None:
+        with self._lock:
+            removed_doc_ids = {
+                doc_id
                 for doc_id, document in self.documents.items()
-                if doc_id not in removed_doc_ids
+                if document.source_path == source_path
+                and document.metadata.get("kb_id", "default") == kb_id
+                and (
+                    tenant_id is None or document.metadata.get("tenant_id") == tenant_id
+                )
             }
-        self.entries = [
-            (chunk, embedding)
-            for chunk, embedding in self.entries
-            if not (
-                chunk.source_path == source_path
-                and chunk.metadata.get("kb_id", "default") == kb_id
-                and chunk.metadata.get("tenant_id") == tenant_id
-            )
-        ]
+            if removed_doc_ids:
+                self.documents = {
+                    doc_id: document
+                    for doc_id, document in self.documents.items()
+                    if doc_id not in removed_doc_ids
+                }
+            self.entries = [
+                (chunk, embedding)
+                for chunk, embedding in self.entries
+                if not (
+                    chunk.source_path == source_path
+                    and chunk.metadata.get("kb_id", "default") == kb_id
+                    and (
+                        tenant_id is None
+                        or chunk.metadata.get("tenant_id") == tenant_id
+                    )
+                )
+            ]
 
     def search(
         self,
@@ -86,19 +112,23 @@ class InMemoryVectorRepository(VectorRepository):
         kb_id: str = "default",
         tenant_id: str | None = None,
     ) -> list[SearchHit]:
+        with self._lock:
+            entries_snapshot = list(self.entries)
         scored = [
             SearchHit(chunk=chunk, score=_cosine_similarity(vector, embedding))
-            for chunk, embedding in self.entries
-            if chunk.metadata.get("kb_id", "default") == kb_id and chunk.metadata.get("tenant_id") == tenant_id
+            for chunk, embedding in entries_snapshot
+            if chunk.metadata.get("kb_id", "default") == kb_id
+            and (tenant_id is None or chunk.metadata.get("tenant_id") == tenant_id)
         ]
         return sorted(scored, key=lambda item: item.score, reverse=True)[:top_k]
 
     def stats(self) -> dict[str, object]:
-        return {
-            "backend": "memory",
-            "documents": len(self.documents),
-            "chunks": len(self.entries),
-        }
+        with self._lock:
+            return {
+                "backend": "memory",
+                "documents": len(self.documents),
+                "chunks": len(self.entries),
+            }
 
 
 class MilvusVectorRepository(VectorRepository):
@@ -114,12 +144,20 @@ class MilvusVectorRepository(VectorRepository):
 
     def _ensure_collection(self) -> None:
         if self.client.has_collection(CHUNKS_COLLECTION):
-            collection = self.client.describe_collection(collection_name=CHUNKS_COLLECTION)
+            collection = self.client.describe_collection(
+                collection_name=CHUNKS_COLLECTION
+            )
             vector_field = next(
-                (field for field in collection.get("fields", []) if field.get("name") == "vector"),
+                (
+                    field
+                    for field in collection.get("fields", [])
+                    if field.get("name") == "vector"
+                ),
                 None,
             )
-            current_dim = int((vector_field or {}).get("params", {}).get("dim", self.dimension))
+            current_dim = int(
+                (vector_field or {}).get("params", {}).get("dim", self.dimension)
+            )
             if current_dim == self.dimension:
                 return
             raise RuntimeError(
@@ -127,8 +165,6 @@ class MilvusVectorRepository(VectorRepository):
                 f"configured={self.dimension}. Refusing to drop the collection automatically; "
                 "migrate or recreate it explicitly."
             )
-        if self.client.has_collection(CHUNKS_COLLECTION):
-            return
         schema = self.client.create_schema(auto_id=False, enable_dynamic_field=True)
         schema.add_field(
             field_name="chunk_id",
@@ -136,16 +172,22 @@ class MilvusVectorRepository(VectorRepository):
             is_primary=True,
             max_length=256,
         )
-        schema.add_field(field_name="vector", datatype=DataType.FLOAT_VECTOR, dim=self.dimension)
+        schema.add_field(
+            field_name="vector", datatype=DataType.FLOAT_VECTOR, dim=self.dimension
+        )
         index_params = self.client.prepare_index_params()
-        index_params.add_index(field_name="vector", index_type="AUTOINDEX", metric_type="COSINE")
+        index_params.add_index(
+            field_name="vector", index_type="AUTOINDEX", metric_type="COSINE"
+        )
         self.client.create_collection(
             collection_name=CHUNKS_COLLECTION,
             schema=schema,
             index_params=index_params,
         )
 
-    def upsert(self, document: Document, chunks: list[Chunk], embeddings: list[list[float]]) -> None:
+    def upsert(
+        self, document: Document, chunks: list[Chunk], embeddings: list[list[float]]
+    ) -> None:
         rows: list[dict[str, Any]] = []
         for chunk, embedding in zip(chunks, embeddings, strict=True):
             rows.append(
@@ -164,13 +206,18 @@ class MilvusVectorRepository(VectorRepository):
             )
         self.client.upsert(collection_name=CHUNKS_COLLECTION, data=rows)
 
-    def delete_by_source(self, source_path: str, kb_id: str, tenant_id: str | None = None) -> None:
-        escaped = source_path.replace("\\", "\\\\").replace('"', '\\"')
-        escaped_kb_id = kb_id.replace("\\", "\\\\").replace('"', '\\"')
-        tenant = (tenant_id or "").replace("\\", "\\\\").replace('"', '\\"')
+    def delete_by_source(
+        self, source_path: str, kb_id: str, tenant_id: str | None = None
+    ) -> None:
+        escaped = _escape_milvus_string(source_path)
+        escaped_kb_id = _escape_milvus_string(kb_id)
+        base_filter = f'source == "{escaped}" and kb_id == "{escaped_kb_id}"'
+        if tenant_id is not None:
+            tenant = _escape_milvus_string(tenant_id)
+            base_filter += f' and tenant_id == "{tenant}"'
         self.client.delete(
             collection_name=CHUNKS_COLLECTION,
-            filter=f'source == "{escaped}" and kb_id == "{escaped_kb_id}" and tenant_id == "{tenant}"',
+            filter=base_filter,
         )
 
     def search(
@@ -180,14 +227,25 @@ class MilvusVectorRepository(VectorRepository):
         kb_id: str = "default",
         tenant_id: str | None = None,
     ) -> list[SearchHit]:
-        escaped_kb_id = kb_id.replace("\\", "\\\\").replace('"', '\\"')
-        tenant = (tenant_id or "").replace("\\", "\\\\").replace('"', '\\"')
+        escaped_kb_id = _escape_milvus_string(kb_id)
+        base_filter = f'kb_id == "{escaped_kb_id}"'
+        if tenant_id is not None:
+            tenant = _escape_milvus_string(tenant_id)
+            base_filter += f' and tenant_id == "{tenant}"'
         results = self.client.search(
             collection_name=CHUNKS_COLLECTION,
             data=[vector],
-            filter=f'kb_id == "{escaped_kb_id}" and tenant_id == "{tenant}"',
+            filter=base_filter,
             limit=top_k,
-            output_fields=["chunk_id", "doc_id", "source", "title", "chunk_index", "text", "metadata_json"],
+            output_fields=[
+                "chunk_id",
+                "doc_id",
+                "source",
+                "title",
+                "chunk_index",
+                "text",
+                "metadata_json",
+            ],
         )
         hits: list[SearchHit] = []
         for item in results[0]:

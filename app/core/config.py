@@ -8,6 +8,7 @@ from typing import Any
 
 import yaml
 
+from app.core.exceptions import ConfigurationError
 from app.eval.ragas_runner import RagasRunner
 from app.core.tracing import FeedbackStore, TraceStore, TracingManager
 from app.diagnostics.service import DiagnosisService
@@ -15,11 +16,18 @@ from app.generation.answer_formatter import AnswerFormatter
 from app.generation.prompt_builder import PromptBuilder
 from app.generation.service import GenerationService
 from app.ingestion.pipeline import IngestionPipeline
+from app.ingestion.semantic_chunker import SemanticChunker, SemanticChunkerConfig
 from app.model_client.embeddings import EmbeddingClient
 from app.model_client.generation import GenerationClient
 from app.model_client.rerank import RerankClient
 from app.retrieval.pipeline import RetrievalPipeline
-from app.vectorstore.repository import InMemoryVectorRepository, MilvusVectorRepository, VectorRepository
+from app.retrieval.query_rewriter import QueryRewriter, QueryRewriterConfig
+from app.utils.text import parse_bool_env
+from app.vectorstore.repository import (
+    InMemoryVectorRepository,
+    MilvusVectorRepository,
+    VectorRepository,
+)
 
 
 def _render_env(raw: str) -> str:
@@ -35,6 +43,9 @@ def _render_env(raw: str) -> str:
 
 def _load_yaml(path: Path) -> dict[str, Any]:
     return yaml.safe_load(_render_env(path.read_text())) or {}
+
+
+INSECURE_DEFAULT_KEYS = frozenset({"change-me", "sk-xxx", "your-api-key", ""})
 
 
 @dataclass
@@ -56,7 +67,13 @@ class AppConfig:
         legacy = os.getenv("LITELLM_MASTER_KEY")
         if legacy:
             return legacy
-        return self.models["model_gateway"]["api_key"]
+        key = self.models["model_gateway"]["api_key"]
+        if self.gateway_mode != "mock" and key in INSECURE_DEFAULT_KEYS:
+            raise ConfigurationError(
+                "MODEL_GATEWAY_API_KEY must be set for production mode. "
+                "Set MODEL_GATEWAY_MODE=mock for local development."
+            )
+        return str(key)
 
     def gateway_for(self, capability: str) -> dict[str, str]:
         env_prefix_map = {
@@ -77,6 +94,11 @@ class AppConfig:
             or section.get("api_key")
             or self.gateway_api_key
         )
+        if self.gateway_mode != "mock" and api_key in INSECURE_DEFAULT_KEYS:
+            raise ConfigurationError(
+                f"{capability.upper()}_API_KEY must be set for production mode. "
+                "Set MODEL_GATEWAY_MODE=mock for local development."
+            )
         return {"base_url": str(base_url), "api_key": str(api_key)}
 
     @property
@@ -89,14 +111,18 @@ class AppConfig:
 
     @property
     def rerank_enabled(self) -> bool:
-        if os.getenv("DISABLE_RERANK", "").strip().lower() in {"1", "true", "yes", "on"}:
+        if parse_bool_env(os.getenv("DISABLE_RERANK")):
             return False
-        alias = str(self.models.get("rerank", {}).get("default_alias", "")).strip().lower()
+        alias = (
+            str(self.models.get("rerank", {}).get("default_alias", "")).strip().lower()
+        )
         return alias not in {"", "disabled", "none", "null"}
 
     @property
     def parsed_dir(self) -> Path:
-        return Path(os.getenv("PARSED_OUTPUT_DIR", self.config_dir.parent / "data" / "parsed"))
+        return Path(
+            os.getenv("PARSED_OUTPUT_DIR", self.config_dir.parent / "data" / "parsed")
+        )
 
     @property
     def phoenix_collector_endpoint(self) -> str:
@@ -112,11 +138,21 @@ class AppConfig:
 
     @property
     def trace_store_dir(self) -> Path:
-        return Path(os.getenv("TRACE_STORE_DIR", self.config_dir.parent / "data" / "reports" / "traces"))
+        return Path(
+            os.getenv(
+                "TRACE_STORE_DIR",
+                self.config_dir.parent / "data" / "reports" / "traces",
+            )
+        )
 
     @property
     def feedback_store_dir(self) -> Path:
-        return Path(os.getenv("FEEDBACK_STORE_DIR", self.config_dir.parent / "data" / "reports" / "feedback"))
+        return Path(
+            os.getenv(
+                "FEEDBACK_STORE_DIR",
+                self.config_dir.parent / "data" / "reports" / "feedback",
+            )
+        )
 
     @property
     def business_api_keys(self) -> set[str]:
@@ -125,7 +161,9 @@ class AppConfig:
 
 
 def load_config() -> AppConfig:
-    config_dir = Path(os.getenv("APP_CONFIG_DIR", Path(__file__).resolve().parents[2] / "configs"))
+    config_dir = Path(
+        os.getenv("APP_CONFIG_DIR", Path(__file__).resolve().parents[2] / "configs")
+    )
     return AppConfig(
         config_dir=config_dir,
         settings=_load_yaml(config_dir / "settings.yaml"),
@@ -155,6 +193,13 @@ class AppContainer:
     tracing_manager: TracingManager
     diagnosis_service: DiagnosisService
     feedback_store: FeedbackStore
+    query_rewriter: QueryRewriter | None = None
+    semantic_chunker: SemanticChunker | None = None
+
+    async def close(self) -> None:
+        await self.embedding_client.close()
+        await self.rerank_client.close()
+        await self.generation_client.close()
 
     @classmethod
     def from_env(cls) -> "AppContainer":
@@ -166,6 +211,13 @@ class AppContainer:
         trace_store = TraceStore(persist_dir=config.trace_store_dir)
         feedback_store = FeedbackStore(persist_dir=config.feedback_store_dir)
         tracing_manager = TracingManager("nano-rag", config.phoenix_collector_endpoint)
+        query_rewriter_config = QueryRewriterConfig.from_env()
+        query_rewriter = QueryRewriter(
+            generation_client=generation_client,
+            config=query_rewriter_config,
+        )
+        semantic_chunker_config = SemanticChunkerConfig.from_env()
+        semantic_chunker = SemanticChunker(config=semantic_chunker_config)
         retrieval_pipeline = RetrievalPipeline(
             config,
             repository,
@@ -173,6 +225,7 @@ class AppContainer:
             rerank_client,
             trace_store,
             tracing_manager,
+            query_rewriter=query_rewriter,
         )
         chat_pipeline = GenerationService(
             config=config,
@@ -189,7 +242,9 @@ class AppContainer:
             embedding_client=embedding_client,
             rerank_client=rerank_client,
             generation_client=generation_client,
-            ingestion_pipeline=IngestionPipeline(config, repository, embedding_client, tracing_manager),
+            ingestion_pipeline=IngestionPipeline(
+                config, repository, embedding_client, tracing_manager, semantic_chunker
+            ),
             retrieval_pipeline=retrieval_pipeline,
             chat_pipeline=chat_pipeline,
             ragas_runner=RagasRunner(),
@@ -197,4 +252,6 @@ class AppContainer:
             tracing_manager=tracing_manager,
             diagnosis_service=DiagnosisService(generation_client=generation_client),
             feedback_store=feedback_store,
+            query_rewriter=query_rewriter,
+            semantic_chunker=semantic_chunker,
         )
