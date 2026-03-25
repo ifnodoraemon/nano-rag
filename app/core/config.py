@@ -9,7 +9,8 @@ from typing import Any
 import yaml
 
 from app.eval.ragas_runner import RagasRunner
-from app.core.tracing import TraceStore, TracingManager
+from app.core.tracing import FeedbackStore, TraceStore, TracingManager
+from app.diagnostics.service import DiagnosisService
 from app.generation.answer_formatter import AnswerFormatter
 from app.generation.prompt_builder import PromptBuilder
 from app.generation.service import GenerationService
@@ -49,11 +50,49 @@ class AppConfig:
 
     @property
     def gateway_api_key(self) -> str:
+        explicit = os.getenv("MODEL_GATEWAY_API_KEY")
+        if explicit:
+            return explicit
+        legacy = os.getenv("LITELLM_MASTER_KEY")
+        if legacy:
+            return legacy
         return self.models["model_gateway"]["api_key"]
+
+    def gateway_for(self, capability: str) -> dict[str, str]:
+        env_prefix_map = {
+            "embedding": "EMBEDDING",
+            "generation": "GENERATION",
+            "rerank": "RERANK",
+        }
+        env_prefix = env_prefix_map.get(capability, capability.upper())
+        section = self.models.get(capability, {})
+
+        base_url = (
+            os.getenv(f"{env_prefix}_API_BASE_URL")
+            or section.get("base_url")
+            or self.gateway_base_url
+        )
+        api_key = (
+            os.getenv(f"{env_prefix}_API_KEY")
+            or section.get("api_key")
+            or self.gateway_api_key
+        )
+        return {"base_url": str(base_url), "api_key": str(api_key)}
+
+    @property
+    def gateway_models_probe_paths(self) -> tuple[str, ...]:
+        return ("/v1/models", "/models")
 
     @property
     def gateway_mode(self) -> str:
         return os.getenv("MODEL_GATEWAY_MODE", "mock").lower()
+
+    @property
+    def rerank_enabled(self) -> bool:
+        if os.getenv("DISABLE_RERANK", "").strip().lower() in {"1", "true", "yes", "on"}:
+            return False
+        alias = str(self.models.get("rerank", {}).get("default_alias", "")).strip().lower()
+        return alias not in {"", "disabled", "none", "null"}
 
     @property
     def parsed_dir(self) -> Path:
@@ -66,6 +105,23 @@ class AppConfig:
     @property
     def phoenix_ui_endpoint(self) -> str:
         return os.getenv("PHOENIX_UI_ENDPOINT", "http://phoenix:6006")
+
+    @property
+    def phoenix_ui_host_header(self) -> str:
+        return os.getenv("PHOENIX_UI_HOST_HEADER", "localhost")
+
+    @property
+    def trace_store_dir(self) -> Path:
+        return Path(os.getenv("TRACE_STORE_DIR", self.config_dir.parent / "data" / "reports" / "traces"))
+
+    @property
+    def feedback_store_dir(self) -> Path:
+        return Path(os.getenv("FEEDBACK_STORE_DIR", self.config_dir.parent / "data" / "reports" / "feedback"))
+
+    @property
+    def business_api_keys(self) -> set[str]:
+        raw = os.getenv("RAG_API_KEYS", "")
+        return {item.strip() for item in raw.split(",") if item.strip()}
 
 
 def load_config() -> AppConfig:
@@ -97,6 +153,8 @@ class AppContainer:
     ragas_runner: RagasRunner
     trace_store: TraceStore
     tracing_manager: TracingManager
+    diagnosis_service: DiagnosisService
+    feedback_store: FeedbackStore
 
     @classmethod
     def from_env(cls) -> "AppContainer":
@@ -105,7 +163,8 @@ class AppContainer:
         embedding_client = EmbeddingClient(config)
         rerank_client = RerankClient(config)
         generation_client = GenerationClient(config)
-        trace_store = TraceStore()
+        trace_store = TraceStore(persist_dir=config.trace_store_dir)
+        feedback_store = FeedbackStore(persist_dir=config.feedback_store_dir)
         tracing_manager = TracingManager("nano-rag", config.phoenix_collector_endpoint)
         retrieval_pipeline = RetrievalPipeline(
             config,
@@ -136,4 +195,6 @@ class AppContainer:
             ragas_runner=RagasRunner(),
             trace_store=trace_store,
             tracing_manager=tracing_manager,
+            diagnosis_service=DiagnosisService(generation_client=generation_client),
+            feedback_store=feedback_store,
         )

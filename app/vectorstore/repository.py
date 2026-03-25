@@ -28,7 +28,17 @@ class VectorRepository(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def search(self, vector: list[float], top_k: int) -> list[SearchHit]:
+    def delete_by_source(self, source_path: str, kb_id: str, tenant_id: str | None = None) -> None:
+        raise NotImplementedError
+
+    @abstractmethod
+    def search(
+        self,
+        vector: list[float],
+        top_k: int,
+        kb_id: str = "default",
+        tenant_id: str | None = None,
+    ) -> list[SearchHit]:
         raise NotImplementedError
 
     @abstractmethod
@@ -45,10 +55,41 @@ class InMemoryVectorRepository(VectorRepository):
         self.documents[document.doc_id] = document
         self.entries.extend(zip(chunks, embeddings, strict=True))
 
-    def search(self, vector: list[float], top_k: int) -> list[SearchHit]:
+    def delete_by_source(self, source_path: str, kb_id: str, tenant_id: str | None = None) -> None:
+        removed_doc_ids = {
+            doc_id
+            for doc_id, document in self.documents.items()
+            if document.source_path == source_path
+            and document.metadata.get("kb_id", "default") == kb_id
+            and document.metadata.get("tenant_id") == tenant_id
+        }
+        if removed_doc_ids:
+            self.documents = {
+                doc_id: document
+                for doc_id, document in self.documents.items()
+                if doc_id not in removed_doc_ids
+            }
+        self.entries = [
+            (chunk, embedding)
+            for chunk, embedding in self.entries
+            if not (
+                chunk.source_path == source_path
+                and chunk.metadata.get("kb_id", "default") == kb_id
+                and chunk.metadata.get("tenant_id") == tenant_id
+            )
+        ]
+
+    def search(
+        self,
+        vector: list[float],
+        top_k: int,
+        kb_id: str = "default",
+        tenant_id: str | None = None,
+    ) -> list[SearchHit]:
         scored = [
             SearchHit(chunk=chunk, score=_cosine_similarity(vector, embedding))
             for chunk, embedding in self.entries
+            if chunk.metadata.get("kb_id", "default") == kb_id and chunk.metadata.get("tenant_id") == tenant_id
         ]
         return sorted(scored, key=lambda item: item.score, reverse=True)[:top_k]
 
@@ -81,7 +122,11 @@ class MilvusVectorRepository(VectorRepository):
             current_dim = int((vector_field or {}).get("params", {}).get("dim", self.dimension))
             if current_dim == self.dimension:
                 return
-            self.client.drop_collection(collection_name=CHUNKS_COLLECTION)
+            raise RuntimeError(
+                f"Milvus collection '{CHUNKS_COLLECTION}' dimension mismatch: existing={current_dim}, "
+                f"configured={self.dimension}. Refusing to drop the collection automatically; "
+                "migrate or recreate it explicitly."
+            )
         if self.client.has_collection(CHUNKS_COLLECTION):
             return
         schema = self.client.create_schema(auto_id=False, enable_dynamic_field=True)
@@ -113,14 +158,34 @@ class MilvusVectorRepository(VectorRepository):
                     "chunk_index": chunk.chunk_index,
                     "text": chunk.text,
                     "metadata_json": chunk.metadata,
+                    "kb_id": document.metadata.get("kb_id", "default"),
+                    "tenant_id": document.metadata.get("tenant_id") or "",
                 }
             )
         self.client.upsert(collection_name=CHUNKS_COLLECTION, data=rows)
 
-    def search(self, vector: list[float], top_k: int) -> list[SearchHit]:
+    def delete_by_source(self, source_path: str, kb_id: str, tenant_id: str | None = None) -> None:
+        escaped = source_path.replace("\\", "\\\\").replace('"', '\\"')
+        escaped_kb_id = kb_id.replace("\\", "\\\\").replace('"', '\\"')
+        tenant = (tenant_id or "").replace("\\", "\\\\").replace('"', '\\"')
+        self.client.delete(
+            collection_name=CHUNKS_COLLECTION,
+            filter=f'source == "{escaped}" and kb_id == "{escaped_kb_id}" and tenant_id == "{tenant}"',
+        )
+
+    def search(
+        self,
+        vector: list[float],
+        top_k: int,
+        kb_id: str = "default",
+        tenant_id: str | None = None,
+    ) -> list[SearchHit]:
+        escaped_kb_id = kb_id.replace("\\", "\\\\").replace('"', '\\"')
+        tenant = (tenant_id or "").replace("\\", "\\\\").replace('"', '\\"')
         results = self.client.search(
             collection_name=CHUNKS_COLLECTION,
             data=[vector],
+            filter=f'kb_id == "{escaped_kb_id}" and tenant_id == "{tenant}"',
             limit=top_k,
             output_fields=["chunk_id", "doc_id", "source", "title", "chunk_index", "text", "metadata_json"],
         )

@@ -1,4 +1,7 @@
 .venv/
+.env
+frontend/node_modules/
+frontend/dist/
 __pycache__/
 .pytest_cache/
 *.pyc
@@ -7,5 +10,9 @@ data/raw/*
 data/parsed/*
 data/samples/eval_report.json
 data/samples/eval_report_api.json
+data/reports/eval/*.json
+data/reports/eval/benchmarks/*.json
 !data/raw/.gitkeep
 !data/parsed/.gitkeep
+!data/reports/eval/.gitkeep
+!data/reports/eval/benchmarks/.gitkeep

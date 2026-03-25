@@ -12,10 +12,12 @@ if TYPE_CHECKING:
 
 
 class GatewayClient:
-    def __init__(self, config: AppConfig, timeout_seconds: int) -> None:
+    def __init__(self, config: AppConfig, timeout_seconds: int, capability: str) -> None:
         self.config = config
-        self.base_url = config.gateway_base_url.rstrip("/")
-        self.api_key = config.gateway_api_key
+        self.capability = capability
+        gateway = config.gateway_for(capability)
+        self.base_url = gateway["base_url"].rstrip("/")
+        self.api_key = gateway["api_key"]
         self.timeout = timeout_seconds
 
     @property
@@ -34,12 +36,16 @@ class GatewayClient:
                 response.raise_for_status()
                 return response.json()
         except httpx.TimeoutException as exc:
-            raise ModelGatewayError(f"Model gateway timeout on {path}. Check LiteLLM upstream provider settings.") from exc
+            raise ModelGatewayError(
+                f"{self.capability} gateway timeout on {path}. Check upstream provider settings."
+            ) from exc
         except httpx.HTTPStatusError as exc:
             detail = exc.response.text.strip()
-            raise ModelGatewayError(f"Model gateway request failed on {path}: {exc.response.status_code} {detail}") from exc
+            raise ModelGatewayError(
+                f"{self.capability} gateway request failed on {path}: {exc.response.status_code} {detail}"
+            ) from exc
         except httpx.HTTPError as exc:
-            raise ModelGatewayError(f"Model gateway connection failed on {path}: {exc}") from exc
+            raise ModelGatewayError(f"{self.capability} gateway connection failed on {path}: {exc}") from exc
 
     def _mock_post(self, path: str, payload: dict[str, Any]) -> dict[str, Any]:
         if path == "/embeddings":

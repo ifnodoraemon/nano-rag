@@ -33,19 +33,30 @@ class FakeRerankClient(RerankClient):
         ]
 
 
+class ExplodingRerankClient(RerankClient):
+    def __init__(self) -> None:
+        pass
+
+    async def rerank(self, query: str, documents: list[str], top_k: int):
+        raise AssertionError("rerank should be disabled for this test")
+
+
 @pytest.mark.asyncio
 async def test_retrieval_pipeline_returns_contexts() -> None:
     repository = InMemoryVectorRepository()
-    document = Document(doc_id="doc", source_path="/tmp/a.txt", title="A", content="...", metadata={})
+    document = Document(doc_id="doc", source_path="/tmp/a.txt", title="A", content="...", metadata={"kb_id": "default"})
     chunks = [
-        Chunk(chunk_id="c1", doc_id="doc", chunk_index=0, text="aaa", source_path="/tmp/a.txt", title="A"),
-        Chunk(chunk_id="c2", doc_id="doc", chunk_index=1, text="aaaaaa", source_path="/tmp/a.txt", title="A"),
+        Chunk(chunk_id="c1", doc_id="doc", chunk_index=0, text="aaa", source_path="/tmp/a.txt", title="A", metadata={"kb_id": "default"}),
+        Chunk(chunk_id="c2", doc_id="doc", chunk_index=1, text="aaaaaa", source_path="/tmp/a.txt", title="A", metadata={"kb_id": "default"}),
     ]
     repository.upsert(document, chunks, [[3.0, 4.0], [6.0, 7.0]])
     config = AppConfig(
         config_dir=None,  # type: ignore[arg-type]
         settings={"retrieval": {"top_k": 2, "rerank_top_k": 2, "final_contexts": 1}},
-        models={"model_gateway": {"base_url": "", "api_key": ""}},
+        models={
+            "model_gateway": {"base_url": "", "api_key": ""},
+            "rerank": {"default_alias": "test-rerank"},
+        },
         prompts={},
     )
     pipeline = RetrievalPipeline(
@@ -62,3 +73,94 @@ async def test_retrieval_pipeline_returns_contexts() -> None:
     assert len(contexts) == 1
     assert contexts[0]["chunk_id"] == "c2"
     assert trace["trace_id"]
+
+
+@pytest.mark.asyncio
+async def test_retrieval_pipeline_skips_rerank_when_disabled(monkeypatch) -> None:
+    monkeypatch.setenv("DISABLE_RERANK", "1")
+    repository = InMemoryVectorRepository()
+    document = Document(doc_id="doc", source_path="/tmp/a.txt", title="A", content="...", metadata={"kb_id": "default"})
+    chunks = [
+        Chunk(chunk_id="c1", doc_id="doc", chunk_index=0, text="aaa", source_path="/tmp/a.txt", title="A", metadata={"kb_id": "default"}),
+        Chunk(chunk_id="c2", doc_id="doc", chunk_index=1, text="aaaaaa", source_path="/tmp/a.txt", title="A", metadata={"kb_id": "default"}),
+    ]
+    repository.upsert(document, chunks, [[3.0, 4.0], [6.0, 7.0]])
+    config = AppConfig(
+        config_dir=None,  # type: ignore[arg-type]
+        settings={"retrieval": {"top_k": 2, "rerank_top_k": 2, "final_contexts": 1}},
+        models={
+            "model_gateway": {"base_url": "", "api_key": ""},
+            "rerank": {"default_alias": "qwen3-rerank"},
+        },
+        prompts={},
+    )
+    pipeline = RetrievalPipeline(
+        config,
+        repository,
+        FakeEmbeddingClient(),
+        ExplodingRerankClient(),
+        TraceStore(),
+        TracingManager("test-service", ""),
+    )
+
+    contexts, trace = await pipeline.run("aaa", 2)
+
+    assert len(contexts) == 1
+    assert contexts[0]["chunk_id"] == "c1"
+    assert trace["reranked_chunk_ids"] == ["c1", "c2"]
+
+
+@pytest.mark.asyncio
+async def test_retrieval_pipeline_scopes_results_by_kb_and_tenant() -> None:
+    repository = InMemoryVectorRepository()
+    repository.upsert(
+        Document(doc_id="doc-a", source_path="/tmp/a.txt", title="A", content="...", metadata={"kb_id": "kb-a", "tenant_id": "tenant-a"}),
+        [
+            Chunk(
+                chunk_id="c1",
+                doc_id="doc-a",
+                chunk_index=0,
+                text="aaa",
+                source_path="/tmp/a.txt",
+                title="A",
+                metadata={"kb_id": "kb-a", "tenant_id": "tenant-a"},
+            )
+        ],
+        [[3.0, 4.0]],
+    )
+    repository.upsert(
+        Document(doc_id="doc-b", source_path="/tmp/b.txt", title="B", content="...", metadata={"kb_id": "kb-b", "tenant_id": "tenant-b"}),
+        [
+            Chunk(
+                chunk_id="c2",
+                doc_id="doc-b",
+                chunk_index=0,
+                text="aaaaaa",
+                source_path="/tmp/b.txt",
+                title="B",
+                metadata={"kb_id": "kb-b", "tenant_id": "tenant-b"},
+            )
+        ],
+        [[6.0, 7.0]],
+    )
+    config = AppConfig(
+        config_dir=None,  # type: ignore[arg-type]
+        settings={"retrieval": {"top_k": 2, "rerank_top_k": 2, "final_contexts": 1}},
+        models={"model_gateway": {"base_url": "", "api_key": ""}},
+        prompts={},
+    )
+    pipeline = RetrievalPipeline(
+        config,
+        repository,
+        FakeEmbeddingClient(),
+        FakeRerankClient(),
+        TraceStore(),
+        TracingManager("test-service", ""),
+    )
+
+    contexts, trace = await pipeline.run("aaa", 2, kb_id="kb-a", tenant_id="tenant-a")
+
+    assert len(contexts) == 1
+    assert contexts[0]["chunk_id"] == "c1"
+    assert trace["kb_id"] == "kb-a"
+    assert trace["tenant_id"] == "tenant-a"

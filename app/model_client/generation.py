@@ -10,11 +10,18 @@ if TYPE_CHECKING:
 
 class GenerationClient(GatewayClient):
     def __init__(self, config: AppConfig) -> None:
-        super().__init__(config, config.settings["timeout"]["generation_seconds"])
+        super().__init__(config, config.settings["timeout"]["generation_seconds"], "generation")
         self.alias = config.models["generation"]["default_alias"]
 
     async def generate(self, messages: list[dict[str, str]], model_alias: str | None = None) -> dict[str, Any]:
         payload = {"model": model_alias or self.alias, "messages": messages}
         data = await self.post("/chat/completions", payload)
-        choice = data["choices"][0]["message"]
-        return {"content": choice["content"], "raw": data}
+        choice = data["choices"][0]
+        message = choice["message"]
+        return {
+            "content": message["content"],
+            "finish_reason": choice.get("finish_reason"),
+            "usage": data.get("usage") or {},
+            "model": data.get("model") or model_alias or self.alias,
+            "raw": data,
+        }

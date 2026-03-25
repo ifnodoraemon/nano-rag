@@ -1,0 +1,12 @@
+from pydantic import BaseModel
+
+
+class BenchmarkRunRequest(BaseModel):
+    dataset_path: str
+    output_path: str | None = None
+
+
+class BenchmarkRunResponse(BaseModel):
+    status: str
+    output_path: str | None = None
+    report: dict

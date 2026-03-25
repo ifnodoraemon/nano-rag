@@ -7,6 +7,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
 from app.api.routes_chat import router as chat_router
+from app.api.routes_business import router as business_router
 from app.api.routes_debug import router as debug_router
 from app.api.routes_ingest import router as ingest_router
 from app.core.config import AppContainer
@@ -25,6 +26,24 @@ app = FastAPI(title="nano-rag", version="0.1.0", lifespan=lifespan)
 app.include_router(chat_router)
 app.include_router(ingest_router)
 app.include_router(debug_router)
+app.include_router(business_router)
+
+
+async def _probe_gateway(base_url: str, api_key: str, probe_paths: tuple[str, ...]) -> tuple[bool, str | None]:
+    try:
+        async with httpx.AsyncClient(timeout=5) as client:
+            errors: list[str] = []
+            for path in probe_paths:
+                response = await client.get(
+                    f"{base_url.rstrip('/')}{path}",
+                    headers={"Authorization": f"Bearer {api_key}"},
+                )
+                if response.status_code < 500:
+                    return True, None
+                errors.append(f"{path}: {response.status_code}")
+            return False, "; ".join(errors) if errors else None
+    except httpx.HTTPError as exc:
+        return False, str(exc)
 
 
 @app.exception_handler(ModelGatewayError)
@@ -35,23 +54,35 @@ async def handle_model_gateway_error(_: Request, exc: ModelGatewayError) -> JSON
 @app.get("/health")
 async def health(request: Request) -> dict[str, object]:
     container = request.app.state.container
-    gateway_ok = False
-    gateway_error: str | None = None
+    capability_gateways: dict[str, dict[str, object]] = {}
     phoenix_ok = False
     phoenix_error: str | None = None
-    try:
-        async with httpx.AsyncClient(timeout=5) as client:
-            response = await client.get(
-                f"{container.config.gateway_base_url.rstrip('/')}/v1/models",
-                headers={"Authorization": f"Bearer {container.config.gateway_api_key}"},
-            )
-            gateway_ok = response.status_code < 500
-    except httpx.HTTPError as exc:
-        gateway_error = str(exc)
+
+    required_capabilities = ["generation", "embedding"]
+    if container.config.rerank_enabled:
+        required_capabilities.append("rerank")
+
+    gateway_ok = True
+    for capability in required_capabilities:
+        gateway = container.config.gateway_for(capability)
+        reachable, error = await _probe_gateway(
+            gateway["base_url"],
+            gateway["api_key"],
+            container.config.gateway_models_probe_paths,
+        )
+        capability_gateways[capability] = {
+            "base_url": gateway["base_url"],
+            "reachable": reachable,
+            "error": error,
+        }
+        gateway_ok = gateway_ok and reachable
 
     try:
         async with httpx.AsyncClient(timeout=5) as client:
-            response = await client.get(container.config.phoenix_ui_endpoint)
+            headers = {}
+            if container.config.phoenix_ui_host_header:
+                headers["Host"] = container.config.phoenix_ui_host_header
+            response = await client.get(container.config.phoenix_ui_endpoint, headers=headers)
             phoenix_ok = response.status_code < 500
     except httpx.HTTPError as exc:
         phoenix_error = str(exc)
@@ -72,9 +103,13 @@ async def health(request: Request) -> dict[str, object]:
         "vectorstore_backend": os.getenv("VECTORSTORE_BACKEND", "memory"),
         "gateway_mode": container.config.gateway_mode,
         "gateway": {
-            "base_url": container.config.gateway_base_url,
+            "base_url": container.config.gateway_for("generation")["base_url"],
             "reachable": gateway_ok,
-            "error": gateway_error,
+            "error": next(
+                (details["error"] for details in capability_gateways.values() if details["error"]),
+                None,
+            ),
+            "capabilities": capability_gateways,
         },
         "phoenix": {
             "collector_endpoint": container.config.phoenix_collector_endpoint,

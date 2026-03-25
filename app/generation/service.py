@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from time import perf_counter
 from typing import TYPE_CHECKING
 
 from app.generation.answer_formatter import AnswerFormatter
@@ -34,9 +35,18 @@ class GenerationService:
 
     async def run(self, payload: ChatRequest) -> ChatResponse:
         with self.tracing_manager.span("generation.run", {"generation.query": payload.query}):
-            contexts, trace = await self.retrieval_pipeline.run(payload.query, payload.top_k)
+            contexts, trace = await self.retrieval_pipeline.run(
+                payload.query,
+                payload.top_k,
+                kb_id=payload.kb_id or "default",
+                tenant_id=payload.tenant_id,
+                session_id=payload.session_id,
+                sample_id=payload.sample_id,
+            )
             messages = self.prompt_builder.build_messages(payload.query, contexts)
+            generation_started = perf_counter()
             result = await self.generation_client.generate(messages)
+            generation_seconds = round(perf_counter() - generation_started, 4)
             response = self.answer_formatter.format(
                 answer=result["content"],
                 contexts=contexts,
@@ -47,5 +57,19 @@ class GenerationService:
                 record.answer = response.answer
                 record.citations = [citation.model_dump() for citation in response.citations]
                 record.model_alias = self.generation_client.alias
+                record.kb_id = payload.kb_id or record.kb_id
+                record.tenant_id = payload.tenant_id or record.tenant_id
+                record.session_id = payload.session_id or record.session_id
+                record.sample_id = payload.sample_id or record.sample_id
                 record.prompt_version = str(self.config.settings["prompt"]["version"])
+                record.prompt_messages = messages
+                record.generation_finish_reason = (
+                    str(result["finish_reason"]) if result.get("finish_reason") is not None else None
+                )
+                record.generation_usage = result.get("usage") or {}
+                record.step_latencies = {
+                    **record.step_latencies,
+                    "generation_seconds": generation_seconds,
+                    "end_to_end_seconds": float(record.latency_seconds or 0.0),
+                }
             return response

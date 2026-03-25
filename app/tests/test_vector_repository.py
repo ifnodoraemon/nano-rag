@@ -1,0 +1,112 @@
+import pytest
+
+from app.schemas.chunk import Chunk
+from app.schemas.document import Document
+from app.vectorstore.repository import InMemoryVectorRepository, MilvusVectorRepository
+
+
+def test_in_memory_repository_delete_by_source_removes_matching_documents_and_chunks() -> None:
+    repository = InMemoryVectorRepository()
+    source_path = "data/raw/employee_handbook.md"
+    other_source = "data/raw/other.md"
+    repository.upsert(
+        Document(doc_id="doc-1", source_path=source_path, title="A", content="a", metadata={"kb_id": "default"}),
+        [
+            Chunk(
+                chunk_id="doc-1:0",
+                doc_id="doc-1",
+                chunk_index=0,
+                text="a",
+                source_path=source_path,
+                title="A",
+                metadata={"kb_id": "default"},
+            )
+        ],
+        [[1.0, 0.0]],
+    )
+    repository.upsert(
+        Document(doc_id="doc-2", source_path=other_source, title="B", content="b", metadata={"kb_id": "default"}),
+        [
+            Chunk(
+                chunk_id="doc-2:0",
+                doc_id="doc-2",
+                chunk_index=0,
+                text="b",
+                source_path=other_source,
+                title="B",
+                metadata={"kb_id": "default"},
+            )
+        ],
+        [[0.0, 1.0]],
+    )
+
+    repository.delete_by_source(source_path, kb_id="default")
+
+    stats = repository.stats()
+    assert stats["documents"] == 1
+    assert stats["chunks"] == 1
+    remaining_hit = repository.search([0.0, 1.0], top_k=1, kb_id="default")[0]
+    assert remaining_hit.chunk.source_path == other_source
+
+
+def test_in_memory_repository_search_is_scoped_by_kb_and_tenant() -> None:
+    repository = InMemoryVectorRepository()
+    source_path = "data/raw/employee_handbook.md"
+    repository.upsert(
+        Document(doc_id="doc-1", source_path=source_path, title="A", content="a", metadata={"kb_id": "kb-a", "tenant_id": "t1"}),
+        [
+            Chunk(
+                chunk_id="doc-1:0",
+                doc_id="doc-1",
+                chunk_index=0,
+                text="alpha",
+                source_path=source_path,
+                title="A",
+                metadata={"kb_id": "kb-a", "tenant_id": "t1"},
+            )
+        ],
+        [[1.0, 0.0]],
+    )
+    repository.upsert(
+        Document(doc_id="doc-2", source_path=source_path, title="A", content="b", metadata={"kb_id": "kb-b", "tenant_id": "t2"}),
+        [
+            Chunk(
+                chunk_id="doc-2:0",
+                doc_id="doc-2",
+                chunk_index=0,
+                text="beta",
+                source_path=source_path,
+                title="A",
+                metadata={"kb_id": "kb-b", "tenant_id": "t2"},
+            )
+        ],
+        [[0.0, 1.0]],
+    )
+
+    hits = repository.search([1.0, 0.0], top_k=5, kb_id="kb-a", tenant_id="t1")
+
+    assert len(hits) == 1
+    assert hits[0].chunk.chunk_id == "doc-1:0"
+
+
+def test_milvus_repository_refuses_to_drop_collection_on_dimension_mismatch(monkeypatch) -> None:
+    class FakeMilvusClient:
+        def has_collection(self, collection_name):  # noqa: ANN001, ARG002
+            return True
+
+        def describe_collection(self, collection_name):  # noqa: ANN001, ARG002
+            return {
+                "fields": [
+                    {
+                        "name": "vector",
+                        "params": {"dim": 768},
+                    }
+                ]
+            }
+
+    monkeypatch.setattr("app.vectorstore.repository.create_milvus_client", lambda: FakeMilvusClient())
+
+    with pytest.raises(RuntimeError) as exc_info:
+        MilvusVectorRepository(dimension=3072)
+
+    assert "Refusing to drop the collection automatically" in str(exc_info.value)

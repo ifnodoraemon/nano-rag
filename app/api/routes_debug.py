@@ -1,29 +1,50 @@
 import json
+from datetime import datetime
 from pathlib import Path
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
-from app.eval.dataset import load_jsonl_dataset, save_json
+from app.api.auth import require_api_key
+from app.eval.dataset import (
+    get_eval_report_dir,
+    list_benchmark_reports,
+    list_eval_datasets,
+    list_eval_reports,
+    load_json,
+    load_jsonl_dataset,
+    resolve_benchmark_report_path,
+    resolve_eval_dataset_path,
+    resolve_eval_report_path,
+    save_json,
+)
+from app.eval.service import materialize_eval_records
 from app.schemas.chat import ChatRequest
+from app.schemas.diagnosis import AutoDiagnosisRequest, DiagnosisResponse, EvalDiagnosisRequest, TraceDiagnosisRequest
 from app.schemas.eval import EvalRunRequest, EvalRunResponse
 from app.schemas.trace import RetrievalDebugResponse, TraceRecord, TraceSummary
 
 router = APIRouter()
 
 
-@router.post("/retrieve/debug", response_model=RetrievalDebugResponse)
+@router.post("/retrieve/debug", response_model=RetrievalDebugResponse, dependencies=[Depends(require_api_key)])
 async def retrieve_debug(payload: ChatRequest, request: Request) -> RetrievalDebugResponse:
     container = request.app.state.container
-    return await container.retrieval_pipeline.debug(payload.query, payload.top_k)
+    return await container.retrieval_pipeline.debug(
+        payload.query,
+        payload.top_k,
+        kb_id=payload.kb_id or "default",
+        tenant_id=payload.tenant_id,
+        session_id=payload.session_id,
+    )
 
 
-@router.get("/traces", response_model=list[TraceSummary])
+@router.get("/traces", response_model=list[TraceSummary], dependencies=[Depends(require_api_key)])
 async def list_traces(request: Request) -> list[TraceSummary]:
     container = request.app.state.container
     return container.trace_store.list()
 
 
-@router.get("/traces/{trace_id}", response_model=TraceRecord)
+@router.get("/traces/{trace_id}", response_model=TraceRecord, dependencies=[Depends(require_api_key)])
 async def get_trace(trace_id: str, request: Request) -> TraceRecord:
     container = request.app.state.container
     record = container.trace_store.get(trace_id)
@@ -32,20 +53,153 @@ async def get_trace(trace_id: str, request: Request) -> TraceRecord:
     return record
 
 
-@router.post("/eval/run", response_model=EvalRunResponse)
+@router.get("/eval/datasets", dependencies=[Depends(require_api_key)])
+async def get_eval_datasets() -> list[dict[str, object]]:
+    return list_eval_datasets()
+
+
+@router.get("/eval/reports", dependencies=[Depends(require_api_key)])
+async def get_eval_reports() -> list[dict[str, object]]:
+    return list_eval_reports()
+
+
+@router.get("/benchmark/reports", dependencies=[Depends(require_api_key)])
+async def get_benchmark_reports() -> list[dict[str, object]]:
+    return list_benchmark_reports()
+
+
+@router.get("/eval/reports/detail", dependencies=[Depends(require_api_key)])
+async def get_eval_report_detail(path: str = Query(...)) -> dict:
+    try:
+        target = resolve_eval_report_path(path)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if not target.exists():
+        raise HTTPException(status_code=404, detail=f"eval report not found: {path}")
+    return load_json(str(target))
+
+
+@router.get("/benchmark/reports/detail", dependencies=[Depends(require_api_key)])
+async def get_benchmark_report_detail(path: str = Query(...)) -> dict:
+    try:
+        target = resolve_benchmark_report_path(path)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if not target.exists():
+        raise HTTPException(status_code=404, detail=f"benchmark report not found: {path}")
+    return load_json(str(target))
+
+
+@router.post("/eval/run", response_model=EvalRunResponse, dependencies=[Depends(require_api_key)])
 async def run_eval(payload: EvalRunRequest, request: Request) -> EvalRunResponse:
     container = request.app.state.container
-    dataset = load_jsonl_dataset(payload.dataset_path)
-    report = container.ragas_runner.run(dataset)
+    try:
+        dataset_path = resolve_eval_dataset_path(payload.dataset_path)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    dataset = load_jsonl_dataset(str(dataset_path))
+    evaluated_records = await materialize_eval_records(container, dataset)
+    report = container.ragas_runner.run(evaluated_records)
     output_path = payload.output_path
     if output_path:
-        target = Path(output_path)
-        target.parent.mkdir(parents=True, exist_ok=True)
-        save_json(str(target), report)
-    return EvalRunResponse(status="ok", output_path=output_path, report=report)
+        try:
+            target = resolve_eval_report_path(output_path)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+    else:
+        report_dir = get_eval_report_dir()
+        report_dir.mkdir(parents=True, exist_ok=True)
+        dataset_name = dataset_path.stem or "eval"
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        target = report_dir / f"{dataset_name}_{timestamp}.json"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    save_json(str(target), report)
+    return EvalRunResponse(status="ok", output_path=str(target), report=report)
 
 
-@router.get("/debug/storage")
+@router.post("/diagnose/trace", response_model=DiagnosisResponse, dependencies=[Depends(require_api_key)])
+async def diagnose_trace(payload: TraceDiagnosisRequest, request: Request) -> DiagnosisResponse:
+    container = request.app.state.container
+    trace = container.trace_store.get(payload.trace_id)
+    if trace is None:
+        raise HTTPException(status_code=404, detail=f"trace not found: {payload.trace_id}")
+    diagnosis = container.diagnosis_service.diagnose_trace(trace)
+    if payload.include_ai:
+        diagnosis = await container.diagnosis_service.add_ai_suggestion(
+            diagnosis,
+            {"trace": trace.model_dump()},
+        )
+    return diagnosis
+
+
+@router.post("/diagnose/eval", response_model=DiagnosisResponse, dependencies=[Depends(require_api_key)])
+async def diagnose_eval(payload: EvalDiagnosisRequest, request: Request) -> DiagnosisResponse:
+    container = request.app.state.container
+    try:
+        report_path = resolve_eval_report_path(payload.report_path)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if not report_path.exists():
+        raise HTTPException(status_code=404, detail=f"eval report not found: {payload.report_path}")
+    report = load_json(str(report_path))
+    try:
+        diagnosis = container.diagnosis_service.diagnose_eval_result(report, payload.result_index)
+    except IndexError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if payload.include_ai:
+        diagnosis = await container.diagnosis_service.add_ai_suggestion(
+            diagnosis,
+            {
+                "report_path": payload.report_path,
+                "result_index": payload.result_index,
+                "result": report.get("results", [])[payload.result_index],
+            },
+        )
+    return diagnosis
+
+
+@router.post("/diagnose/auto", response_model=DiagnosisResponse, dependencies=[Depends(require_api_key)])
+async def diagnose_auto(payload: AutoDiagnosisRequest, request: Request) -> DiagnosisResponse:
+    container = request.app.state.container
+
+    reports = list_eval_reports()
+    if reports:
+        latest_report = reports[0]
+        report = load_json(str(resolve_eval_report_path(str(latest_report["path"]))))
+        results = report.get("results", []) if isinstance(report, dict) else []
+        for index, result in enumerate(results):
+            if float(result.get("answer_exact_match", 0.0) or 0.0) < 1.0 or float(
+                result.get("reference_context_recall", 0.0) or 0.0
+            ) < 1.0:
+                diagnosis = container.diagnosis_service.diagnose_eval_result(report, index)
+                if payload.include_ai:
+                    diagnosis = await container.diagnosis_service.add_ai_suggestion(
+                        diagnosis,
+                        {
+                            "report_path": latest_report["path"],
+                            "result_index": index,
+                            "result": result,
+                        },
+                    )
+                return diagnosis
+
+    traces = container.trace_store.list()
+    if traces:
+        latest_trace_id = traces[0].trace_id
+        trace = container.trace_store.get(latest_trace_id)
+        if trace is not None:
+            diagnosis = container.diagnosis_service.diagnose_trace(trace)
+            if payload.include_ai:
+                diagnosis = await container.diagnosis_service.add_ai_suggestion(
+                    diagnosis,
+                    {"trace": trace.model_dump()},
+                )
+            return diagnosis
+
+    raise HTTPException(status_code=404, detail="no eval bad cases or traces available for diagnosis")
+
+
+@router.get("/debug/storage", dependencies=[Depends(require_api_key)])
 async def storage_debug(request: Request) -> dict[str, object]:
     container = request.app.state.container
     parsed_dir = container.config.parsed_dir
@@ -57,7 +211,7 @@ async def storage_debug(request: Request) -> dict[str, object]:
     }
 
 
-@router.get("/debug/parsed/{doc_id}")
+@router.get("/debug/parsed/{doc_id}", dependencies=[Depends(require_api_key)])
 async def parsed_document_debug(doc_id: str, request: Request) -> dict:
     container = request.app.state.container
     target = container.config.parsed_dir / f"{doc_id}.json"

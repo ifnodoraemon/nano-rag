@@ -10,7 +10,7 @@ if TYPE_CHECKING:
 
 class EmbeddingClient(GatewayClient):
     def __init__(self, config: AppConfig) -> None:
-        super().__init__(config, config.settings["timeout"]["embeddings_seconds"])
+        super().__init__(config, config.settings["timeout"]["embeddings_seconds"], "embedding")
         self.alias = config.models["embedding"]["default_alias"]
 
     async def embed_texts(self, texts: list[str]) -> list[list[float]]:

@@ -4,27 +4,69 @@ services:
       context: ..
       dockerfile: docker/app.Dockerfile
     container_name: nano-rag-app
+    env_file:
+      - ../.env
     ports:
       - "8000:8000"
     environment:
       APP_CONFIG_DIR: /workspace/configs
       VECTORSTORE_BACKEND: ${VECTORSTORE_BACKEND:-milvus}
       MILVUS_URI: ${MILVUS_URI:-http://milvus:19530}
-      MODEL_GATEWAY_MODE: ${MODEL_GATEWAY_MODE:-mock}
+      HTTP_PROXY: ${HTTP_PROXY:-}
+      HTTPS_PROXY: ${HTTPS_PROXY:-}
+      NO_PROXY: ${NO_PROXY:-localhost,127.0.0.1,::1},app,phoenix,milvus,etcd,minio
+      http_proxy: ${http_proxy:-}
+      https_proxy: ${https_proxy:-}
+      no_proxy: ${no_proxy:-localhost,127.0.0.1,::1},app,phoenix,milvus,etcd,minio
+      ALL_PROXY: ""
+      all_proxy: ""
       PARSED_OUTPUT_DIR: /workspace/data/parsed
+      EVAL_REPORT_DIR: /workspace/data/reports/eval
       PHOENIX_COLLECTOR_ENDPOINT: ${PHOENIX_COLLECTOR_ENDPOINT:-http://phoenix:4317}
       PHOENIX_UI_ENDPOINT: ${PHOENIX_UI_ENDPOINT:-http://phoenix:6006}
+      PHOENIX_UI_HOST_HEADER: ${PHOENIX_UI_HOST_HEADER:-localhost}
     volumes:
       - ../configs:/workspace/configs
-      - ../data:/workspace/data
+      - app-parsed-data:/workspace/data/parsed
+      - app-report-data:/workspace/data/reports
     depends_on:
-      - milvus
-      - litellm-gateway
-      - phoenix
+      milvus:
+        condition: service_healthy
+      phoenix:
+        condition: service_started
+    restart: unless-stopped
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=5)",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 10s
+
+  frontend:
+    build:
+      context: ..
+      dockerfile: docker/frontend.Dockerfile
+      args:
+        HTTP_PROXY: ${HTTP_PROXY:-}
+        HTTPS_PROXY: ${HTTPS_PROXY:-}
+        NO_PROXY: ${NO_PROXY:-localhost,127.0.0.1,::1},app,phoenix,milvus,etcd,minio
+    container_name: nano-rag-frontend
+    ports:
+      - "3000:80"
+    depends_on:
+      app:
+        condition: service_healthy
 
   etcd:
     image: quay.io/coreos/etcd:v3.5.18
     environment:
+      ETCDCTL_API: "3"
       ETCD_AUTO_COMPACTION_MODE: revision
       ETCD_AUTO_COMPACTION_RETENTION: "1000"
       ETCD_QUOTA_BACKEND_BYTES: "4294967296"
@@ -34,15 +76,31 @@ services:
       -advertise-client-urls=http://etcd:2379
       -listen-client-urls=http://0.0.0.0:2379
       --data-dir=/etcd
+    volumes:
+      - etcd-data:/etcd
+    healthcheck:
+      test: ["CMD", "etcdctl", "--endpoints=http://127.0.0.1:2379", "endpoint", "health"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 5s
 
   minio:
-    image: minio/minio:RELEASE.2025-02-18T16-25-55Z
+    image: pgsty/minio:RELEASE.2026-02-14T12-00-00Z
     environment:
-      MINIO_ACCESS_KEY: minioadmin
-      MINIO_SECRET_KEY: minioadmin
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
     command: minio server /minio_data
     ports:
       - "9000:9000"
+    volumes:
+      - minio-data:/minio_data
+    healthcheck:
+      test: ["CMD", "bash", "-lc", "exec 3<>/dev/tcp/127.0.0.1/9000 && exec 3<&- && exec 3>&-"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
 
   milvus:
     image: milvusdb/milvus:v2.5.5
@@ -54,8 +112,19 @@ services:
       - "19530:19530"
       - "9091:9091"
     depends_on:
-      - etcd
-      - minio
+      etcd:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    volumes:
+      - milvus-data:/var/lib/milvus
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:9091/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 18
+      start_period: 20s
 
   litellm-gateway:
     image: litellm/litellm:v1.82.0-stable
@@ -74,3 +143,10 @@ services:
     ports:
       - "6006:6006"
       - "4317:4317"
+
+volumes:
+  app-parsed-data:
+  app-report-data:
+  etcd-data:
+  minio-data:
+  milvus-data:

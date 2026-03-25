@@ -11,7 +11,7 @@ if TYPE_CHECKING:
 
 class RerankClient(GatewayClient):
     def __init__(self, config: AppConfig) -> None:
-        super().__init__(config, config.settings["timeout"]["rerank_seconds"])
+        super().__init__(config, config.settings["timeout"]["rerank_seconds"], "rerank")
         self.alias = config.models["rerank"]["default_alias"]
 
     async def rerank(self, query: str, documents: list[str], top_k: int) -> list[RerankResult]:

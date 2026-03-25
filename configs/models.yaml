@@ -1,13 +1,19 @@
 model_gateway:
-  base_url: ${MODEL_GATEWAY_BASE_URL:-http://litellm-gateway:4000}
-  api_key: ${LITELLM_MASTER_KEY:-change-me}
+  base_url: ${MODEL_GATEWAY_BASE_URL:-https://generativelanguage.googleapis.com/v1beta/openai}
+  api_key: ${MODEL_GATEWAY_API_KEY:-change-me}
 
 embedding:
-  default_alias: qwen3-embed
-  dimension: 32
+  default_alias: gemini-embedding-2-preview
+  dimension: 3072
+  base_url: ${EMBEDDING_API_BASE_URL:-}
+  api_key: ${EMBEDDING_API_KEY:-}
 
 rerank:
-  default_alias: qwen3-rerank
+  default_alias: disabled
+  base_url: ${RERANK_API_BASE_URL:-}
+  api_key: ${RERANK_API_KEY:-}
 
 generation:
-  default_alias: main-chat-model
+  default_alias: gemini-3.1-pro-preview
+  base_url: ${GENERATION_API_BASE_URL:-}
+  api_key: ${GENERATION_API_KEY:-}
