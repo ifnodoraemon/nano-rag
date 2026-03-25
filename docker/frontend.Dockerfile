@@ -1,8 +1,9 @@
-FROM nginx:alpine
+FROM python:3.12-slim
 
-COPY frontend/dist /usr/share/nginx/html
-COPY docker/frontend/nginx.conf /etc/nginx/conf.d/default.conf
+WORKDIR /app
+
+COPY frontend/dist /app/dist
 
 EXPOSE 80
 
-CMD ["nginx", "-g", "daemon off;"]
+CMD ["python", "-m", "http.server", "80", "--directory", "/app/dist"]

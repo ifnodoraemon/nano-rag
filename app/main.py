@@ -1,16 +1,25 @@
 from contextlib import asynccontextmanager
 
 import os
+from pathlib import Path
 
 import httpx
 from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, FileResponse
+from fastapi.staticfiles import StaticFiles
 
 from app.api.routes_business import router as business_router
 from app.api.routes_debug import router as debug_router
 from app.core.config import AppContainer
 from app.core.exceptions import ModelGatewayError
 from app.core.logging import configure_logging
+
+
+FRONTEND_DIST = Path(
+    os.getenv(
+        "FRONTEND_DIST_DIR", Path(__file__).resolve().parents[1] / "frontend" / "dist"
+    )
+)
 
 
 @asynccontextmanager
@@ -24,6 +33,30 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="nano-rag", version="0.1.0", lifespan=lifespan)
 app.include_router(debug_router)
 app.include_router(business_router)
+
+if FRONTEND_DIST.exists():
+    app.mount("/assets", StaticFiles(directory=FRONTEND_DIST / "assets"), name="assets")
+
+    @app.get("/favicon.svg")
+    async def favicon():
+        favicon_path = FRONTEND_DIST / "favicon.svg"
+        if favicon_path.exists():
+            return FileResponse(favicon_path)
+        return JSONResponse(status_code=404, content={"detail": "not found"})
+
+    @app.get("/icons.svg")
+    async def icons():
+        icons_path = FRONTEND_DIST / "icons.svg"
+        if icons_path.exists():
+            return FileResponse(icons_path)
+        return JSONResponse(status_code=404, content={"detail": "not found"})
+
+    @app.get("/")
+    async def index():
+        index_path = FRONTEND_DIST / "index.html"
+        if index_path.exists():
+            return FileResponse(index_path)
+        return JSONResponse(status_code=404, content={"detail": "frontend not built"})
 
 
 async def _probe_gateway(

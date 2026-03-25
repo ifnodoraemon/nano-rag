@@ -11,5 +11,6 @@ COPY scripts ./scripts
 COPY data/raw ./data/raw
 COPY data/eval ./data/eval
 COPY data/samples ./data/samples
+COPY frontend/dist ./frontend/dist
 
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
