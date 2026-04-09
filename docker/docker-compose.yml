@@ -118,6 +118,8 @@ services:
   litellm-gateway:
     image: litellm/litellm:v1.82.0-stable
     container_name: nano-rag-litellm
+    profiles:
+      - litellm
     env_file:
       - ./litellm/.env
     command: ["--config", "/app/config.yaml", "--port", "4000"]

@@ -27,7 +27,7 @@ export function HealthPanel() {
           status: health.vectorstore?.status === 'ok' ? 'ok' : 'err',
         },
         {
-          label: `模式: ${health.gateway_mode || 'unknown'}`,
+          label: `模型模式: ${health.gateway_mode || 'unknown'}`,
           status: health.gateway_mode === 'live' ? 'ok' : 'warn',
         },
       ]
@@ -68,6 +68,10 @@ export function HealthPanel() {
                 <strong>{health.status === 'ok' ? '可测试' : '部分降级'}</strong>
               </div>
               <div className="info-row">
+                <span>模型网关模式</span>
+                <strong>{health.gateway_mode || 'unknown'}</strong>
+              </div>
+              <div className="info-row">
                 <span>向量库模式</span>
                 <strong>
                   {health.vectorstore_backend === 'milvus'
@@ -87,6 +91,11 @@ export function HealthPanel() {
             {!health.phoenix?.reachable && (
               <div className="status-line">
                 Phoenix UI 当前未连通，不影响问答主流程，但查看追踪时会受影响。
+              </div>
+            )}
+            {!health.gateway?.reachable && health.gateway?.error && (
+              <div className="status-line error">
+                模型网关不可用：{health.gateway.error}
               </div>
             )}
             <StatusLine

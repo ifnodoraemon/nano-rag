@@ -8,9 +8,9 @@
 - 业务接入版 API，包含 `/v1/rag/chat`、`/v1/rag/ingest`、`/v1/rag/feedback`、`/v1/rag/traces/{trace_id}`、`/v1/rag/benchmark/run`
 - `ingestion / retrieval / generation` 主链路模块拆分
 - 统一 `model_client`，所有模型调用都走 OpenAI-compatible Gateway
-- 默认 `mock gateway` 模式，可在没有真实模型 API 时先跑通本地自助迭代闭环
+- 默认直连外部 OpenAI-compatible 模型接口
 - `Milvus` 仓储抽象，默认走真实向量库，保留内存回退仅用于临时调试
-- `Docker Compose` 骨架，包含 `app / milvus / litellm / phoenix`
+- `Docker Compose` 骨架，默认包含 `app / milvus / phoenix`，`LiteLLM` 为可选 profile
 - 基础测试、trace 存储、配置模板、离线评测和 benchmark 脚手架
 
 ## 目录
@@ -85,17 +85,9 @@ VECTORSTORE_BACKEND=milvus
 MILVUS_URI=http://milvus:19530
 ```
 
-### 4. 准备模型网关配置
+### 4. 直连外部模型接口
 
-```bash
-cp docker/litellm/.env.example docker/litellm/.env
-```
-
-按实际 provider 填写 `docker/litellm/.env`，然后调整 [models.yaml](/home/ifnodoraemon/myagent/nano-rag/configs/models.yaml)。
-
-### 5. 直接使用 Gemini API
-
-如果不走本地 LiteLLM，而是直接把服务指向 Gemini API 的 OpenAI-compatible endpoint，可设置：
+如果外部 provider 已经提供 OpenAI-compatible 接口，直接配置根目录 `.env` 即可，不需要 LiteLLM：
 
 ```bash
 export MODEL_GATEWAY_MODE=live
@@ -125,7 +117,7 @@ generation:
 - `/health` 现已同时兼容 LiteLLM 的 `/v1/models` 和 Gemini 的 `/models`
 - 业务 API 中的 `kb_id` 已预留，但当前部署仅支持 `default`
 
-### 6. 按能力拆分模型网关
+### 5. 按能力拆分模型网关
 
 如果 generation / embedding / rerank 需要走不同 provider，现在可以分别配置不同的 `base_url + key`。
 未单独配置时，会自动回退到全局 `MODEL_GATEWAY_BASE_URL / MODEL_GATEWAY_API_KEY`。
@@ -148,6 +140,23 @@ export RERANK_API_KEY=<your-rerank-api-key>
 - `rerank` 走独立 rerank provider
 
 对应 [models.yaml](/home/ifnodoraemon/myagent/nano-rag/configs/models.yaml) 里的 alias 也可以分开维护。
+
+### 6. 可选：通过 LiteLLM 统一多家 provider
+
+只有当你需要：
+
+- 把多家 provider 统一成一个网关地址
+- 做统一鉴权、限流或模型别名映射
+- 给不兼容 OpenAI 接口的上游做一层适配
+
+才需要启用 LiteLLM。
+
+```bash
+cp docker/litellm/.env.example docker/litellm/.env
+docker compose -f docker/docker-compose.yml --profile litellm up -d litellm-gateway
+```
+
+然后把 [`.env`](/home/ifnodoraemon/myagent/nano-rag/.env) 里的 `MODEL_GATEWAY_BASE_URL` 指到 `http://litellm-gateway:4000`，`MODEL_GATEWAY_API_KEY` 改成 `LITELLM_MASTER_KEY`。
 
 ## 示例
 
@@ -271,9 +280,10 @@ curl 'http://127.0.0.1:8000/benchmark/reports/detail?path=data/reports/eval/benc
 - `RAGAS` 相关脚本已接入离线评测入口，当前默认使用确定性聚合指标，后续可替换成真实 RAGAS 流程
 - 当前已补充 benchmark 服务和脚本，用于聚合离线质量、延迟和坏例诊断统计
 - 前端主流程默认走业务 API；如果配置了 `RAG_API_KEYS`，需要在前端工作区中填写对应 key
-- 默认 `MODEL_GATEWAY_MODE=mock`，所以在没有真实 provider 时也能先跑通本地循环
-- 切到真实模型时，将 `MODEL_GATEWAY_MODE=live` 并填好 `docker/litellm/.env`
+- 默认 `MODEL_GATEWAY_MODE=live`
+- 默认推荐直连外部 OpenAI-compatible provider，不经过 LiteLLM
 - 如果直连 Gemini API，请设置 `MODEL_GATEWAY_API_KEY`，并通过 `DISABLE_RERANK=1` 跳过 rerank 阶段
+- 仅当需要网关聚合能力时，再启用 `docker compose --profile litellm`
 
 ## 测试
 

@@ -70,12 +70,17 @@ async def _probe_gateway(
                     f"{base_url.rstrip('/')}{path}",
                     headers={"Authorization": f"Bearer {api_key}"},
                 )
-                if response.status_code < 500:
+                if 200 <= response.status_code < 400:
                     return True, None
-                errors.append(f"{path}: {response.status_code}")
+                detail = response.text.strip()
+                if detail:
+                    errors.append(f"{path}: {response.status_code} {detail}")
+                else:
+                    errors.append(f"{path}: {response.status_code}")
             return False, "; ".join(errors) if errors else None
     except httpx.HTTPError as exc:
-        return False, str(exc)
+        detail = str(exc).strip() or exc.__class__.__name__
+        return False, detail
 
 
 @app.exception_handler(ModelGatewayError)
@@ -144,6 +149,7 @@ async def health(request: Request) -> dict[str, object]:
         "vectorstore_backend": os.getenv("VECTORSTORE_BACKEND", "memory"),
         "gateway_mode": container.config.gateway_mode,
         "gateway": {
+            "base_url": container.config.gateway_base_url,
             "reachable": gateway_ok,
             "error": next(
                 (
@@ -155,6 +161,8 @@ async def health(request: Request) -> dict[str, object]:
             ),
         },
         "phoenix": {
+            "collector_endpoint": container.config.phoenix_collector_endpoint,
+            "ui_endpoint": container.config.phoenix_ui_endpoint,
             "reachable": phoenix_ok,
             "error": phoenix_error,
         },
@@ -163,5 +171,6 @@ async def health(request: Request) -> dict[str, object]:
             "error": vectorstore_error,
             "details": vectorstore_stats,
         },
+        "parsed_dir": str(container.config.parsed_dir),
         "trace_count": container.trace_store.list().total,
     }

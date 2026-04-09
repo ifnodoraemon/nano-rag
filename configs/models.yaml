@@ -14,6 +14,6 @@ rerank:
   api_key: ${RERANK_API_KEY:-}
 
 generation:
-  default_alias: gemini-3.1-pro-preview
+  default_alias: gemini-2.5-flash
   base_url: ${GENERATION_API_BASE_URL:-}
   api_key: ${GENERATION_API_KEY:-}
