@@ -32,6 +32,229 @@ body {
   width: 100%;
 }
 
+.app-shell {
+  width: min(1320px, calc(100% - 32px));
+  margin: 24px auto 48px;
+}
+
+.app-header {
+  display: grid;
+  gap: 18px;
+  padding: 28px 30px;
+  border: 1px solid var(--border);
+  border-radius: 32px;
+  background:
+    linear-gradient(140deg, rgba(255, 248, 238, 0.95), rgba(249, 239, 224, 0.82)),
+    var(--surface);
+  box-shadow: var(--shadow);
+}
+
+.brand-block {
+  display: grid;
+  gap: 14px;
+}
+
+.brand-row {
+  display: grid;
+  gap: 8px;
+}
+
+.brand-row h1,
+.page-intro h1 {
+  margin: 0;
+  font-family: 'IBM Plex Serif', 'Source Han Serif SC', Georgia, serif;
+  font-size: clamp(34px, 5vw, 56px);
+  line-height: 0.96;
+}
+
+.brand-row p,
+.page-intro p,
+.summary-card p {
+  margin: 0;
+  color: var(--muted);
+  line-height: 1.6;
+}
+
+.nav-tabs {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.mode-switch {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.mode-tab {
+  display: grid;
+  justify-items: start;
+  gap: 4px;
+  min-height: 72px;
+  padding: 14px 18px;
+  border-radius: 20px;
+  text-align: left;
+}
+
+.mode-tab span {
+  font-size: 17px;
+  font-weight: 700;
+}
+
+.mode-tab small {
+  font-size: 13px;
+  line-height: 1.5;
+  color: inherit;
+  opacity: 0.82;
+}
+
+.nav-tab {
+  display: grid;
+  justify-items: start;
+  gap: 4px;
+  min-height: 84px;
+  padding: 16px 18px;
+  border-radius: 22px;
+  text-align: left;
+}
+
+.nav-tab span {
+  font-size: 18px;
+  font-weight: 700;
+}
+
+.nav-tab small {
+  font-size: 13px;
+  line-height: 1.5;
+  color: inherit;
+  opacity: 0.82;
+}
+
+.summary-strip {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.summary-card {
+  display: grid;
+  gap: 8px;
+  padding: 16px 18px;
+  border-radius: 20px;
+  background: rgba(255, 255, 255, 0.56);
+  border: 1px solid rgba(77, 56, 26, 0.1);
+}
+
+.summary-card span {
+  color: var(--muted);
+  font-size: 13px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.summary-card strong {
+  font-size: 20px;
+  font-family: 'IBM Plex Serif', 'Source Han Serif SC', Georgia, serif;
+}
+
+.summary-health .chip-row {
+  margin: 2px 0;
+}
+
+.page-shell {
+  margin-top: 20px;
+}
+
+.page-stack {
+  display: grid;
+  gap: 18px;
+}
+
+.page-intro {
+  display: grid;
+  gap: 12px;
+  padding: 12px 4px 4px;
+}
+
+.simple-hero {
+  display: grid;
+  gap: 14px;
+  padding: 28px;
+  border: 1px solid var(--border);
+  border-radius: 28px;
+  background:
+    linear-gradient(150deg, rgba(255, 249, 242, 0.95), rgba(245, 236, 220, 0.88)),
+    var(--surface);
+  box-shadow: var(--shadow);
+}
+
+.simple-steps {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.simple-step {
+  display: grid;
+  gap: 8px;
+  padding: 16px 18px;
+  border-radius: 18px;
+  background: rgba(255, 255, 255, 0.6);
+  border: 1px solid rgba(77, 56, 26, 0.1);
+  color: var(--muted);
+}
+
+.simple-step span {
+  display: inline-flex;
+  width: 30px;
+  height: 30px;
+  align-items: center;
+  justify-content: center;
+  border-radius: 999px;
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+  font-weight: 700;
+}
+
+.upload-dropzone {
+  position: relative;
+  padding: 24px;
+  border-radius: 22px;
+  border: 1.5px dashed rgba(15, 118, 110, 0.28);
+  background: rgba(255, 255, 255, 0.7);
+  cursor: pointer;
+}
+
+.upload-title {
+  display: block;
+  font-size: 18px;
+  font-weight: 700;
+  color: var(--text);
+}
+
+.upload-subtitle {
+  display: block;
+  margin-top: 6px;
+  color: var(--muted);
+  font-weight: 400;
+}
+
+.upload-input {
+  position: absolute;
+  inset: 0;
+  opacity: 0;
+  cursor: pointer;
+}
+
+.compact-cards {
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+}
+
+.compact-metric-grid {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
 .shell {
   width: min(1360px, calc(100% - 32px));
   margin: 24px auto 48px;
@@ -527,6 +750,11 @@ textarea {
 }
 
 @media (max-width: 1080px) {
+  .mode-switch,
+  .nav-tabs,
+  .summary-strip,
+  .compact-metric-grid,
+  .simple-steps,
   .workflow-strip,
   .advanced-grid,
   .grid {
@@ -535,11 +763,17 @@ textarea {
 }
 
 @media (max-width: 720px) {
+  .app-shell {
+    width: min(100% - 20px, 1360px);
+    margin: 16px auto 28px;
+  }
+
   .shell {
     width: min(100% - 20px, 1360px);
     margin: 16px auto 28px;
   }
 
+  .app-header,
   .hero,
   .panel-body,
   .panel-head,
@@ -571,6 +805,7 @@ textarea {
     margin-top: 10px;
   }
 
+  .app-header,
   .hero,
   .panel-body,
   .panel-head {

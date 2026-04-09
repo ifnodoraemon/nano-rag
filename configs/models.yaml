@@ -17,3 +17,15 @@ generation:
   default_alias: gemini-2.5-flash
   base_url: ${GENERATION_API_BASE_URL:-}
   api_key: ${GENERATION_API_KEY:-}
+
+document_parser:
+  enabled: ${DOCUMENT_PARSER_ENABLED:-true}
+  default_alias: ${DOCUMENT_PARSER_MODEL:-gemini-2.5-flash}
+  base_url: ${DOCUMENT_PARSER_API_BASE_URL:-}
+  api_key: ${DOCUMENT_PARSER_API_KEY:-}
+
+document_parser:
+  enabled: ${DOCUMENT_PARSER_ENABLED:-true}
+  default_alias: ${DOCUMENT_PARSER_MODEL:-gemini-2.5-flash}
+  base_url: ${DOCUMENT_PARSER_API_BASE_URL:-}
+  api_key: ${DOCUMENT_PARSER_API_KEY:-}

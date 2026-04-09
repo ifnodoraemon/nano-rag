@@ -2,21 +2,26 @@ import os
 from pathlib import Path
 
 
-SUPPORTED_EXTENSIONS = {".pdf", ".md", ".txt", ".html"}
+SUPPORTED_EXTENSIONS = {".pdf", ".md", ".txt", ".html", ".png", ".jpg", ".jpeg", ".webp"}
 _DEFAULT_TEST_DIR = Path(__file__).resolve().parents[2] / "tests" / "fixtures"
+_DEFAULT_UPLOAD_DIR = Path(__file__).resolve().parents[2] / "data" / "uploads"
 
 
 def _get_allowed_ingest_dirs() -> list[Path]:
     raw = os.getenv("RAG_INGEST_ALLOWED_DIRS", "")
+    upload_dir = Path(os.getenv("UPLOAD_OUTPUT_DIR", _DEFAULT_UPLOAD_DIR)).resolve()
     if not raw.strip():
         if os.getenv("PYTEST_CURRENT_TEST") or os.getenv("TESTING"):
-            return [_DEFAULT_TEST_DIR]
+            return [_DEFAULT_TEST_DIR.resolve(), upload_dir]
         raise RuntimeError(
             "RAG_INGEST_ALLOWED_DIRS environment variable is not set. "
             "Please configure the allowed directories for document ingestion, "
             "e.g., RAG_INGEST_ALLOWED_DIRS=/data/docs,/data/pdfs"
         )
-    return [Path(item.strip()).resolve() for item in raw.split(",") if item.strip()]
+    allowed_dirs = [Path(item.strip()).resolve() for item in raw.split(",") if item.strip()]
+    if upload_dir not in allowed_dirs:
+        allowed_dirs.append(upload_dir)
+    return allowed_dirs
 
 
 _ALLOWED_INGEST_DIRS: list[Path] | None = None

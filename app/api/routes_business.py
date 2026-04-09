@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import os
+from pathlib import Path
 from time import time
 from uuid import uuid4
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, UploadFile
 
 from app.api.auth import require_api_key
+from app.ingestion.loader import SUPPORTED_EXTENSIONS
 from app.schemas.benchmark import BenchmarkRunRequest, BenchmarkRunResponse
 from app.schemas.business import (
     BusinessChatRequest,
@@ -124,6 +126,56 @@ async def rag_ingest(
         tenant_id=payload.tenant_id,
         documents=response.documents,
         chunks=response.chunks,
+        source="path",
+    )
+
+
+@router.post(
+    "/ingest/upload",
+    response_model=BusinessIngestResponse,
+    dependencies=[Depends(require_api_key)],
+)
+async def rag_ingest_upload(
+    request: Request,
+    files: list[UploadFile] = File(...),
+    kb_id: str = Form(default="default"),
+    tenant_id: str | None = Form(default=None),
+) -> BusinessIngestResponse:
+    _ensure_supported_kb_id(kb_id)
+    if not files:
+        raise HTTPException(status_code=400, detail="at least one file is required")
+
+    container = request.app.state.container
+    upload_batch_dir = container.config.upload_dir / uuid4().hex[:12]
+    upload_batch_dir.mkdir(parents=True, exist_ok=True)
+
+    uploaded_files: list[str] = []
+    for upload in files:
+        original_name = Path(upload.filename or "upload.txt").name
+        extension = Path(original_name).suffix.lower()
+        if extension not in SUPPORTED_EXTENSIONS:
+            allowed = ", ".join(sorted(SUPPORTED_EXTENSIONS))
+            raise HTTPException(
+                status_code=400,
+                detail=f"unsupported file type '{extension or 'unknown'}'. Supported types: {allowed}",
+            )
+        target = upload_batch_dir / f"{uuid4().hex[:8]}_{original_name}"
+        target.write_bytes(await upload.read())
+        uploaded_files.append(original_name)
+
+    response = await container.ingestion_pipeline.run(
+        str(upload_batch_dir),
+        kb_id=kb_id,
+        tenant_id=tenant_id,
+    )
+    return BusinessIngestResponse(
+        status="ok",
+        kb_id=kb_id,
+        tenant_id=tenant_id,
+        documents=response.documents,
+        chunks=response.chunks,
+        source="upload",
+        uploaded_files=uploaded_files,
     )
 
 

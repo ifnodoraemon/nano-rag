@@ -193,7 +193,37 @@ def test_answer_formatter_respects_model_citation_label_order() -> None:
         trace_id="t1",
     )
 
-    assert [citation.citation_label for citation in response.citations[:2]] == ["C2", "C1"]
+    assert [citation.citation_label for citation in response.citations] == ["C2", "C1"]
+
+
+def test_answer_formatter_only_returns_explicitly_cited_labels() -> None:
+    formatter = AnswerFormatter()
+    response = formatter.format(
+        answer="The reimbursement request must be submitted within 15 days. [C1]",
+        contexts=[
+            {
+                "chunk_id": "c-primary",
+                "citation_label": "C1",
+                "source": "/tmp/primary.md",
+                "score": 0.9,
+                "text": "Submit reimbursement within 15 days.",
+                "evidence_role": "primary",
+            },
+            {
+                "chunk_id": "c-support",
+                "citation_label": "C2",
+                "source": "/tmp/support.md",
+                "score": 0.7,
+                "text": "Another unrelated policy section.",
+                "evidence_role": "primary",
+            },
+        ],
+        trace_id="t1",
+    )
+
+    assert [citation.citation_label for citation in response.citations] == ["C1"]
+    assert "Primary evidence: [C1]" in response.answer
+    assert "[C2]" not in response.answer
 
 
 def test_answer_formatter_extracts_structured_answer_plan_and_supporting_claims() -> None:

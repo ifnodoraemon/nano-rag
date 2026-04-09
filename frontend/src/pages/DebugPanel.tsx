@@ -81,18 +81,44 @@ export function DebugPanel() {
           isError={!!debugError}
         />
         {debugResult && (
-          <div className="cards" style={{ marginBottom: 12 }}>
-            <Card title="Wiki 命中">
-              contexts={contexts.length} | topics={topicContexts.length}
-            </Card>
-            <Card title="冲突节点">
-              {conflictingContexts.length > 0
-                ? `${conflictingContexts.length} 个，${conflictingLabels.join(' / ')}`
-                : '0 个'}
-            </Card>
-          </div>
+          <>
+            <div className="cards" style={{ marginBottom: 12 }}>
+              <Card title="检索概览">
+                contexts={contexts.length} | topics={topicContexts.length}
+              </Card>
+              <Card title="冲突节点">
+                {conflictingContexts.length > 0
+                  ? `${conflictingContexts.length} 个，${conflictingLabels.join(' / ')}`
+                  : '0 个'}
+              </Card>
+            </div>
+
+            <div>
+              <div className="section-label">命中上下文摘要</div>
+              <div className="cards">
+                {contexts.length ? (
+                  contexts.slice(0, 5).map((context, index) => (
+                    <Card
+                      key={String(context['chunk_id'] || `debug-${index}`)}
+                      title={String(context['title'] || context['chunk_id'] || `Context ${index + 1}`)}
+                    >
+                      kind={String(context['wiki_kind'] || 'raw')} | status=
+                      {String(context['wiki_status'] || 'n/a')}
+                      {'\n'}
+                      source: {String(context['source'] || 'n/a')}
+                    </Card>
+                  ))
+                ) : (
+                  <div className="empty-state">当前没有可展示的上下文摘要。</div>
+                )}
+              </div>
+            </div>
+          </>
         )}
-        <JsonOutput data={debugResult} placeholder="还没有运行检索调试" />
+        <details className="details-panel">
+          <summary>查看原始调试返回</summary>
+          <JsonOutput data={debugResult} placeholder="还没有运行检索调试" />
+        </details>
         {debugResult?.trace_id && (
           <button
             type="button"

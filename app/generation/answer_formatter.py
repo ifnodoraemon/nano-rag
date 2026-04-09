@@ -201,10 +201,6 @@ class AnswerFormatter:
                     continue
                 ordered.append(citation)
                 used_chunks.add(citation.chunk_id)
-            for citation in citations_by_chunk.values():
-                if citation.chunk_id in used_chunks:
-                    continue
-                ordered.append(citation)
             return ordered
         return list(citations_by_chunk.values())
 

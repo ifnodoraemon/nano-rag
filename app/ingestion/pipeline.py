@@ -12,7 +12,9 @@ from app.ingestion.metadata import extract_document_metadata
 from app.ingestion.normalizer import normalize_text
 from app.ingestion.parser_docling import parse_document
 from app.ingestion.semantic_chunker import SemanticChunker, SemanticChunkerConfig
+from app.core.exceptions import ParsingError
 from app.model_client.embeddings import EmbeddingClient
+from app.model_client.document_parser import DocumentParserClient
 from app.retrieval.hybrid_retriever import HybridRetriever
 from app.schemas.document import Document, IngestResponse
 from app.vectorstore.repository import VectorRepository
@@ -36,6 +38,7 @@ class IngestionPipeline:
         embedding_client: EmbeddingClient,
         tracing_manager: TracingManager,
         semantic_chunker: SemanticChunker | None = None,
+        document_parser: DocumentParserClient | None = None,
         hybrid_retriever: HybridRetriever | None = None,
         wiki_compiler: WikiCompiler | None = None,
         wiki_searcher: WikiSearcher | None = None,
@@ -45,6 +48,7 @@ class IngestionPipeline:
         self.embedding_client = embedding_client
         self.tracing_manager = tracing_manager
         self.semantic_chunker = semantic_chunker
+        self.document_parser = document_parser
         self.hybrid_retriever = hybrid_retriever
         self.wiki_compiler = wiki_compiler
         self.wiki_searcher = wiki_searcher
@@ -75,7 +79,14 @@ class IngestionPipeline:
                 ):
                     source_path = self._normalize_source_path(file_path)
                     doc_id = self._stable_doc_id(source_path, kb_id, tenant_id)
-                    text = normalize_text(parse_document(file_path))
+                    text = normalize_text(
+                        await parse_document(file_path, self.document_parser)
+                    )
+                    if not text:
+                        raise ParsingError(
+                            f"Document parsing returned empty content for {source_path}. "
+                            "If this is a scanned or image-heavy file, enable a multimodal document parser model."
+                        )
                     document_metadata = extract_document_metadata(
                         source_path=source_path,
                         title=Path(file_path).stem,
@@ -117,6 +128,11 @@ class IngestionPipeline:
                             f"chunk_size={chunk_size}, overlap={overlap}. "
                             "Ensure chunk_size > overlap in configs/settings.yaml"
                         ) from exc
+                    if not chunks:
+                        raise ParsingError(
+                            f"Document parsing produced no chunks for {source_path}. "
+                            "The extracted content may be empty or structurally invalid."
+                        )
                     for chunk in chunks:
                         chunk.metadata = {
                             **chunk.metadata,

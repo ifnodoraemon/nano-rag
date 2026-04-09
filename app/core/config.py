@@ -17,6 +17,7 @@ from app.generation.prompt_builder import PromptBuilder
 from app.generation.service import GenerationService
 from app.ingestion.pipeline import IngestionPipeline
 from app.ingestion.semantic_chunker import SemanticChunker, SemanticChunkerConfig
+from app.model_client.document_parser import DocumentParserClient
 from app.model_client.embeddings import EmbeddingClient
 from app.model_client.generation import GenerationClient
 from app.model_client.rerank import RerankClient
@@ -164,6 +165,12 @@ class AppConfig:
         )
 
     @property
+    def upload_dir(self) -> Path:
+        return Path(
+            os.getenv("UPLOAD_OUTPUT_DIR", self.config_dir.parent / "data" / "uploads")
+        )
+
+    @property
     def business_api_keys(self) -> set[str]:
         raw = os.getenv("RAG_API_KEYS", "")
         return {item.strip() for item in raw.split(",") if item.strip()}
@@ -194,6 +201,7 @@ class AppContainer:
     embedding_client: EmbeddingClient
     rerank_client: RerankClient
     generation_client: GenerationClient
+    document_parser: DocumentParserClient
     ingestion_pipeline: IngestionPipeline
     retrieval_pipeline: RetrievalPipeline
     chat_pipeline: GenerationService
@@ -212,6 +220,7 @@ class AppContainer:
         await self.embedding_client.close()
         await self.rerank_client.close()
         await self.generation_client.close()
+        await self.document_parser.close()
 
     @classmethod
     def from_env(cls) -> "AppContainer":
@@ -220,6 +229,7 @@ class AppContainer:
         embedding_client = EmbeddingClient(config)
         rerank_client = RerankClient(config)
         generation_client = GenerationClient(config)
+        document_parser = DocumentParserClient(config)
         trace_store = TraceStore(persist_dir=config.trace_store_dir)
         feedback_store = FeedbackStore(persist_dir=config.feedback_store_dir)
         tracing_manager = TracingManager("nano-rag", config.phoenix_collector_endpoint)
@@ -263,12 +273,14 @@ class AppContainer:
             embedding_client=embedding_client,
             rerank_client=rerank_client,
             generation_client=generation_client,
+            document_parser=document_parser,
             ingestion_pipeline=IngestionPipeline(
                 config,
                 repository,
                 embedding_client,
                 tracing_manager,
                 semantic_chunker,
+                document_parser=document_parser,
                 hybrid_retriever=hybrid_retriever,
                 wiki_compiler=wiki_compiler,
                 wiki_searcher=wiki_searcher,

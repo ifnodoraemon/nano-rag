@@ -34,6 +34,8 @@ class BusinessIngestResponse(BaseModel):
     tenant_id: str | None = None
     documents: int
     chunks: int
+    source: str = "path"
+    uploaded_files: list[str] = Field(default_factory=list)
 
 
 class FeedbackRequest(BaseModel):

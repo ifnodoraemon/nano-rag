@@ -11,7 +11,7 @@ from fastapi.staticfiles import StaticFiles
 from app.api.routes_business import router as business_router
 from app.api.routes_debug import router as debug_router
 from app.core.config import AppContainer
-from app.core.exceptions import ModelGatewayError
+from app.core.exceptions import ModelGatewayError, ParsingError
 from app.core.logging import configure_logging
 
 
@@ -88,6 +88,11 @@ async def handle_model_gateway_error(
     _: Request, exc: ModelGatewayError
 ) -> JSONResponse:
     return JSONResponse(status_code=502, content={"detail": str(exc)})
+
+
+@app.exception_handler(ParsingError)
+async def handle_parsing_error(_: Request, exc: ParsingError) -> JSONResponse:
+    return JSONResponse(status_code=400, content={"detail": str(exc)})
 
 
 @app.get("/health")

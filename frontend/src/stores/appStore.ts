@@ -122,6 +122,7 @@ interface AppState {
   ingestLoading: boolean;
   ingestError: string | null;
   runIngest: (path: string) => Promise<void>;
+  runIngestUpload: (files: File[]) => Promise<void>;
 
   chatResult: ChatResponse | null;
   chatLoading: boolean;
@@ -252,6 +253,24 @@ export const useAppStore = create<AppState>((set, get) => ({
       const data = await businessIngestApi.run(
         {
           path,
+          kb_id: workspace.kbId,
+          tenant_id: workspace.tenantId || undefined,
+        },
+        workspace.apiKey,
+      );
+      set({ ingestResult: data, ingestLoading: false });
+      await get().loadHealth();
+    } catch (e) {
+      set({ ingestError: formatApiError(e), ingestLoading: false });
+    }
+  },
+  runIngestUpload: async (files: File[]) => {
+    set({ ingestLoading: true, ingestError: null });
+    try {
+      const { workspace } = get();
+      const data = await businessIngestApi.upload(
+        {
+          files,
           kb_id: workspace.kbId,
           tenant_id: workspace.tenantId || undefined,
         },

@@ -35,6 +35,8 @@ export interface IngestResponse {
   tenant_id?: string | null;
   documents: number;
   chunks: number;
+  source?: 'path' | 'upload';
+  uploaded_files?: string[];
 }
 
 export interface ChatRequest {

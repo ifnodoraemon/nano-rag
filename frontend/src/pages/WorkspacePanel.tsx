@@ -2,7 +2,11 @@ import { useEffect, useState } from 'react';
 import { useAppStore } from '../stores/appStore';
 import { Panel, StatusLine } from '../components/common';
 
-export function WorkspacePanel() {
+interface WorkspacePanelProps {
+  audience?: 'simple' | 'expert';
+}
+
+export function WorkspacePanel({ audience = 'expert' }: WorkspacePanelProps) {
   const { workspace, updateWorkspace } = useAppStore();
   const [draft, setDraft] = useState(workspace);
   const [message, setMessage] = useState<string | null>(null);
@@ -26,18 +30,23 @@ export function WorkspacePanel() {
     };
     updateWorkspace(next);
     setDraft(next);
-    setMessage('工作区配置已保存。主流程会直接使用 `/v1/rag/*` 业务接口。');
+    setMessage('工作区已保存。接下来可以直接导入资料并提问。');
   };
 
   return (
     <Panel
-      title="工作区配置"
-      subtitle="统一管理知识库、租户、会话和业务 API Key"
+      title={audience === 'simple' ? '测试设置' : '工作区配置'}
+      subtitle={
+        audience === 'simple'
+          ? '这部分不是必填，一般直接用默认值就可以'
+          : '先把当前验证会落到哪个工作区定下来'
+      }
     >
       <form onSubmit={handleSubmit}>
         <div className="status-tip">
-          NanoRAG 的主流程前端现在默认走正式业务 API，而不是内部 `/chat` 或 `/ingest`。
-          如果后端启用了 `RAG_API_KEYS`，请把对应 key 填在这里。出于安全考虑，页面不会把这个 key 持久化到本地存储。
+          {audience === 'simple'
+            ? '大多数情况下不用改这里。只有需要切换知识库，或者后端启用了业务 API Key 时，才需要填写。'
+            : '主流程默认调用 `/v1/rag/*` 业务接口。只有后端启用了 `RAG_API_KEYS` 时，才需要在这里填写业务 key。'}
         </div>
         <div className="workspace-grid">
           <label>

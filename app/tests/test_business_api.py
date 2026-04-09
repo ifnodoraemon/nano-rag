@@ -1,7 +1,9 @@
+from io import BytesIO
 from types import SimpleNamespace
 
 import pytest
 from fastapi import HTTPException
+from starlette.datastructures import UploadFile
 
 from app.api.routes_business import (
     BenchmarkRunRequest,
@@ -12,6 +14,7 @@ from app.api.routes_business import (
     rag_chat,
     rag_feedback,
     rag_ingest,
+    rag_ingest_upload,
     rag_trace,
 )
 from app.core.tracing import FeedbackStore, TraceStore
@@ -102,6 +105,58 @@ async def test_business_ingest_wraps_ingest_response() -> None:
     assert response.status == "ok"
     assert response.documents == 2
     assert response.chunks == 4
+
+
+@pytest.mark.asyncio
+async def test_business_ingest_upload_wraps_ingest_response(tmp_path) -> None:
+    captured: dict[str, object] = {}
+
+    async def fake_ingest_run(path, kb_id="default", tenant_id=None):  # noqa: ANN001
+        captured["path"] = path
+        captured["kb_id"] = kb_id
+        captured["tenant_id"] = tenant_id
+        assert tmp_path.as_posix() in path
+        return SimpleNamespace(documents=1, chunks=2)
+
+    container = SimpleNamespace(
+        ingestion_pipeline=SimpleNamespace(run=fake_ingest_run),
+        config=SimpleNamespace(upload_dir=tmp_path),
+    )
+
+    upload = UploadFile(filename="policy.md", file=BytesIO(b"# Policy\nBody"))
+    response = await rag_ingest_upload(
+        _request_with_container(container),
+        files=[upload],
+        kb_id="default",
+        tenant_id="tenant-a",
+    )
+
+    assert response.status == "ok"
+    assert response.source == "upload"
+    assert response.uploaded_files == ["policy.md"]
+    assert response.documents == 1
+    assert response.chunks == 2
+    assert captured["kb_id"] == "default"
+    assert captured["tenant_id"] == "tenant-a"
+
+
+@pytest.mark.asyncio
+async def test_business_ingest_upload_rejects_unsupported_extension(tmp_path) -> None:
+    container = SimpleNamespace(
+        ingestion_pipeline=SimpleNamespace(run=None),
+        config=SimpleNamespace(upload_dir=tmp_path),
+    )
+
+    upload = UploadFile(filename="policy.exe", file=BytesIO(b"bad"))
+    with pytest.raises(HTTPException) as exc_info:
+        await rag_ingest_upload(
+            _request_with_container(container),
+            files=[upload],
+            kb_id="default",
+            tenant_id=None,
+        )
+
+    assert exc_info.value.status_code == 400
 
 
 @pytest.mark.asyncio

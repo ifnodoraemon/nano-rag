@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { useAppStore, type TraceClaimFilter } from '../stores/appStore';
 import { Panel, StatusLine, JsonOutput, LoadingButton, Card } from '../components/common';
+import { navigateToPage } from '../navigation';
 
 type TraceContext = Record<string, unknown>;
 type TraceClaim = {
@@ -151,6 +152,7 @@ export function TracesPanel() {
       topK,
       sourceLabel: `trace ${currentTrace.trace_id}`,
     });
+    navigateToPage('validate');
   };
 
   return (
@@ -176,36 +178,39 @@ export function TracesPanel() {
         </>
       }
     >
-      <div className="actions" style={{ marginBottom: 12 }}>
-        <button
-          type="button"
-          className={`secondary${traceClaimFilter === 'all' ? ' selected-card' : ''}`}
-          onClick={() => setTraceClaimFilter('all')}
-        >
-          全部 claims
-        </button>
-        <button
-          type="button"
-          className={`secondary${traceClaimFilter === 'missing_conflict' ? ' selected-card' : ''}`}
-          onClick={() => setTraceClaimFilter('missing_conflict')}
-        >
-          缺少 conflict claim
-        </button>
-        <button
-          type="button"
-          className={`secondary${traceClaimFilter === 'insufficiency' ? ' selected-card' : ''}`}
-          onClick={() => setTraceClaimFilter('insufficiency')}
-        >
-          insufficiency
-        </button>
-        <button
-          type="button"
-          className={`secondary${traceClaimFilter === 'conditional' ? ' selected-card' : ''}`}
-          onClick={() => setTraceClaimFilter('conditional')}
-        >
-          conditional
-        </button>
-      </div>
+      <details className="details-panel" style={{ marginBottom: 12 }}>
+        <summary>筛选与定位</summary>
+        <div className="actions" style={{ marginTop: 12 }}>
+          <button
+            type="button"
+            className={`secondary${traceClaimFilter === 'all' ? ' selected-card' : ''}`}
+            onClick={() => setTraceClaimFilter('all')}
+          >
+            全部 claims
+          </button>
+          <button
+            type="button"
+            className={`secondary${traceClaimFilter === 'missing_conflict' ? ' selected-card' : ''}`}
+            onClick={() => setTraceClaimFilter('missing_conflict')}
+          >
+            缺少 conflict claim
+          </button>
+          <button
+            type="button"
+            className={`secondary${traceClaimFilter === 'insufficiency' ? ' selected-card' : ''}`}
+            onClick={() => setTraceClaimFilter('insufficiency')}
+          >
+            insufficiency
+          </button>
+          <button
+            type="button"
+            className={`secondary${traceClaimFilter === 'conditional' ? ' selected-card' : ''}`}
+            onClick={() => setTraceClaimFilter('conditional')}
+          >
+            conditional
+          </button>
+        </div>
+      </details>
       {(traceConflictOnly || traceClaimFilter !== 'all') && (
         <div className="status-line">
           当前筛选:
@@ -404,7 +409,6 @@ export function TracesPanel() {
             </div>
           </div>
         )}
-        <JsonOutput data={currentTrace} placeholder="还没有加载任何 trace" />
         <StatusLine
           message={
             diagnosisLoading
@@ -420,7 +424,7 @@ export function TracesPanel() {
         {diagnosis && (
           <div className="cards" style={{ marginBottom: 12 }}>
             {diagnosisFindings.length ? (
-              diagnosisFindings.map((finding, index) => (
+              diagnosisFindings.slice(0, 4).map((finding, index) => (
                 <Card
                   key={`${finding.category}-${index}`}
                   title={`${finding.category} | ${finding.severity}`}
@@ -433,7 +437,13 @@ export function TracesPanel() {
             )}
           </div>
         )}
-        <JsonOutput data={diagnosis} placeholder="还没有执行诊断" />
+        <details className="details-panel">
+          <summary>查看原始 trace 和诊断数据</summary>
+          <div className="stack" style={{ marginTop: 12 }}>
+            <JsonOutput data={currentTrace} placeholder="还没有加载任何 trace" />
+            <JsonOutput data={diagnosis} placeholder="还没有执行诊断" />
+          </div>
+        </details>
       </form>
     </Panel>
   );

@@ -57,6 +57,20 @@ export function parseApiError(error: unknown): ApiError {
 
 export function formatApiError(error: unknown): string {
   const parsed = parseApiError(error);
+  const detail = parsed.detail || parsed.message;
+  const normalized = detail.toLowerCase();
+  if (normalized.includes('quota exceeded') || normalized.includes('resource_exhausted')) {
+    return '当前模型服务配额已用完，请稍后再试，或切换到可用的模型配置。';
+  }
+  if (normalized.includes('api key not valid') || normalized.includes('invalid or missing api key')) {
+    return '当前模型或业务接口的 API Key 无效，请先检查配置。';
+  }
+  if (normalized.includes('unsupported file type')) {
+    return parsed.detail || '文件类型不受支持，请上传 PDF、Markdown、TXT、HTML 或常见图片。';
+  }
+  if (normalized.includes('returned empty content') || normalized.includes('produced no chunks')) {
+    return '文件已经上传，但模型没有成功读出可检索内容。请优先尝试更清晰的 PDF，或改用支持文档理解的模型配置。';
+  }
   if (parsed.detail && parsed.detail !== parsed.message) {
     return `${parsed.message}: ${parsed.detail}`;
   }
@@ -79,6 +93,28 @@ export const businessIngestApi = {
         headers: authHeaders(apiKey),
       })
       .then((r) => r.data),
+  upload: (
+    payload: {
+      files: File[];
+      kb_id?: string;
+      tenant_id?: string;
+    },
+    apiKey?: string,
+  ) => {
+    const form = new FormData();
+    payload.files.forEach((file) => form.append('files', file));
+    if (payload.kb_id) {
+      form.append('kb_id', payload.kb_id);
+    }
+    if (payload.tenant_id) {
+      form.append('tenant_id', payload.tenant_id);
+    }
+    return axios
+      .post<IngestResponse>(`${API_BASE}/v1/rag/ingest/upload`, form, {
+        headers: authHeaders(apiKey),
+      })
+      .then((r) => r.data);
+  },
 };
 
 export const chatApi = {

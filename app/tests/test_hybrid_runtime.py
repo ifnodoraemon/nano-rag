@@ -261,9 +261,11 @@ async def test_ingestion_pipeline_updates_hybrid_index(monkeypatch, tmp_path) ->
     monkeypatch.setattr(
         "app.ingestion.pipeline.discover_files", lambda path: [tmp_path / "doc.txt"]
     )
-    monkeypatch.setattr(
-        "app.ingestion.pipeline.parse_document", lambda path: "PTO carryover details"
-    )
+
+    async def fake_parse_document(path, document_parser=None):  # noqa: ANN001, ARG001
+        return "PTO carryover details"
+
+    monkeypatch.setattr("app.ingestion.pipeline.parse_document", fake_parse_document)
 
     repository = InMemoryVectorRepository()
     hybrid = HybridRetriever(
