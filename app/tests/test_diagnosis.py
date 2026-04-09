@@ -28,6 +28,75 @@ def test_diagnose_trace_flags_refusal_with_context() -> None:
     assert diagnosis.findings[0].category == "generation_refusal_with_context"
 
 
+def test_diagnose_trace_flags_conflicting_wiki_contexts() -> None:
+    service = DiagnosisService()
+    trace = TraceRecord(
+        trace_id="trace-2",
+        query="PTO 可以结转吗？",
+        retrieved_chunk_ids=["wiki:topic:leave-policy"],
+        reranked_chunk_ids=["wiki:topic:leave-policy"],
+        retrieved=[
+            {
+                "chunk_id": "wiki:topic:leave-policy",
+                "text": "Topic page with conflicting facts.",
+                "wiki_status": "conflicting",
+                "source": "wiki/topics/default--leave-policy.md",
+            }
+        ],
+        reranked=[
+            {
+                "chunk_id": "wiki:topic:leave-policy",
+                "text": "Topic page with conflicting facts.",
+                "wiki_status": "conflicting",
+                "source": "wiki/topics/default--leave-policy.md",
+            }
+        ],
+        contexts=[
+            {
+                "chunk_id": "wiki:topic:leave-policy",
+                "text": "Topic page with conflicting facts.",
+                "wiki_status": "conflicting",
+                "source": "wiki/topics/default--leave-policy.md",
+            }
+        ],
+        answer="PTO 可以结转 5 天。",
+    )
+
+    diagnosis = service.diagnose_trace(trace)
+
+    categories = [finding.category for finding in diagnosis.findings]
+    assert "wiki_conflict_detected" in categories
+    assert "conflict_claim_missing" in categories
+    assert "conflict_not_reflected_in_answer" in categories
+
+
+def test_diagnose_trace_flags_missing_insufficiency_claim() -> None:
+    service = DiagnosisService()
+    trace = TraceRecord(
+        trace_id="trace-3",
+        query="What is the contractor carryover policy?",
+        retrieved_chunk_ids=["c1"],
+        reranked_chunk_ids=["c1"],
+        retrieved=[{"chunk_id": "c1", "text": "No contractor policy is documented."}],
+        reranked=[{"chunk_id": "c1", "text": "No contractor policy is documented."}],
+        contexts=[{"chunk_id": "c1", "text": "No contractor policy is documented."}],
+        answer="Insufficient evidence to determine the contractor carryover policy.",
+        supporting_claims=[
+            {
+                "claim_type": "factual",
+                "text": "No explicit contractor rule was retrieved.",
+                "citation_labels": ["C1"],
+            }
+        ],
+    )
+
+    diagnosis = service.diagnose_trace(trace)
+
+    categories = [finding.category for finding in diagnosis.findings]
+    assert "generation_refusal_with_context" in categories
+    assert "insufficiency_claim_missing" in categories
+
+
 def test_diagnose_eval_flags_generation_misalignment_when_context_recall_is_full() -> None:
     service = DiagnosisService()
     report = {

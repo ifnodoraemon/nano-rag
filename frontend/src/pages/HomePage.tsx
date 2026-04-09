@@ -1,4 +1,6 @@
 import { HealthPanel } from './HealthPanel';
+import { QualitySummaryPanel } from './QualitySummaryPanel';
+import { RiskSummaryPanel } from './RiskSummaryPanel';
 import { WorkspacePanel } from './WorkspacePanel';
 import { IngestPanel } from './IngestPanel';
 import { ChatPanel } from './ChatPanel';
@@ -39,17 +41,27 @@ export function HomePage() {
 
       <div className="main-flow">
         <HealthPanel />
+        <RiskSummaryPanel />
+        <QualitySummaryPanel />
         <WorkspacePanel />
         <IngestPanel />
-        <ChatPanel />
+        <div id="chat-panel">
+          <ChatPanel />
+        </div>
       </div>
 
-      <details className="advanced-toggle">
+      <details className="advanced-toggle" id="advanced-workbench">
         <summary>高级调试与评测</summary>
         <div className="advanced-grid">
-          <DebugPanel />
-          <TracesPanel />
-          <EvalPanel />
+          <div id="debug-panel">
+            <DebugPanel />
+          </div>
+          <div id="traces-panel">
+            <TracesPanel />
+          </div>
+          <div id="eval-panel">
+            <EvalPanel />
+          </div>
         </div>
       </details>
     </div>

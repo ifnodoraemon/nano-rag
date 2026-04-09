@@ -46,15 +46,28 @@ export interface ChatRequest {
 }
 
 export interface Citation {
+  citation_label?: string | null;
   chunk_id: string;
   source: string;
   score?: number;
+  evidence_role?: string | null;
+  wiki_status?: string | null;
+  span_text?: string | null;
+  span_start?: number | null;
+  span_end?: number | null;
+}
+
+export interface SupportingClaim {
+  claim_type: string;
+  text: string;
+  citation_labels: string[];
 }
 
 export interface ChatResponse {
   answer: string;
   citations: Citation[];
   contexts: Record<string, unknown>[];
+  supporting_claims?: SupportingClaim[];
   trace_id?: string;
   kb_id?: string;
   tenant_id?: string | null;
@@ -76,6 +89,10 @@ export interface TraceSummary {
   model_alias?: string;
   prompt_version?: string;
   context_count?: number;
+  conflicting_context_count?: number;
+  conflict_claim_count?: number;
+  insufficiency_claim_count?: number;
+  conditional_claim_count?: number;
   kb_id?: string | null;
   tenant_id?: string | null;
   session_id?: string | null;
@@ -99,10 +116,13 @@ export interface TraceRecord {
   session_id?: string | null;
   retrieved_chunk_ids: string[];
   reranked_chunk_ids: string[];
+  freshness_ranked_chunk_ids: string[];
   retrieved: Record<string, unknown>[];
   reranked: Record<string, unknown>[];
+  freshness_ranked: Record<string, unknown>[];
   contexts: Record<string, unknown>[];
-  citations: Record<string, unknown>[];
+  citations: Citation[];
+  supporting_claims: SupportingClaim[];
   answer?: string;
   model_alias?: string;
   embedding_model_alias?: string;
@@ -144,6 +164,9 @@ export interface EvalResultItem {
   answer_exact_match: number;
   reference_context_recall: number;
   retrieved_context_count: number;
+  conflicting_context_count?: number;
+  conflict_claim_count?: number;
+  insufficiency_claim_count?: number;
   answer?: string;
   reference_answer?: string;
 }
@@ -152,6 +175,12 @@ export interface EvalAggregate {
   answer_exact_match: number;
   reference_context_recall: number;
   retrieved_context_count_avg: number;
+  conflicting_context_count_avg?: number;
+  conflicting_hit_rate?: number;
+  conflict_claim_count_avg?: number;
+  conflict_claim_hit_rate?: number;
+  insufficiency_claim_count_avg?: number;
+  insufficiency_claim_hit_rate?: number;
 }
 
 export interface EvalReportDetail {

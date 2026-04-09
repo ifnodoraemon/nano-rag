@@ -89,6 +89,50 @@ def test_in_memory_repository_search_is_scoped_by_kb_and_tenant() -> None:
     assert hits[0].chunk.chunk_id == "doc-1:0"
 
 
+def test_in_memory_repository_search_supports_metadata_filters() -> None:
+    repository = InMemoryVectorRepository()
+    source_path = "data/raw/employee_handbook.md"
+    repository.upsert(
+        Document(doc_id="doc-1", source_path=source_path, title="Policy", content="a", metadata={"kb_id": "default"}),
+        [
+            Chunk(
+                chunk_id="doc-1:0",
+                doc_id="doc-1",
+                chunk_index=0,
+                text="policy text",
+                source_path=source_path,
+                title="Policy",
+                metadata={"kb_id": "default", "doc_type": "policy", "effective_date": "2026-01-15"},
+            )
+        ],
+        [[1.0, 0.0]],
+    )
+    repository.upsert(
+        Document(doc_id="doc-2", source_path="data/raw/faq.md", title="FAQ", content="b", metadata={"kb_id": "default"}),
+        [
+            Chunk(
+                chunk_id="doc-2:0",
+                doc_id="doc-2",
+                chunk_index=0,
+                text="faq text",
+                source_path="data/raw/faq.md",
+                title="FAQ",
+                metadata={"kb_id": "default", "doc_type": "faq", "effective_date": "2024-01-15"},
+            )
+        ],
+        [[1.0, 0.0]],
+    )
+
+    hits = repository.search(
+        [1.0, 0.0],
+        top_k=5,
+        kb_id="default",
+        metadata_filters={"doc_types": ["policy"], "effective_date_from": "2026-01-01"},
+    )
+
+    assert [hit.chunk.chunk_id for hit in hits] == ["doc-1:0"]
+
+
 def test_milvus_repository_refuses_to_drop_collection_on_dimension_mismatch(monkeypatch) -> None:
     class FakeMilvusClient:
         def has_collection(self, collection_name):  # noqa: ANN001, ARG002

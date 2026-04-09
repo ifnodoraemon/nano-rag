@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Any
 
 from pymilvus import DataType
 
+from app.retrieval.filters import match_metadata_filters
 from app.schemas.chunk import Chunk
 from app.schemas.document import Document
 from app.vectorstore.collections import CHUNKS_COLLECTION
@@ -52,6 +53,7 @@ class VectorRepository(ABC):
         top_k: int,
         kb_id: str = "default",
         tenant_id: str | None = None,
+        metadata_filters: dict[str, object] | None = None,
     ) -> list[SearchHit]:
         raise NotImplementedError
 
@@ -111,6 +113,7 @@ class InMemoryVectorRepository(VectorRepository):
         top_k: int,
         kb_id: str = "default",
         tenant_id: str | None = None,
+        metadata_filters: dict[str, object] | None = None,
     ) -> list[SearchHit]:
         with self._lock:
             entries_snapshot = list(self.entries)
@@ -119,6 +122,7 @@ class InMemoryVectorRepository(VectorRepository):
             for chunk, embedding in entries_snapshot
             if chunk.metadata.get("kb_id", "default") == kb_id
             and (tenant_id is None or chunk.metadata.get("tenant_id") == tenant_id)
+            and match_metadata_filters(chunk.metadata, metadata_filters)
         ]
         return sorted(scored, key=lambda item: item.score, reverse=True)[:top_k]
 
@@ -226,6 +230,7 @@ class MilvusVectorRepository(VectorRepository):
         top_k: int,
         kb_id: str = "default",
         tenant_id: str | None = None,
+        metadata_filters: dict[str, object] | None = None,
     ) -> list[SearchHit]:
         escaped_kb_id = _escape_milvus_string(kb_id)
         base_filter = f'kb_id == "{escaped_kb_id}"'
@@ -236,7 +241,7 @@ class MilvusVectorRepository(VectorRepository):
             collection_name=CHUNKS_COLLECTION,
             data=[vector],
             filter=base_filter,
-            limit=top_k,
+            limit=max(top_k * 4, 20),
             output_fields=[
                 "chunk_id",
                 "doc_id",
@@ -250,6 +255,9 @@ class MilvusVectorRepository(VectorRepository):
         hits: list[SearchHit] = []
         for item in results[0]:
             entity = item["entity"]
+            metadata = entity.get("metadata_json") or {}
+            if not match_metadata_filters(metadata, metadata_filters):
+                continue
             hits.append(
                 SearchHit(
                     chunk=Chunk(
@@ -259,11 +267,13 @@ class MilvusVectorRepository(VectorRepository):
                         text=entity["text"],
                         source_path=entity["source"],
                         title=entity.get("title"),
-                        metadata=entity.get("metadata_json") or {},
+                        metadata=metadata,
                     ),
                     score=float(item["distance"]),
                 )
             )
+            if len(hits) >= top_k:
+                break
         return hits
 
     def stats(self) -> dict[str, object]:

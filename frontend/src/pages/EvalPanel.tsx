@@ -1,11 +1,63 @@
 import { useEffect, useMemo, useState } from 'react';
-import { useAppStore } from '../stores/appStore';
+import { useAppStore, type EvalClaimFilter } from '../stores/appStore';
 import { Panel, StatusLine, JsonOutput, LoadingButton, Card } from '../components/common';
+
+function openAdvancedPanel(targetId: string): void {
+  const advanced = document.getElementById('advanced-workbench');
+  if (advanced instanceof HTMLDetailsElement) {
+    advanced.open = true;
+  }
+  window.requestAnimationFrame(() => {
+    document.getElementById(targetId)?.scrollIntoView({
+      behavior: 'smooth',
+      block: 'start',
+    });
+  });
+}
 
 function formatTimestamp(timestamp: number): string {
   return new Date(timestamp * 1000).toLocaleString('zh-CN', {
     hour12: false,
   });
+}
+
+function formatMetric(value: number | undefined): string {
+  return value === undefined ? 'n/a' : String(value);
+}
+
+function formatRate(value: number | undefined): string {
+  return value === undefined ? 'n/a' : `${(value * 100).toFixed(1)}%`;
+}
+
+function matchesClaimFilter(
+  item: {
+    conflicting_context_count?: number;
+    conflict_claim_count?: number;
+    insufficiency_claim_count?: number;
+  },
+  claimFilter: EvalClaimFilter,
+): boolean {
+  if (claimFilter === 'missing_conflict') {
+    return (item.conflicting_context_count ?? 0) > 0 && (item.conflict_claim_count ?? 0) === 0;
+  }
+  if (claimFilter === 'insufficiency') {
+    return (item.insufficiency_claim_count ?? 0) > 0;
+  }
+  return true;
+}
+
+function claimFilterLabel(claimFilter: EvalClaimFilter): string {
+  if (claimFilter === 'missing_conflict') {
+    return '只看缺少 conflict claim';
+  }
+  if (claimFilter === 'insufficiency') {
+    return '只看 insufficiency claims';
+  }
+  return '全部 claims';
+}
+
+function getBenchmarkCaseKey(item: Record<string, unknown>, index: number): string {
+  return String(item.trace_id || item.query || `benchmark-${index}`);
 }
 
 export function EvalPanel() {
@@ -24,9 +76,11 @@ export function EvalPanel() {
     loadEvalReports,
     currentEvalReport,
     currentEvalReportPath,
+    selectedEvalResultIndex,
     evalReportLoading,
     evalReportError,
     loadEvalReport,
+    setSelectedEvalResultIndex,
     benchmarkResult,
     benchmarkLoading,
     benchmarkError,
@@ -36,15 +90,27 @@ export function EvalPanel() {
     loadBenchmarkReports,
     currentBenchmarkReport,
     currentBenchmarkReportPath,
+    selectedBenchmarkCaseKey,
     benchmarkReportLoading,
     benchmarkReportError,
     loadBenchmarkReport,
+    setSelectedBenchmarkCaseKey,
     runBenchmark,
     diagnosis,
     diagnosisLoading,
     diagnosisError,
     diagnoseEvalResult,
     runEval,
+    evalConflictOnly,
+    benchmarkConflictOnly,
+    evalClaimFilter,
+    benchmarkClaimFilter,
+    setEvalConflictOnly,
+    setBenchmarkConflictOnly,
+    setEvalClaimFilter,
+    setBenchmarkClaimFilter,
+    setSelectedTraceId,
+    prepareChatReplay,
   } = useAppStore();
   const [datasetPath, setDatasetPath] = useState('data/eval/employee_handbook_eval.jsonl');
   const [outputPath, setOutputPath] = useState('');
@@ -69,6 +135,12 @@ export function EvalPanel() {
     activeBenchmarkReport && typeof activeBenchmarkReport === 'object'
       ? (activeBenchmarkReport.aggregate as Record<string, number> | undefined)
       : undefined;
+  const benchmarkResults =
+    activeBenchmarkReport &&
+    typeof activeBenchmarkReport === 'object' &&
+    Array.isArray((activeBenchmarkReport as Record<string, unknown>).results)
+      ? ((activeBenchmarkReport as Record<string, unknown>).results as Record<string, unknown>[])
+      : [];
   const failedCases = useMemo(
     () =>
       (activeReport?.results || [])
@@ -78,6 +150,99 @@ export function EvalPanel() {
         ),
     [activeReport],
   );
+  const benchmarkBadCases = useMemo(
+    () =>
+      benchmarkResults.filter(
+        (item) =>
+          Number(item.answer_exact_match ?? 1) < 1 || Number(item.reference_context_recall ?? 1) < 1,
+      ),
+    [benchmarkResults],
+  );
+  const benchmarkConflictCases = useMemo(
+    () =>
+      benchmarkBadCases.filter((item) => Number(item.conflicting_context_count ?? 0) > 0),
+    [benchmarkBadCases],
+  );
+  const visibleFailedCases = useMemo(
+    () =>
+      failedCases.filter(({ item }) => {
+        if (evalConflictOnly && (item.conflicting_context_count ?? 0) === 0) {
+          return false;
+        }
+        return matchesClaimFilter(item, evalClaimFilter);
+      }),
+    [evalClaimFilter, evalConflictOnly, failedCases],
+  );
+  const visibleEvalReports = useMemo(
+    () =>
+      evalConflictOnly
+        ? evalReports.filter((report) => Number(report.aggregate.conflicting_hit_rate ?? 0) > 0)
+        : evalReports,
+    [evalConflictOnly, evalReports],
+  );
+  const visibleBenchmarkBadCases = useMemo(
+    () =>
+      benchmarkBadCases.filter((item) => {
+        if (benchmarkConflictOnly && Number(item.conflicting_context_count ?? 0) === 0) {
+          return false;
+        }
+        return matchesClaimFilter(
+          {
+            conflicting_context_count: Number(item.conflicting_context_count ?? 0),
+            conflict_claim_count: Number(item.conflict_claim_count ?? 0),
+            insufficiency_claim_count: Number(item.insufficiency_claim_count ?? 0),
+          },
+          benchmarkClaimFilter,
+        );
+      }),
+    [benchmarkBadCases, benchmarkClaimFilter, benchmarkConflictOnly],
+  );
+  const visibleBenchmarkReports = useMemo(
+    () =>
+      benchmarkConflictOnly
+        ? benchmarkReports.filter(
+            (report) =>
+              Number(report.aggregate.conflicting_bad_case_count ?? 0) > 0 ||
+              Number(report.aggregate.conflicting_hit_rate ?? 0) > 0,
+          )
+        : benchmarkReports,
+    [benchmarkConflictOnly, benchmarkReports],
+  );
+  const selectedBenchmarkCase = useMemo(
+    () =>
+      benchmarkBadCases.find(
+        (item, index) => getBenchmarkCaseKey(item, index) === selectedBenchmarkCaseKey,
+      ) || null,
+    [benchmarkBadCases, selectedBenchmarkCaseKey],
+  );
+  const selectedBenchmarkDiagnosis =
+    selectedBenchmarkCase &&
+    typeof selectedBenchmarkCase.diagnosis === 'object' &&
+    selectedBenchmarkCase.diagnosis !== null
+      ? (selectedBenchmarkCase.diagnosis as Record<string, unknown>)
+      : null;
+
+  useEffect(() => {
+    if (selectedEvalResultIndex === null) {
+      return;
+    }
+    window.requestAnimationFrame(() => {
+      document
+        .getElementById(`eval-result-${selectedEvalResultIndex}`)
+        ?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    });
+  }, [selectedEvalResultIndex, visibleFailedCases.length]);
+
+  useEffect(() => {
+    if (!selectedBenchmarkCaseKey) {
+      return;
+    }
+    window.requestAnimationFrame(() => {
+      document
+        .getElementById(`benchmark-case-${selectedBenchmarkCaseKey}`)
+        ?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    });
+  }, [selectedBenchmarkCaseKey, visibleBenchmarkBadCases.length]);
 
   return (
     <Panel
@@ -149,6 +314,64 @@ export function EvalPanel() {
           >
             运行 Benchmark
           </LoadingButton>
+          <button
+            type="button"
+            className="secondary"
+            onClick={() => setEvalConflictOnly(!evalConflictOnly)}
+          >
+            {evalConflictOnly ? '评测显示全部' : '评测只看冲突'}
+          </button>
+          <button
+            type="button"
+            className="secondary"
+            onClick={() => setBenchmarkConflictOnly(!benchmarkConflictOnly)}
+          >
+            {benchmarkConflictOnly ? 'Benchmark 显示全部' : 'Benchmark 只看冲突'}
+          </button>
+        </div>
+        <div className="actions">
+          <button
+            type="button"
+            className={`secondary${evalClaimFilter === 'all' ? ' selected-card' : ''}`}
+            onClick={() => setEvalClaimFilter('all')}
+          >
+            Eval 全部 claims
+          </button>
+          <button
+            type="button"
+            className={`secondary${evalClaimFilter === 'missing_conflict' ? ' selected-card' : ''}`}
+            onClick={() => setEvalClaimFilter('missing_conflict')}
+          >
+            Eval 缺少 conflict claim
+          </button>
+          <button
+            type="button"
+            className={`secondary${evalClaimFilter === 'insufficiency' ? ' selected-card' : ''}`}
+            onClick={() => setEvalClaimFilter('insufficiency')}
+          >
+            Eval insufficiency
+          </button>
+          <button
+            type="button"
+            className={`secondary${benchmarkClaimFilter === 'all' ? ' selected-card' : ''}`}
+            onClick={() => setBenchmarkClaimFilter('all')}
+          >
+            Benchmark 全部 claims
+          </button>
+          <button
+            type="button"
+            className={`secondary${benchmarkClaimFilter === 'missing_conflict' ? ' selected-card' : ''}`}
+            onClick={() => setBenchmarkClaimFilter('missing_conflict')}
+          >
+            Benchmark 缺少 conflict claim
+          </button>
+          <button
+            type="button"
+            className={`secondary${benchmarkClaimFilter === 'insufficiency' ? ' selected-card' : ''}`}
+            onClick={() => setBenchmarkClaimFilter('insufficiency')}
+          >
+            Benchmark insufficiency
+          </button>
         </div>
         <StatusLine
           message={
@@ -193,6 +416,22 @@ export function EvalPanel() {
               <strong>{aggregate.retrieved_context_count_avg}</strong>
             </div>
             <div className="metric-card">
+              <span>Conflicting Context Avg</span>
+              <strong>{formatMetric(aggregate.conflicting_context_count_avg)}</strong>
+            </div>
+            <div className="metric-card">
+              <span>Conflict Hit Rate</span>
+              <strong>{formatRate(aggregate.conflicting_hit_rate)}</strong>
+            </div>
+            <div className="metric-card">
+              <span>Conflict Claim Hit Rate</span>
+              <strong>{formatRate(aggregate.conflict_claim_hit_rate)}</strong>
+            </div>
+            <div className="metric-card">
+              <span>Insufficiency Claim Hit Rate</span>
+              <strong>{formatRate(aggregate.insufficiency_claim_hit_rate)}</strong>
+            </div>
+            <div className="metric-card">
               <span>评测记录数</span>
               <strong>{activeReport?.records || 0}</strong>
             </div>
@@ -200,14 +439,31 @@ export function EvalPanel() {
 
           <div>
             <div className="section-label">坏例与待检查样本</div>
+            {(evalConflictOnly || evalClaimFilter !== 'all') && (
+              <div className="status-line">
+                当前 Eval 筛选:
+                {evalConflictOnly ? ' 只看冲突' : ' 全部坏例'} | {claimFilterLabel(evalClaimFilter)}
+              </div>
+            )}
             <div className="cards">
-              {failedCases.length ? (
-                failedCases.map(({ item, reportIndex }, index) => (
+              {visibleFailedCases.length ? (
+                visibleFailedCases.map(({ item, reportIndex }, index) => (
                   <Card
                     key={`${item.query}-${index}`}
                     title={item.query || `样本 ${index + 1}`}
+                    id={`eval-result-${reportIndex}`}
+                    className={selectedEvalResultIndex === reportIndex ? 'selected-card' : undefined}
                   >
                     exact_match={item.answer_exact_match} | context_recall={item.reference_context_recall}
+                    {'\n'}
+                    conflicts={item.conflicting_context_count ?? 0}
+                    {'\n'}
+                    conflict_claims={item.conflict_claim_count ?? 0} | insufficiency_claims=
+                    {item.insufficiency_claim_count ?? 0}
+                    {Number(item.conflicting_context_count ?? 0) > 0 &&
+                    Number(item.conflict_claim_count ?? 0) === 0
+                      ? '\nmissing conflict claim'
+                      : ''}
                     {'\n'}
                     trace_id: {item.trace_id || 'n/a'}
                     {'\n'}
@@ -219,9 +475,46 @@ export function EvalPanel() {
                       <button
                         type="button"
                         className="secondary"
-                        onClick={() => diagnoseEvalResult(currentEvalReportPath, reportIndex, false)}
+                        onClick={() => {
+                          setSelectedEvalResultIndex(reportIndex);
+                          void diagnoseEvalResult(currentEvalReportPath, reportIndex, false);
+                        }}
                       >
                         诊断该坏例
+                      </button>
+                    )}
+                    <button
+                      type="button"
+                      className="secondary"
+                      onClick={() => setSelectedEvalResultIndex(reportIndex)}
+                    >
+                      聚焦该样本
+                    </button>
+                    {item.trace_id && (
+                      <button
+                        type="button"
+                        className="secondary"
+                        onClick={() => {
+                          setSelectedTraceId(String(item.trace_id));
+                          openAdvancedPanel('traces-panel');
+                        }}
+                      >
+                        打开 Trace
+                      </button>
+                    )}
+                    {item.query && (
+                      <button
+                        type="button"
+                        className="secondary"
+                        onClick={() =>
+                          prepareChatReplay({
+                            query: item.query || '',
+                            traceId: item.trace_id || undefined,
+                            sourceLabel: `eval sample ${reportIndex}`,
+                          })
+                        }
+                      >
+                        回放到 Chat
                       </button>
                     )}
                   </Card>
@@ -270,8 +563,8 @@ export function EvalPanel() {
           isError={!!evalReportsError || !!evalReportError}
         />
         <div className="cards">
-          {evalReports.length ? (
-            evalReports.slice(0, 8).map((report) => (
+          {visibleEvalReports.length ? (
+            visibleEvalReports.slice(0, 8).map((report) => (
               <button
                 key={report.path}
                 type="button"
@@ -283,6 +576,15 @@ export function EvalPanel() {
                 <div className="muted">
                   records={report.records} | exact_match={report.aggregate.answer_exact_match ?? 'n/a'} |
                   context_recall={report.aggregate.reference_context_recall ?? 'n/a'}
+                </div>
+                <div className="muted">
+                  conflict_hit_rate={formatRate(report.aggregate.conflicting_hit_rate)} |
+                  conflict_avg={formatMetric(report.aggregate.conflicting_context_count_avg)}
+                </div>
+                <div className="muted">
+                  conflict_claim_hit_rate={formatRate(report.aggregate.conflict_claim_hit_rate)} |
+                  insufficiency_claim_hit_rate=
+                  {formatRate(report.aggregate.insufficiency_claim_hit_rate)}
                 </div>
                 <div className="muted">updated={formatTimestamp(report.updated_at)}</div>
               </button>
@@ -306,26 +608,208 @@ export function EvalPanel() {
           isError={!!benchmarkReportsError || !!benchmarkReportError}
         />
         {benchmarkAggregate ? (
-          <div className="metric-grid">
-            <div className="metric-card">
-              <span>Bad Case Count</span>
-              <strong>{benchmarkAggregate.bad_case_count ?? 'n/a'}</strong>
+          <div className="stack">
+            <div className="metric-grid">
+              <div className="metric-card">
+                <span>Bad Case Count</span>
+                <strong>{benchmarkAggregate.bad_case_count ?? 'n/a'}</strong>
+              </div>
+              <div className="metric-card">
+                <span>Conflict Bad Cases</span>
+                <strong>{benchmarkAggregate.conflicting_bad_case_count ?? 'n/a'}</strong>
+              </div>
+              <div className="metric-card">
+                <span>Conflict Hit Rate</span>
+                <strong>{formatRate(benchmarkAggregate.conflicting_hit_rate)}</strong>
+              </div>
+              <div className="metric-card">
+                <span>Conflicting Context Avg</span>
+                <strong>{formatMetric(benchmarkAggregate.conflicting_context_count_avg)}</strong>
+              </div>
+              <div className="metric-card">
+                <span>Conflict Claim Hit Rate</span>
+                <strong>{formatRate(benchmarkAggregate.conflict_claim_hit_rate)}</strong>
+              </div>
+              <div className="metric-card">
+                <span>Insufficiency Claim Hit Rate</span>
+                <strong>{formatRate(benchmarkAggregate.insufficiency_claim_hit_rate)}</strong>
+              </div>
+              <div className="metric-card">
+                <span>Latency Avg</span>
+                <strong>{benchmarkAggregate.latency_seconds_avg ?? 'n/a'}</strong>
+              </div>
+              <div className="metric-card">
+                <span>Latency P95</span>
+                <strong>{benchmarkAggregate.latency_seconds_p95 ?? 'n/a'}</strong>
+              </div>
             </div>
-            <div className="metric-card">
-              <span>Latency Avg</span>
-              <strong>{benchmarkAggregate.latency_seconds_avg ?? 'n/a'}</strong>
+
+            {selectedBenchmarkCaseKey && (
+              <div>
+                <div className="section-label">当前聚焦 Benchmark Diagnosis</div>
+                {selectedBenchmarkDiagnosis ? (
+                  <Card
+                    title={String(
+                      selectedBenchmarkCase?.query ||
+                        selectedBenchmarkCase?.trace_id ||
+                        'Selected benchmark case',
+                    )}
+                  >
+                    summary: {String(selectedBenchmarkDiagnosis.summary || 'n/a')}
+                    {'\n'}
+                    trace_id: {String(selectedBenchmarkCase?.trace_id || 'n/a')}
+                    {'\n'}
+                    severity: {String(selectedBenchmarkDiagnosis.severity || 'n/a')}
+                    {selectedBenchmarkCase?.trace_id ? (
+                      <>
+                        {'\n'}
+                        <button
+                          type="button"
+                          className="secondary"
+                          onClick={() => {
+                            setSelectedTraceId(String(selectedBenchmarkCase.trace_id));
+                            openAdvancedPanel('traces-panel');
+                          }}
+                        >
+                          打开 Trace
+                        </button>
+                      </>
+                    ) : null}
+                    {selectedBenchmarkCase?.query ? (
+                      <>
+                        {'\n'}
+                        <button
+                          type="button"
+                          className="secondary"
+                          onClick={() =>
+                            prepareChatReplay({
+                              query: String(selectedBenchmarkCase.query || ''),
+                              traceId: String(selectedBenchmarkCase.trace_id || '') || undefined,
+                              sourceLabel: 'selected benchmark case',
+                            })
+                          }
+                        >
+                          回放到 Chat
+                        </button>
+                      </>
+                    ) : null}
+                  </Card>
+                ) : (
+                  <div className="empty-state">
+                    当前聚焦的 benchmark bad case 没有内嵌 diagnosis 摘要。
+                  </div>
+                )}
+              </div>
+            )}
+
+            <div>
+              <div className="section-label">Benchmark 坏例</div>
+              {(benchmarkConflictOnly || benchmarkClaimFilter !== 'all') && (
+                <div className="status-line">
+                  当前 Benchmark 筛选:
+                  {benchmarkConflictOnly ? ' 只看冲突' : ' 全部坏例'} | {claimFilterLabel(benchmarkClaimFilter)}
+                </div>
+              )}
+              <div className="cards">
+                {visibleBenchmarkBadCases.length ? (
+                  visibleBenchmarkBadCases.slice(0, 6).map((item, index) => (
+                    <Card
+                      key={`${String(item.trace_id || item.query || 'benchmark')}-${index}`}
+                      title={String(item.query || `坏例 ${index + 1}`)}
+                      id={`benchmark-case-${getBenchmarkCaseKey(item, index)}`}
+                      className={
+                        selectedBenchmarkCaseKey === getBenchmarkCaseKey(item, index)
+                          ? 'selected-card'
+                          : undefined
+                      }
+                    >
+                      exact_match={String(item.answer_exact_match ?? 'n/a')} | context_recall=
+                      {String(item.reference_context_recall ?? 'n/a')}
+                      {'\n'}
+                      conflicts={String(item.conflicting_context_count ?? 0)} | latency=
+                      {String(item.latency_seconds ?? 'n/a')}
+                      {'\n'}
+                      conflict_claims={String(item.conflict_claim_count ?? 0)} |
+                      insufficiency_claims={String(item.insufficiency_claim_count ?? 0)}
+                      {'\n'}
+                      trace_id: {String(item.trace_id || 'n/a')}
+                      {'\n'}
+                      answer: {String(item.answer || 'n/a')}
+                      {'\n'}
+                      <button
+                        type="button"
+                        className="secondary"
+                        onClick={() => setSelectedBenchmarkCaseKey(getBenchmarkCaseKey(item, index))}
+                      >
+                        聚焦该样本
+                      </button>
+                      {item.trace_id ? (
+                        <button
+                          type="button"
+                          className="secondary"
+                          onClick={() => {
+                            setSelectedTraceId(String(item.trace_id));
+                            openAdvancedPanel('traces-panel');
+                          }}
+                        >
+                          打开 Trace
+                        </button>
+                      ) : null}
+                      {item.query ? (
+                        <button
+                          type="button"
+                          className="secondary"
+                          onClick={() =>
+                            prepareChatReplay({
+                              query: String(item.query || ''),
+                              traceId: item.trace_id ? String(item.trace_id) : undefined,
+                              sourceLabel: `benchmark case ${index + 1}`,
+                            })
+                          }
+                        >
+                          回放到 Chat
+                        </button>
+                      ) : null}
+                    </Card>
+                  ))
+                ) : (
+                  <div className="empty-state">当前 benchmark 没有坏例。</div>
+                )}
+              </div>
             </div>
-            <div className="metric-card">
-              <span>Latency P95</span>
-              <strong>{benchmarkAggregate.latency_seconds_p95 ?? 'n/a'}</strong>
+
+            <div>
+              <div className="section-label">冲突命中坏例</div>
+              <div className="cards">
+                {benchmarkConflictCases.length ? (
+                  benchmarkConflictCases.slice(0, 4).map((item, index) => (
+                    <Card
+                      key={`${String(item.trace_id || item.query || 'conflict')}-conflict-${index}`}
+                      title={String(item.query || `冲突坏例 ${index + 1}`)}
+                    >
+                      conflicts={String(item.conflicting_context_count ?? 0)}
+                      {'\n'}
+                      trace_id: {String(item.trace_id || 'n/a')}
+                      {'\n'}
+                      diagnosis: {String(
+                        (
+                          (item.diagnosis as Record<string, unknown> | undefined)?.summary || 'n/a'
+                        ),
+                      )}
+                    </Card>
+                  ))
+                ) : (
+                  <div className="empty-state">当前 benchmark 没有命中冲突知识的坏例。</div>
+                )}
+              </div>
             </div>
           </div>
         ) : (
           <div className="empty-state">运行一次 benchmark 后，这里会展示延迟与坏例聚合。</div>
         )}
         <div className="cards">
-          {benchmarkReports.length ? (
-            benchmarkReports.slice(0, 8).map((report) => (
+          {visibleBenchmarkReports.length ? (
+            visibleBenchmarkReports.slice(0, 8).map((report) => (
               <button
                 key={report.path}
                 type="button"
@@ -337,6 +821,15 @@ export function EvalPanel() {
                 <div className="muted">
                   records={report.records} | bad_cases={report.aggregate.bad_case_count ?? 'n/a'} |
                   latency_p95={report.aggregate.latency_seconds_p95 ?? 'n/a'}
+                </div>
+                <div className="muted">
+                  conflict_bad_cases={report.aggregate.conflicting_bad_case_count ?? 'n/a'} |
+                  conflict_hit_rate={formatRate(report.aggregate.conflicting_hit_rate)}
+                </div>
+                <div className="muted">
+                  conflict_claim_hit_rate={formatRate(report.aggregate.conflict_claim_hit_rate)} |
+                  insufficiency_claim_hit_rate=
+                  {formatRate(report.aggregate.insufficiency_claim_hit_rate)}
                 </div>
                 <div className="muted">updated={formatTimestamp(report.updated_at)}</div>
               </button>

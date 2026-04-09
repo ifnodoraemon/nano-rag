@@ -12,6 +12,13 @@ logger = logging.getLogger(__name__)
 
 
 @dataclass
+class QueryExpansionPlan:
+    rewritten_query: str | None
+    retrieval_queries: list[str]
+    hyde_query: str | None = None
+
+
+@dataclass
 class QueryRewriterConfig:
     enable_rewrite: bool = False
     enable_multi_query: bool = False
@@ -114,3 +121,32 @@ class QueryRewriter:
         except Exception:
             logger.debug("hyde generation failed, returning original query")
             return query
+
+    async def build_plan(self, query: str) -> QueryExpansionPlan:
+        rewritten = await self.rewrite(query)
+        retrieval_queries = [rewritten]
+        if self.config.enable_multi_query:
+            retrieval_queries = await self.generate_multi_queries(rewritten)
+        hyde_query: str | None = None
+        if self.config.enable_hyde:
+            generated_hyde = await self.generate_hyde(rewritten)
+            if generated_hyde and generated_hyde.strip():
+                hyde_query = generated_hyde.strip()
+        unique_queries: list[str] = []
+        seen: set[str] = set()
+        for candidate in retrieval_queries:
+            normalized = candidate.strip()
+            if not normalized:
+                continue
+            lowered = normalized.lower()
+            if lowered in seen:
+                continue
+            seen.add(lowered)
+            unique_queries.append(normalized)
+        if not unique_queries:
+            unique_queries = [query]
+        return QueryExpansionPlan(
+            rewritten_query=rewritten if rewritten != query else None,
+            retrieval_queries=unique_queries,
+            hyde_query=hyde_query if hyde_query and hyde_query != rewritten else None,
+        )

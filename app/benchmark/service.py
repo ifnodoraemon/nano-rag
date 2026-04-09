@@ -19,12 +19,17 @@ def build_benchmark_report(
 ) -> dict:
     results = eval_report.get("results", []) if isinstance(eval_report, dict) else []
     bad_case_count = 0
+    conflicting_bad_case_count = 0
     latency_values: list[float] = []
     diagnosis_counts: dict[str, int] = {}
     enriched_results: list[dict] = []
+    conflicting_counts: list[int] = []
 
     for index, result in enumerate(results):
         result_payload = dict(result)
+        conflicting_context_count = int(
+            result_payload.get("conflicting_context_count", 0) or 0
+        )
         trace_id = result_payload.get("trace_id")
         trace = trace_store.get(str(trace_id)) if trace_id else None
         if trace and trace.latency_seconds is not None:
@@ -32,12 +37,26 @@ def build_benchmark_report(
             result_payload["latency_seconds"] = trace.latency_seconds
             result_payload["step_latencies"] = trace.step_latencies
             result_payload["model_alias"] = trace.model_alias
+        if trace:
+            conflicting_context_count = max(
+                conflicting_context_count,
+                sum(
+                    1
+                    for context in trace.contexts
+                    if isinstance(context, dict)
+                    and context.get("wiki_status") == "conflicting"
+                ),
+            )
+        result_payload["conflicting_context_count"] = conflicting_context_count
+        conflicting_counts.append(conflicting_context_count)
 
         if (
             safe_float(result_payload.get("answer_exact_match")) < 1.0
             or safe_float(result_payload.get("reference_context_recall")) < 1.0
         ):
             bad_case_count += 1
+            if conflicting_context_count > 0:
+                conflicting_bad_case_count += 1
             diagnosis = diagnosis_service.diagnose_eval_result(eval_report, index)
             result_payload["diagnosis"] = diagnosis.model_dump()
             for finding in diagnosis.findings:
@@ -49,6 +68,17 @@ def build_benchmark_report(
 
     latency_avg = round(mean(latency_values), 4) if latency_values else 0.0
     latency_p95 = 0.0
+    conflicting_context_count_avg = (
+        round(mean(conflicting_counts), 4) if conflicting_counts else 0.0
+    )
+    conflicting_hit_rate = (
+        round(
+            sum(1 for value in conflicting_counts if value > 0) / len(conflicting_counts),
+            4,
+        )
+        if conflicting_counts
+        else 0.0
+    )
     if latency_values:
         ordered = sorted(latency_values)
         p95_index = int(len(ordered) * P95_PERCENTILE)
@@ -66,6 +96,9 @@ def build_benchmark_report(
                 else {}
             ),
             "bad_case_count": bad_case_count,
+            "conflicting_bad_case_count": conflicting_bad_case_count,
+            "conflicting_context_count_avg": conflicting_context_count_avg,
+            "conflicting_hit_rate": conflicting_hit_rate,
             "latency_seconds_avg": latency_avg,
             "latency_seconds_p95": latency_p95,
         },

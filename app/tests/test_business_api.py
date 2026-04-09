@@ -54,6 +54,37 @@ async def test_business_chat_preserves_business_metadata() -> None:
 
 
 @pytest.mark.asyncio
+async def test_business_chat_passes_metadata_filters() -> None:
+    trace_store = TraceStore()
+    trace_store.save({"trace_id": "trace-1", "query": "policy"})
+
+    async def fake_chat_run(payload):  # noqa: ANN001
+        assert payload.metadata_filters == {"doc_types": ["policy"]}
+        return ChatResponse(
+            answer="a1",
+            citations=[Citation(chunk_id="c1", source="doc.md", score=1.0)],
+            contexts=[{"chunk_id": "c1"}],
+            trace_id="trace-1",
+        )
+
+    container = SimpleNamespace(
+        chat_pipeline=SimpleNamespace(run=fake_chat_run),
+        trace_store=trace_store,
+    )
+
+    response = await rag_chat(
+        BusinessChatRequest(
+            query="policy",
+            kb_id="default",
+            metadata_filters={"doc_types": ["policy"]},
+        ),
+        _request_with_container(container),
+    )
+
+    assert response.trace_id == "trace-1"
+
+
+@pytest.mark.asyncio
 async def test_business_ingest_wraps_ingest_response() -> None:
     async def fake_ingest_run(path, kb_id="default", tenant_id=None):  # noqa: ANN001
         assert path == "./data/raw"

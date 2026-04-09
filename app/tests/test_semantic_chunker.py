@@ -30,3 +30,21 @@ def test_semantic_chunker_respects_max_chunk_size() -> None:
     chunks = chunker.chunk(text, "doc1", "test.txt", "Test")
     for chunk in chunks:
         assert len(chunk.text) <= config.max_chunk_size or len(chunks) == 1
+
+
+def test_semantic_chunker_preserves_section_metadata() -> None:
+    chunker = SemanticChunker(SemanticChunkerConfig(max_chunk_size=20, min_chunk_size=1))
+    text = "# Policy\n\nCarryover is allowed. Claims must be filed soon."
+
+    chunks = chunker.chunk(
+        text,
+        "doc1",
+        "test.txt",
+        "Test",
+        metadata={"doc_type": "policy"},
+    )
+
+    assert chunks
+    assert chunks[0].metadata["parent_chunk_id"] == "doc1:parent:0"
+    assert chunks[0].metadata["section_path"] == ["Test", "Policy"]
+    assert chunks[0].metadata["doc_type"] == "policy"

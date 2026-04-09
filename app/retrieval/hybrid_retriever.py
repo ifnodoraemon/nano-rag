@@ -1,15 +1,17 @@
 from __future__ import annotations
 
+import json
 import os
 import threading
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import TYPE_CHECKING
 
-from app.retrieval.bm25 import BM25Config, BM25Index
+from app.retrieval.bm25 import BM25Index
+from app.retrieval.filters import match_metadata_filters
 from app.retrieval.hybrid_fusion import (
     HybridSearchConfig,
     reciprocal_rank_fusion,
-    weighted_score_fusion,
 )
 from app.schemas.chunk import Chunk
 from app.vectorstore.repository import SearchHit, VectorRepository
@@ -46,6 +48,10 @@ class HybridRetriever:
             in ("true", "1", "yes"),
         )
 
+    @property
+    def enabled(self) -> bool:
+        return self._bm25_enabled
+
     def index_chunk(self, chunk: Chunk) -> None:
         if not self._bm25_enabled:
             return
@@ -53,12 +59,52 @@ class HybridRetriever:
             self._chunk_cache[chunk.chunk_id] = chunk
             self.bm25_index.add_document(chunk.chunk_id, chunk.text)
 
+    def index_chunks(self, chunks: list[Chunk]) -> None:
+        for chunk in chunks:
+            self.index_chunk(chunk)
+
     def remove_chunk(self, chunk_id: str) -> None:
         if not self._bm25_enabled:
             return
         with self._lock:
             self._chunk_cache.pop(chunk_id, None)
             self.bm25_index.remove_document(chunk_id)
+
+    def remove_by_source(
+        self, source_path: str, kb_id: str, tenant_id: str | None = None
+    ) -> None:
+        if not self._bm25_enabled:
+            return
+        with self._lock:
+            removable_ids = [
+                chunk_id
+                for chunk_id, chunk in self._chunk_cache.items()
+                if chunk.source_path == source_path
+                and chunk.metadata.get("kb_id", "default") == kb_id
+                and (tenant_id is None or chunk.metadata.get("tenant_id") == tenant_id)
+            ]
+            for chunk_id in removable_ids:
+                self._chunk_cache.pop(chunk_id, None)
+                self.bm25_index.remove_document(chunk_id)
+
+    def bootstrap_from_parsed_dir(self, parsed_dir: Path) -> int:
+        if not self._bm25_enabled or not parsed_dir.exists():
+            return 0
+        count = 0
+        for artifact in parsed_dir.glob("*.json"):
+            try:
+                payload = json.loads(artifact.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            raw_chunks = payload.get("chunks", []) if isinstance(payload, dict) else []
+            if not isinstance(raw_chunks, list):
+                continue
+            for raw_chunk in raw_chunks:
+                if not isinstance(raw_chunk, dict):
+                    continue
+                self.index_chunk(Chunk.model_validate(raw_chunk))
+                count += 1
+        return count
 
     def clear_index(self) -> None:
         with self._lock:
@@ -71,30 +117,46 @@ class HybridRetriever:
         top_k: int,
         kb_id: str = "default",
         tenant_id: str | None = None,
+        metadata_filters: dict[str, object] | None = None,
     ) -> list[SearchHit]:
         if not self._bm25_enabled:
             vectors = await self.embedding_client.embed_texts([query])
             if not vectors:
                 return []
             return self.repository.search(
-                vectors[0], top_k, kb_id=kb_id, tenant_id=tenant_id
+                vectors[0],
+                top_k,
+                kb_id=kb_id,
+                tenant_id=tenant_id,
+                metadata_filters=metadata_filters,
             )
 
         vectors = await self.embedding_client.embed_texts([query])
         if not vectors:
             return []
         vector_hits = self.repository.search(
-            vectors[0], top_k * 2, kb_id=kb_id, tenant_id=tenant_id
+            vectors[0],
+            top_k * 2,
+            kb_id=kb_id,
+            tenant_id=tenant_id,
+            metadata_filters=metadata_filters,
         )
         vector_results = [(hit.chunk.chunk_id, hit.score) for hit in vector_hits]
-        bm25_results = self.bm25_index.search(query, top_k * 2)
+        scoped_chunk_ids = {
+            chunk_id
+            for chunk_id, chunk in self._chunk_cache.items()
+            if chunk.metadata.get("kb_id", "default") == kb_id
+            and (tenant_id is None or chunk.metadata.get("tenant_id") == tenant_id)
+            and match_metadata_filters(chunk.metadata, metadata_filters)
+        }
+        bm25_results = self.bm25_index.search(
+            query, top_k * 2, allowed_doc_ids=scoped_chunk_ids
+        )
         fused_results = reciprocal_rank_fusion(
             vector_results, bm25_results, self.hybrid_config
         )
         fused_results = fused_results[:top_k]
-        fused_doc_ids = {doc_id for doc_id, _ in fused_results}
         hits_by_id = {hit.chunk.chunk_id: hit for hit in vector_hits}
-        bm25_scores = dict(bm25_results)
         final_hits: list[SearchHit] = []
         for doc_id, hybrid_score in fused_results:
             if doc_id in hits_by_id:

@@ -75,7 +75,12 @@ class BM25Index:
             score += idf * numerator / denominator
         return score
 
-    def search(self, query: str, top_k: int) -> list[tuple[str, float]]:
+    def search(
+        self,
+        query: str,
+        top_k: int,
+        allowed_doc_ids: set[str] | None = None,
+    ) -> list[tuple[str, float]]:
         if not self._documents:
             return []
         if not self._is_built:
@@ -86,7 +91,9 @@ class BM25Index:
         scores = [
             (doc_id, self._score_document(query_tokens, doc_id))
             for doc_id in self._documents
+            if allowed_doc_ids is None or doc_id in allowed_doc_ids
         ]
+        scores = [(doc_id, score) for doc_id, score in scores if score > 0]
         scores.sort(key=lambda x: x[1], reverse=True)
         return scores[:top_k]
 

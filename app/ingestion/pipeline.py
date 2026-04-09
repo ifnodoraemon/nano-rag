@@ -8,12 +8,16 @@ from typing import TYPE_CHECKING
 
 from app.ingestion.chunker import build_chunks
 from app.ingestion.loader import IngestPathError, discover_files
+from app.ingestion.metadata import extract_document_metadata
 from app.ingestion.normalizer import normalize_text
 from app.ingestion.parser_docling import parse_document
 from app.ingestion.semantic_chunker import SemanticChunker, SemanticChunkerConfig
 from app.model_client.embeddings import EmbeddingClient
+from app.retrieval.hybrid_retriever import HybridRetriever
 from app.schemas.document import Document, IngestResponse
 from app.vectorstore.repository import VectorRepository
+from app.wiki.compiler import WikiCompiler
+from app.wiki.search import WikiSearcher
 
 if TYPE_CHECKING:
     from app.core.config import AppConfig
@@ -32,12 +36,18 @@ class IngestionPipeline:
         embedding_client: EmbeddingClient,
         tracing_manager: TracingManager,
         semantic_chunker: SemanticChunker | None = None,
+        hybrid_retriever: HybridRetriever | None = None,
+        wiki_compiler: WikiCompiler | None = None,
+        wiki_searcher: WikiSearcher | None = None,
     ) -> None:
         self.config = config
         self.repository = repository
         self.embedding_client = embedding_client
         self.tracing_manager = tracing_manager
         self.semantic_chunker = semantic_chunker
+        self.hybrid_retriever = hybrid_retriever
+        self.wiki_compiler = wiki_compiler
+        self.wiki_searcher = wiki_searcher
         self._use_semantic_chunker = semantic_chunker is not None and os.getenv(
             "RAG_SEMANTIC_CHUNKER_ENABLED", "false"
         ).lower() in ("true", "1", "yes")
@@ -56,6 +66,7 @@ class IngestionPipeline:
             files = discover_files(path)
             chunk_count = 0
             doc_count = 0
+            wiki_updated = False
             self.config.parsed_dir.mkdir(parents=True, exist_ok=True)
 
             for file_path in files:
@@ -65,15 +76,19 @@ class IngestionPipeline:
                     source_path = self._normalize_source_path(file_path)
                     doc_id = self._stable_doc_id(source_path, kb_id, tenant_id)
                     text = normalize_text(parse_document(file_path))
+                    document_metadata = extract_document_metadata(
+                        source_path=source_path,
+                        title=Path(file_path).stem,
+                        text=text,
+                        kb_id=kb_id,
+                        tenant_id=tenant_id,
+                    )
                     document = Document(
                         doc_id=doc_id,
                         source_path=source_path,
                         title=Path(file_path).stem,
                         content=text,
-                        metadata={
-                            "kb_id": kb_id,
-                            "tenant_id": tenant_id,
-                        },
+                        metadata=document_metadata,
                     )
                     chunk_size = self.config.settings["chunk"]["size"]
                     overlap = self.config.settings["chunk"]["overlap"]
@@ -84,6 +99,7 @@ class IngestionPipeline:
                                 doc_id,
                                 source_path,
                                 document.title,
+                                metadata=document.metadata,
                             )
                         else:
                             chunks = build_chunks(
@@ -93,6 +109,7 @@ class IngestionPipeline:
                                 text,
                                 chunk_size,
                                 overlap,
+                                document.metadata,
                             )
                     except ValueError as exc:
                         raise ChunkConfigurationError(
@@ -106,6 +123,10 @@ class IngestionPipeline:
                             "kb_id": kb_id,
                             "tenant_id": tenant_id,
                         }
+                    if self.hybrid_retriever:
+                        self.hybrid_retriever.remove_by_source(
+                            source_path, kb_id=kb_id, tenant_id=tenant_id
+                        )
                     self.repository.delete_by_source(
                         source_path, kb_id=kb_id, tenant_id=tenant_id
                     )
@@ -118,9 +139,16 @@ class IngestionPipeline:
                             [chunk.text for chunk in chunks]
                         )
                         self.repository.upsert(document, chunks, embeddings)
+                        if self.hybrid_retriever:
+                            self.hybrid_retriever.index_chunks(chunks)
+                    if self.wiki_compiler:
+                        self.wiki_compiler.upsert_document(document, chunks)
+                        wiki_updated = True
                     doc_count += 1
                     chunk_count += len(chunks)
 
+            if wiki_updated and self.wiki_searcher:
+                self.wiki_searcher.refresh()
             return IngestResponse(documents=doc_count, chunks=chunk_count)
 
     def _normalize_source_path(self, file_path: Path) -> str:

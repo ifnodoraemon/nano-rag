@@ -9,6 +9,7 @@ class BusinessChatRequest(BaseModel):
     tenant_id: str | None = None
     session_id: str | None = None
     top_k: int | None = None
+    metadata_filters: dict[str, object] | None = None
 
 
 class BusinessChatResponse(BaseModel):

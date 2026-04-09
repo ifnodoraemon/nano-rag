@@ -19,6 +19,9 @@ def test_ragas_runner_returns_aggregate_metrics() -> None:
                 "answer": "a1",
                 "reference_contexts": ["ctx"],
                 "retrieved_contexts": ["ctx"],
+                "conflicting_context_count": 1,
+                "conflict_claim_count": 1,
+                "insufficiency_claim_count": 0,
             }
         ]
     )
@@ -26,8 +29,16 @@ def test_ragas_runner_returns_aggregate_metrics() -> None:
     assert report["status"] == "ok"
     assert report["records"] == 1
     assert report["aggregate"]["answer_exact_match"] == 1.0
+    assert report["aggregate"]["conflicting_context_count_avg"] == 1.0
+    assert report["aggregate"]["conflicting_hit_rate"] == 1.0
+    assert report["aggregate"]["conflict_claim_count_avg"] == 1.0
+    assert report["aggregate"]["conflict_claim_hit_rate"] == 1.0
+    assert report["aggregate"]["insufficiency_claim_count_avg"] == 0.0
+    assert report["aggregate"]["insufficiency_claim_hit_rate"] == 0.0
     assert report["results"][0]["sample_id"] == "sample-1"
     assert report["results"][0]["trace_id"] == "trace-1"
+    assert report["results"][0]["conflicting_context_count"] == 1
+    assert report["results"][0]["conflict_claim_count"] == 1
 
 
 def test_ragas_runner_ignores_trailing_citation_marker_for_exact_match() -> None:
@@ -76,11 +87,26 @@ async def test_materialize_eval_records_passes_business_context() -> None:
                 "kb_id": payload.kb_id,
                 "tenant_id": payload.tenant_id,
                 "session_id": payload.session_id,
+                "contexts": [{"chunk_id": "c1", "wiki_status": "conflicting"}],
+                "supporting_claims": [
+                    {
+                        "claim_type": "conflict",
+                        "text": "Sources disagree.",
+                        "citation_labels": ["C1"],
+                    }
+                ],
             }
         )
         return SimpleNamespace(
             answer="a1",
-            contexts=[{"text": "ctx-1"}],
+            contexts=[{"text": "ctx-1", "wiki_status": "conflicting"}],
+            supporting_claims=[
+                {
+                    "claim_type": "conflict",
+                    "text": "Sources disagree.",
+                    "citation_labels": ["C1"],
+                }
+            ],
             trace_id="trace-eval-1",
         )
 
@@ -117,3 +143,6 @@ async def test_materialize_eval_records_passes_business_context() -> None:
     assert trace.kb_id == "kb-a"
     assert trace.tenant_id == "tenant-a"
     assert trace.session_id == "session-a"
+    assert records[0]["conflicting_context_count"] == 1
+    assert records[0]["conflict_claim_count"] == 1
+    assert records[0]["insufficiency_claim_count"] == 0

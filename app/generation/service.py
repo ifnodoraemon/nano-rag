@@ -44,6 +44,7 @@ class GenerationService:
                 tenant_id=payload.tenant_id,
                 session_id=payload.session_id,
                 sample_id=payload.sample_id,
+                metadata_filters=payload.metadata_filters,
             )
             messages = self.prompt_builder.build_messages(payload.query, contexts)
             generation_started = perf_counter()
@@ -59,6 +60,9 @@ class GenerationService:
                 record.answer = response.answer
                 record.citations = [
                     citation.model_dump() for citation in response.citations
+                ]
+                record.supporting_claims = [
+                    claim.model_dump() for claim in response.supporting_claims
                 ]
                 record.model_alias = self.generation_client.alias
                 record.kb_id = payload.kb_id or record.kb_id

@@ -20,6 +20,7 @@ from app.ingestion.semantic_chunker import SemanticChunker, SemanticChunkerConfi
 from app.model_client.embeddings import EmbeddingClient
 from app.model_client.generation import GenerationClient
 from app.model_client.rerank import RerankClient
+from app.retrieval.hybrid_retriever import HybridRetriever
 from app.retrieval.pipeline import RetrievalPipeline
 from app.retrieval.query_rewriter import QueryRewriter, QueryRewriterConfig
 from app.utils.text import parse_bool_env
@@ -28,6 +29,8 @@ from app.vectorstore.repository import (
     MilvusVectorRepository,
     VectorRepository,
 )
+from app.wiki.compiler import WikiCompiler
+from app.wiki.search import WikiSearcher
 
 
 def _render_env(raw: str) -> str:
@@ -155,6 +158,12 @@ class AppConfig:
         )
 
     @property
+    def wiki_dir(self) -> Path:
+        return Path(
+            os.getenv("WIKI_OUTPUT_DIR", self.config_dir.parent / "data" / "wiki")
+        )
+
+    @property
     def business_api_keys(self) -> set[str]:
         raw = os.getenv("RAG_API_KEYS", "")
         return {item.strip() for item in raw.split(",") if item.strip()}
@@ -195,6 +204,9 @@ class AppContainer:
     feedback_store: FeedbackStore
     query_rewriter: QueryRewriter | None = None
     semantic_chunker: SemanticChunker | None = None
+    hybrid_retriever: HybridRetriever | None = None
+    wiki_compiler: WikiCompiler | None = None
+    wiki_searcher: WikiSearcher | None = None
 
     async def close(self) -> None:
         await self.embedding_client.close()
@@ -211,11 +223,18 @@ class AppContainer:
         trace_store = TraceStore(persist_dir=config.trace_store_dir)
         feedback_store = FeedbackStore(persist_dir=config.feedback_store_dir)
         tracing_manager = TracingManager("nano-rag", config.phoenix_collector_endpoint)
+        wiki_compiler = WikiCompiler(config.wiki_dir)
+        wiki_searcher = WikiSearcher(config.wiki_dir)
         query_rewriter_config = QueryRewriterConfig.from_env()
         query_rewriter = QueryRewriter(
             generation_client=generation_client,
             config=query_rewriter_config,
         )
+        hybrid_retriever = HybridRetriever(
+            repository=repository,
+            embedding_client=embedding_client,
+        )
+        hybrid_retriever.bootstrap_from_parsed_dir(config.parsed_dir)
         semantic_chunker_config = SemanticChunkerConfig.from_env()
         semantic_chunker = SemanticChunker(config=semantic_chunker_config)
         retrieval_pipeline = RetrievalPipeline(
@@ -226,6 +245,8 @@ class AppContainer:
             trace_store,
             tracing_manager,
             query_rewriter=query_rewriter,
+            hybrid_retriever=hybrid_retriever,
+            wiki_searcher=wiki_searcher,
         )
         chat_pipeline = GenerationService(
             config=config,
@@ -243,7 +264,14 @@ class AppContainer:
             rerank_client=rerank_client,
             generation_client=generation_client,
             ingestion_pipeline=IngestionPipeline(
-                config, repository, embedding_client, tracing_manager, semantic_chunker
+                config,
+                repository,
+                embedding_client,
+                tracing_manager,
+                semantic_chunker,
+                hybrid_retriever=hybrid_retriever,
+                wiki_compiler=wiki_compiler,
+                wiki_searcher=wiki_searcher,
             ),
             retrieval_pipeline=retrieval_pipeline,
             chat_pipeline=chat_pipeline,
@@ -254,4 +282,7 @@ class AppContainer:
             feedback_store=feedback_store,
             query_rewriter=query_rewriter,
             semantic_chunker=semantic_chunker,
+            hybrid_retriever=hybrid_retriever,
+            wiki_compiler=wiki_compiler,
+            wiki_searcher=wiki_searcher,
         )

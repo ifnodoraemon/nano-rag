@@ -166,6 +166,28 @@ class TraceStore(_PersistedStore[TraceRecord]):
         end = start + page_size
         summaries: list[TraceSummary] = []
         for record in all_records[start:end]:
+            conflicting_context_count = sum(
+                1
+                for context in record.contexts
+                if isinstance(context, dict)
+                and context.get("wiki_status") == "conflicting"
+            )
+            conflict_claim_count = sum(
+                1
+                for claim in record.supporting_claims
+                if isinstance(claim, dict) and claim.get("claim_type") == "conflict"
+            )
+            insufficiency_claim_count = sum(
+                1
+                for claim in record.supporting_claims
+                if isinstance(claim, dict)
+                and claim.get("claim_type") == "insufficiency"
+            )
+            conditional_claim_count = sum(
+                1
+                for claim in record.supporting_claims
+                if isinstance(claim, dict) and claim.get("claim_type") == "conditional"
+            )
             summaries.append(
                 TraceSummary(
                     trace_id=record.trace_id,
@@ -177,6 +199,10 @@ class TraceStore(_PersistedStore[TraceRecord]):
                     model_alias=record.model_alias,
                     prompt_version=record.prompt_version,
                     context_count=len(record.contexts),
+                    conflicting_context_count=conflicting_context_count,
+                    conflict_claim_count=conflict_claim_count,
+                    insufficiency_claim_count=insufficiency_claim_count,
+                    conditional_claim_count=conditional_claim_count,
                 )
             )
         return PaginatedResponse.create(summaries, total, page, page_size)

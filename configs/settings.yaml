@@ -6,6 +6,21 @@ retrieval:
   top_k: 20
   rerank_top_k: 10
   final_contexts: 6
+  context_quota:
+    topic: 2
+    raw: 3
+    source: 1
+    index: 1
+  metadata_rerank:
+    stable_topic: 0.35
+    stable_source: 0.15
+    conflicting_penalty: 0.25
+    section_match: 0.1
+    doc_type_match: 0.08
+    effective_date_recency: 0.12
+  freshness_policy:
+    enabled: true
+    allow_stale_fallback: false
 
 prompt:
   version: v1

@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useAppStore } from '../stores/appStore';
 import { Panel, StatusLine } from '../components/common';
 
@@ -6,6 +6,10 @@ export function WorkspacePanel() {
   const { workspace, updateWorkspace } = useAppStore();
   const [draft, setDraft] = useState(workspace);
   const [message, setMessage] = useState<string | null>(null);
+
+  useEffect(() => {
+    setDraft(workspace);
+  }, [workspace]);
 
   const updateField = (field: keyof typeof draft, value: string) => {
     setDraft((current) => ({ ...current, [field]: value }));

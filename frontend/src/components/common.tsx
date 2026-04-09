@@ -90,11 +90,13 @@ export function Chip({ label, status }: ChipProps) {
 interface CardProps {
   title: string;
   children: ReactNode;
+  id?: string;
+  className?: string;
 }
 
-export function Card({ title, children }: CardProps) {
+export function Card({ title, children, id, className }: CardProps) {
   return (
-    <div className="card">
+    <div id={id} className={className ? `card ${className}` : 'card'}>
       <strong>{title}</strong>
       <div>{children}</div>
     </div>

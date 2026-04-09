@@ -81,9 +81,37 @@ function persistWorkspace(workspace: WorkspaceSettings): void {
   );
 }
 
+export type TraceClaimFilter = 'all' | 'missing_conflict' | 'insufficiency' | 'conditional';
+export type EvalClaimFilter = 'all' | 'missing_conflict' | 'insufficiency';
+export interface ChatReplayDraft {
+  query: string;
+  kbId?: string;
+  tenantId?: string;
+  sessionId?: string;
+  traceId?: string;
+  topK?: number;
+  sourceLabel?: string;
+}
+
 interface AppState {
   workspace: WorkspaceSettings;
   updateWorkspace: (next: Partial<WorkspaceSettings>) => void;
+  traceConflictOnly: boolean;
+  evalConflictOnly: boolean;
+  benchmarkConflictOnly: boolean;
+  traceClaimFilter: TraceClaimFilter;
+  evalClaimFilter: EvalClaimFilter;
+  benchmarkClaimFilter: EvalClaimFilter;
+  setTraceConflictOnly: (value: boolean) => void;
+  setEvalConflictOnly: (value: boolean) => void;
+  setBenchmarkConflictOnly: (value: boolean) => void;
+  setTraceClaimFilter: (value: TraceClaimFilter) => void;
+  setEvalClaimFilter: (value: EvalClaimFilter) => void;
+  setBenchmarkClaimFilter: (value: EvalClaimFilter) => void;
+  clearAdvancedFilters: () => void;
+  chatReplayDraft: ChatReplayDraft | null;
+  prepareChatReplay: (draft: ChatReplayDraft) => void;
+  clearChatReplay: () => void;
 
   health: HealthResponse | null;
   healthLoading: boolean;
@@ -133,9 +161,11 @@ interface AppState {
   loadEvalReports: () => Promise<void>;
   currentEvalReport: EvalReportDetail | null;
   currentEvalReportPath: string;
+  selectedEvalResultIndex: number | null;
   evalReportLoading: boolean;
   evalReportError: string | null;
   loadEvalReport: (path: string) => Promise<void>;
+  setSelectedEvalResultIndex: (value: number | null) => void;
   runEval: (datasetPath: string, outputPath?: string) => Promise<void>;
 
   benchmarkResult: BenchmarkRunResponse | null;
@@ -146,10 +176,12 @@ interface AppState {
   benchmarkReportsError: string | null;
   currentBenchmarkReport: Record<string, unknown> | null;
   currentBenchmarkReportPath: string;
+  selectedBenchmarkCaseKey: string;
   benchmarkReportLoading: boolean;
   benchmarkReportError: string | null;
   loadBenchmarkReports: () => Promise<void>;
   loadBenchmarkReport: (path: string) => Promise<void>;
+  setSelectedBenchmarkCaseKey: (value: string) => void;
   runBenchmark: (datasetPath: string, outputPath?: string) => Promise<void>;
 
   diagnosis: DiagnosisResponse | null;
@@ -170,6 +202,32 @@ export const useAppStore = create<AppState>((set, get) => ({
     persistWorkspace(workspace);
     set({ workspace });
   },
+  traceConflictOnly: false,
+  evalConflictOnly: false,
+  benchmarkConflictOnly: false,
+  traceClaimFilter: 'all',
+  evalClaimFilter: 'all',
+  benchmarkClaimFilter: 'all',
+  setTraceConflictOnly: (value) => set({ traceConflictOnly: value }),
+  setEvalConflictOnly: (value) => set({ evalConflictOnly: value }),
+  setBenchmarkConflictOnly: (value) => set({ benchmarkConflictOnly: value }),
+  setTraceClaimFilter: (value) => set({ traceClaimFilter: value }),
+  setEvalClaimFilter: (value) => set({ evalClaimFilter: value }),
+  setBenchmarkClaimFilter: (value) => set({ benchmarkClaimFilter: value }),
+  clearAdvancedFilters: () =>
+    set({
+      traceConflictOnly: false,
+      evalConflictOnly: false,
+      benchmarkConflictOnly: false,
+      traceClaimFilter: 'all',
+      evalClaimFilter: 'all',
+      benchmarkClaimFilter: 'all',
+      selectedEvalResultIndex: null,
+      selectedBenchmarkCaseKey: '',
+    }),
+  chatReplayDraft: null,
+  prepareChatReplay: (draft) => set({ chatReplayDraft: draft }),
+  clearChatReplay: () => set({ chatReplayDraft: null }),
 
   health: null,
   healthLoading: false,
@@ -346,6 +404,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   },
   currentEvalReport: null,
   currentEvalReportPath: '',
+  selectedEvalResultIndex: null,
   evalReportLoading: false,
   evalReportError: null,
   loadEvalReport: async (path: string) => {
@@ -356,6 +415,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       set({
         currentEvalReport: data,
         currentEvalReportPath: path,
+        selectedEvalResultIndex: null,
         evalReportLoading: false,
       });
     } catch (e) {
@@ -371,6 +431,7 @@ export const useAppStore = create<AppState>((set, get) => ({
         evalResult: data,
         currentEvalReport: data.report,
         currentEvalReportPath: data.output_path || '',
+        selectedEvalResultIndex: null,
         evalLoading: false,
       });
       await get().loadEvalReports();
@@ -378,6 +439,8 @@ export const useAppStore = create<AppState>((set, get) => ({
       set({ evalError: formatApiError(e), evalLoading: false });
     }
   },
+
+  setSelectedEvalResultIndex: (value) => set({ selectedEvalResultIndex: value }),
 
   benchmarkResult: null,
   benchmarkLoading: false,
@@ -387,6 +450,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   benchmarkReportsError: null,
   currentBenchmarkReport: null,
   currentBenchmarkReportPath: '',
+  selectedBenchmarkCaseKey: '',
   benchmarkReportLoading: false,
   benchmarkReportError: null,
   loadBenchmarkReports: async () => {
@@ -407,6 +471,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       set({
         currentBenchmarkReport: data,
         currentBenchmarkReportPath: path,
+        selectedBenchmarkCaseKey: '',
         benchmarkReportLoading: false,
       });
     } catch (e) {
@@ -422,6 +487,7 @@ export const useAppStore = create<AppState>((set, get) => ({
         benchmarkResult: data,
         currentBenchmarkReport: data.report,
         currentBenchmarkReportPath: data.output_path || '',
+        selectedBenchmarkCaseKey: '',
         benchmarkLoading: false,
       });
       await get().loadBenchmarkReports();
@@ -429,6 +495,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       set({ benchmarkError: formatApiError(e), benchmarkLoading: false });
     }
   },
+  setSelectedBenchmarkCaseKey: (value) => set({ selectedBenchmarkCaseKey: value }),
 
   diagnosis: null,
   diagnosisLoading: false,

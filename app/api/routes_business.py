@@ -89,6 +89,7 @@ async def rag_chat(
             kb_id=payload.kb_id,
             tenant_id=payload.tenant_id,
             session_id=payload.session_id,
+            metadata_filters=payload.metadata_filters,
         )
     )
     return BusinessChatResponse(

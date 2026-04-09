@@ -1,11 +1,27 @@
 import { useState } from 'react';
 import { useAppStore } from '../stores/appStore';
-import { Panel, StatusLine, JsonOutput, LoadingButton } from '../components/common';
+import { Panel, StatusLine, JsonOutput, LoadingButton, Card } from '../components/common';
+
+type DebugContext = Record<string, unknown>;
 
 export function DebugPanel() {
   const { workspace, debugResult, debugLoading, debugError, runDebug, loadTrace } = useAppStore();
   const [query, setQuery] = useState('差旅报销多久内提交？');
   const [topK, setTopK] = useState(6);
+  const contexts = Array.isArray(debugResult?.contexts)
+    ? (debugResult.contexts as DebugContext[])
+    : [];
+  const conflictingContexts = contexts.filter(
+    (context) => context['wiki_status'] === 'conflicting',
+  );
+  const topicContexts = contexts.filter((context) => context['wiki_kind'] === 'topic');
+  const conflictingLabels = conflictingContexts
+    .map((context) => {
+      const title = String(context['title'] || '').trim();
+      const chunkId = String(context['chunk_id'] || '').trim();
+      return title || chunkId || 'unknown';
+    })
+    .slice(0, 3);
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -64,6 +80,18 @@ export function DebugPanel() {
           }
           isError={!!debugError}
         />
+        {debugResult && (
+          <div className="cards" style={{ marginBottom: 12 }}>
+            <Card title="Wiki 命中">
+              contexts={contexts.length} | topics={topicContexts.length}
+            </Card>
+            <Card title="冲突节点">
+              {conflictingContexts.length > 0
+                ? `${conflictingContexts.length} 个，${conflictingLabels.join(' / ')}`
+                : '0 个'}
+            </Card>
+          </div>
+        )}
         <JsonOutput data={debugResult} placeholder="还没有运行检索调试" />
         {debugResult?.trace_id && (
           <button

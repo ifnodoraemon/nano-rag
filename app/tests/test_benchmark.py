@@ -13,6 +13,7 @@ def test_build_benchmark_report_aggregates_latency_and_diagnosis_counts() -> Non
             "query": "q1",
             "latency_seconds": 1.2,
             "step_latencies": {"retrieval_seconds": 0.2, "generation_seconds": 1.0},
+            "contexts": [{"chunk_id": "wiki:topic:1", "wiki_status": "conflicting"}],
         }
     )
     trace_store.save(
@@ -40,6 +41,7 @@ def test_build_benchmark_report_aggregates_latency_and_diagnosis_counts() -> Non
                     "query": "q1",
                     "answer_exact_match": 0.0,
                     "reference_context_recall": 1.0,
+                    "conflicting_context_count": 1,
                     "answer": "无法确认。",
                     "reference_answer": "a1",
                 },
@@ -59,6 +61,9 @@ def test_build_benchmark_report_aggregates_latency_and_diagnosis_counts() -> Non
     )
 
     assert report["aggregate"]["bad_case_count"] == 1
+    assert report["aggregate"]["conflicting_bad_case_count"] == 1
+    assert report["aggregate"]["conflicting_context_count_avg"] == 0.5
+    assert report["aggregate"]["conflicting_hit_rate"] == 0.5
     assert report["aggregate"]["latency_seconds_avg"] == 1.0
     assert report["aggregate"]["latency_seconds_p95"] in {0.8, 1.2}
     assert report["diagnosis_counts"]["generation_misalignment"] == 1

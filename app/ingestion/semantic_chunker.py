@@ -4,6 +4,7 @@ import os
 import re
 from dataclasses import dataclass
 
+from app.ingestion.metadata import build_section_metadata, split_sections
 from app.schemas.chunk import Chunk
 
 
@@ -53,21 +54,45 @@ class SemanticChunker:
     ) -> list[Chunk]:
         if not text.strip():
             return []
-        sentences = _split_sentences(text)
-        if not sentences:
-            return []
         chunks: list[Chunk] = []
-        current_sentences: list[str] = []
-        current_size = 0
         chunk_index = 0
+        for section_index, section in enumerate(split_sections(text, title or source_path)):
+            sentences = _split_sentences(section.text)
+            if not sentences:
+                continue
+            current_sentences: list[str] = []
+            current_size = 0
+            section_chunks: list[str] = []
 
-        for sentence in sentences:
-            sentence_size = _estimate_tokens(sentence)
-            if (
-                current_size + sentence_size > self.config.max_chunk_size
-                and current_sentences
-            ):
+            for sentence in sentences:
+                sentence_size = _estimate_tokens(sentence)
+                if (
+                    current_size + sentence_size > self.config.max_chunk_size
+                    and current_sentences
+                ):
+                    section_chunks.append("".join(current_sentences))
+                    overlap_sentences = current_sentences[
+                        -self.config.overlap_sentences :
+                    ]
+                    current_sentences = overlap_sentences
+                    current_size = sum(
+                        _estimate_tokens(item) for item in overlap_sentences
+                    )
+                current_sentences.append(sentence)
+                current_size += sentence_size
+
+            if current_sentences:
                 chunk_text = "".join(current_sentences)
+                if (
+                    len(section_chunks) > 0
+                    and _estimate_tokens(chunk_text) < self.config.min_chunk_size
+                ):
+                    section_chunks[-1] += chunk_text
+                else:
+                    section_chunks.append(chunk_text)
+
+            parent_chunk_id = f"{doc_id}:parent:{section_index}"
+            for child_index, chunk_text in enumerate(section_chunks):
                 chunks.append(
                     Chunk(
                         chunk_id=f"{doc_id}-{chunk_index}",
@@ -75,37 +100,17 @@ class SemanticChunker:
                         chunk_index=chunk_index,
                         text=chunk_text,
                         source_path=source_path,
-                        title=title,
-                        metadata=metadata or {},
+                        title=" / ".join(section.path),
+                        metadata=build_section_metadata(
+                            metadata,
+                            section,
+                            parent_chunk_id=parent_chunk_id,
+                            child_chunk_count=len(section_chunks),
+                            child_chunk_index=child_index,
+                        ),
                     )
                 )
                 chunk_index += 1
-                overlap_sentences = current_sentences[-self.config.overlap_sentences :]
-                current_sentences = overlap_sentences
-                current_size = sum(_estimate_tokens(s) for s in overlap_sentences)
-            current_sentences.append(sentence)
-            current_size += sentence_size
-
-        if current_sentences:
-            chunk_text = "".join(current_sentences)
-            if (
-                len(chunks) > 0
-                and _estimate_tokens(chunk_text) < self.config.min_chunk_size
-            ):
-                last_chunk = chunks[-1]
-                last_chunk.text += chunk_text
-            else:
-                chunks.append(
-                    Chunk(
-                        chunk_id=f"{doc_id}-{chunk_index}",
-                        doc_id=doc_id,
-                        chunk_index=chunk_index,
-                        text=chunk_text,
-                        source_path=source_path,
-                        title=title,
-                        metadata=metadata or {},
-                    )
-                )
 
         return chunks
 

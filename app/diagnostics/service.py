@@ -17,13 +17,51 @@ if TYPE_CHECKING:
 
 def _looks_like_refusal(answer: str) -> bool:
     refusal_markers = (
+        "cannot confirm",
+        "insufficient information",
+        "insufficient evidence",
+        "no available context",
+        "please provide",
         "无法确认",
         "信息不足",
         "证据不足",
         "没有可用上下文",
         "请提供",
     )
-    return any(marker in answer for marker in refusal_markers)
+    lowered = answer.lower()
+    return any(marker in answer or marker in lowered for marker in refusal_markers)
+
+
+def _mentions_conflict(answer: str) -> bool:
+    conflict_markers = (
+        "存在冲突",
+        "说法不一致",
+        "来源不一致",
+        "无法确定",
+        "不能确定",
+        "inconsistent",
+        "conflict",
+    )
+    lowered = answer.lower()
+    return any(marker in answer or marker in lowered for marker in conflict_markers)
+
+
+def _count_claim_types(claims: object) -> dict[str, int]:
+    counts = {
+        "factual": 0,
+        "conditional": 0,
+        "conflict": 0,
+        "insufficiency": 0,
+    }
+    if not isinstance(claims, list):
+        return counts
+    for claim in claims:
+        if not isinstance(claim, dict):
+            continue
+        claim_type = str(claim.get("claim_type", "")).strip().lower()
+        if claim_type in counts:
+            counts[claim_type] += 1
+    return counts
 
 
 @dataclass
@@ -35,17 +73,83 @@ class DiagnosisService:
         contexts = trace.contexts or []
         retrieved = trace.retrieved or []
         answer = str(trace.answer or "")
+        claim_type_counts = _count_claim_types(trace.supporting_claims)
+        conflicting_contexts = [
+            context
+            for context in contexts
+            if isinstance(context, dict) and context.get("wiki_status") == "conflicting"
+        ]
+
+        if conflicting_contexts:
+            findings.append(
+                DiagnosisFinding(
+                    category="wiki_conflict_detected",
+                    severity="medium",
+                    rationale="A conflicting wiki topic was retrieved, which means the knowledge layer has already detected disagreement across sources.",
+                    suggested_actions=[
+                        "Review the topic page's Potential Conflicts section and the linked source pages first.",
+                        "If the conflict is real, add effective scope, date, or version metadata to the knowledge page.",
+                        "Require the generation layer to explain the conflict before giving a conditional answer.",
+                    ],
+                    evidence={
+                        "conflicting_context_count": len(conflicting_contexts),
+                        "conflicting_chunk_ids": [
+                            context.get("chunk_id") for context in conflicting_contexts
+                        ],
+                        "conflicting_sources": [
+                            context.get("source") for context in conflicting_contexts
+                        ],
+                    },
+                )
+            )
+            if claim_type_counts["conflict"] == 0:
+                findings.append(
+                    DiagnosisFinding(
+                        category="conflict_claim_missing",
+                        severity="medium",
+                        rationale="Conflicting evidence was retrieved, but no structured conflict claim was produced.",
+                        suggested_actions=[
+                            "Require the generation layer to emit at least one [conflict] supporting claim when conflicting evidence is present.",
+                            "Keep conflict claims short and bind them to explicit citation labels.",
+                            "Use claim-level checks in regression to prevent conflict omissions.",
+                        ],
+                        evidence={
+                            "conflicting_context_count": len(conflicting_contexts),
+                            "claim_type_counts": claim_type_counts,
+                        },
+                    )
+                )
+            if answer and not _mentions_conflict(answer):
+                findings.append(
+                    DiagnosisFinding(
+                        category="conflict_not_reflected_in_answer",
+                        severity="high",
+                        rationale="A conflicting topic was retrieved, but the final answer did not reflect that conflict, creating overconfidence risk.",
+                        suggested_actions=[
+                            "Tighten the prompt so conflicting topics must be acknowledged explicitly.",
+                            "Add conflict safeguards in the answer formatter or post-generation processing.",
+                            "When necessary, downgrade conflicting topics to a clarification-style answer.",
+                        ],
+                        evidence={
+                            "answer_preview": answer[:200],
+                            "conflicting_chunk_ids": [
+                                context.get("chunk_id")
+                                for context in conflicting_contexts
+                            ],
+                        },
+                    )
+                )
 
         if not retrieved:
             findings.append(
                 DiagnosisFinding(
                     category="retrieval_empty",
                     severity="high",
-                    rationale="检索阶段没有返回任何候选 chunk，问题大概率在 ingest、embedding 或向量检索参数。",
+                    rationale="The retrieval stage returned no candidate chunks, so the likely issue is ingestion, embeddings, or retrieval configuration.",
                     suggested_actions=[
-                        "确认文档已成功 ingest 且向量库里有数据。",
-                        "检查 embedding 模型和 collection 维度是否一致。",
-                        "先放大 retrieval top_k，再观察 retrieve/debug 输出。",
+                        "Confirm that documents were ingested successfully and the vector store contains data.",
+                        "Check that the embedding model and collection dimensions are aligned.",
+                        "Increase retrieval top_k first, then inspect the retrieve/debug output.",
                     ],
                     evidence={"retrieved_count": 0, "context_count": len(contexts)},
                 )
@@ -56,10 +160,10 @@ class DiagnosisService:
                 DiagnosisFinding(
                     category="generation_empty",
                     severity="high",
-                    rationale="已经拿到了上下文，但生成阶段没有返回答案。",
+                    rationale="Relevant context was available, but generation returned no answer.",
                     suggested_actions=[
-                        "检查 generation provider 返回体和 finish_reason。",
-                        "确认 prompt 构造和 answer formatter 没有把内容清空。",
+                        "Inspect the generation provider response body and finish_reason.",
+                        "Confirm that prompt construction and the answer formatter did not clear the content.",
                     ],
                     evidence={
                         "context_count": len(contexts),
@@ -73,11 +177,11 @@ class DiagnosisService:
                 DiagnosisFinding(
                     category="generation_refusal_with_context",
                     severity="medium",
-                    rationale="上下文已经命中，但模型仍然给出了拒答/信息不足类型回答，问题更像 prompt 约束或模型稳定性。",
+                    rationale="Relevant context was retrieved, but the model still produced a refusal or insufficient-information answer, which points more to prompting or model stability.",
                     suggested_actions=[
-                        "收紧 system prompt，明确命中证据后必须优先直接回答。",
-                        "在坏例上对比不同 generation 模型或温度设置。",
-                        "把命中的关键句前置到 prompt 中，降低模型保守拒答概率。",
+                        "Tighten the system prompt so retrieved evidence should lead to a direct answer first.",
+                        "Compare different generation models or temperature settings on the same bad case.",
+                        "Move the key supporting sentences earlier in the prompt to reduce conservative refusals.",
                     ],
                     evidence={
                         "context_count": len(contexts),
@@ -86,6 +190,23 @@ class DiagnosisService:
                     },
                 )
             )
+            if claim_type_counts["insufficiency"] == 0:
+                findings.append(
+                    DiagnosisFinding(
+                        category="insufficiency_claim_missing",
+                        severity="medium",
+                        rationale="The answer behaves like an insufficiency or refusal response, but no structured insufficiency claim was produced.",
+                        suggested_actions=[
+                            "Require the generation layer to emit an [insufficiency] claim whenever the answer says evidence is insufficient.",
+                            "Bind insufficiency claims to the citation labels that justify the limitation.",
+                            "Track insufficiency-claim coverage in eval to avoid silent refusals.",
+                        ],
+                        evidence={
+                            "answer_preview": answer[:200],
+                            "claim_type_counts": claim_type_counts,
+                        },
+                    )
+                )
 
         if retrieved and trace.reranked_chunk_ids and trace.retrieved_chunk_ids:
             if set(trace.reranked_chunk_ids) - set(trace.retrieved_chunk_ids):
@@ -93,10 +214,10 @@ class DiagnosisService:
                     DiagnosisFinding(
                         category="rerank_inconsistent",
                         severity="high",
-                        rationale="rerank 结果包含未出现在 retrieval 的 chunk_id，说明链路记录存在不一致。",
+                        rationale="The rerank result includes chunk_ids that were not present in retrieval, which indicates inconsistent pipeline state.",
                         suggested_actions=[
-                            "检查 rerank 返回索引与原 hits 的映射关系。",
-                            "确认 trace 记录没有被后续请求覆盖。",
+                            "Check the mapping between rerank result indexes and the original hits.",
+                            "Confirm that the trace record was not overwritten by a later request.",
                         ],
                         evidence={
                             "retrieved_chunk_ids": trace.retrieved_chunk_ids,
@@ -110,9 +231,9 @@ class DiagnosisService:
                 DiagnosisFinding(
                     category="context_trimmed",
                     severity="low",
-                    rationale="retrieval 有结果，但最终上下文数量较少，可能是 final_contexts 限制导致信息压缩。",
+                    rationale="Retrieval produced results, but only a small number of final contexts remained, likely because final_contexts is too restrictive.",
                     suggested_actions=[
-                        "检查 retrieval.final_contexts 配置是否过小。",
+                        "Check whether retrieval.final_contexts is set too low.",
                     ],
                     evidence={
                         "retrieved_count": len(retrieved),
@@ -127,10 +248,10 @@ class DiagnosisService:
                 DiagnosisFinding(
                     category="no_obvious_issue",
                     severity="info",
-                    rationale="从当前 trace 看不出明显结构性问题，若答案仍不稳定，优先结合 eval bad cases 做批量对比。",
+                    rationale="No obvious structural issue is visible in this trace. If the answer is still unstable, compare it against similar eval bad cases in batch.",
                     suggested_actions=[
-                        "查看同一问题在评测集里的历史表现。",
-                        "结合 prompt 版本和模型版本做 A/B 对比。",
+                        "Review historical performance for the same question in the eval set.",
+                        "Run an A/B comparison across prompt versions and model versions.",
                     ],
                     evidence={
                         "retrieved_count": len(retrieved),
@@ -140,7 +261,7 @@ class DiagnosisService:
                 )
             )
 
-        summary = "；".join(finding.rationale for finding in findings[:2])
+        summary = "; ".join(finding.rationale for finding in findings[:2])
         return DiagnosisResponse(
             target_type="trace",
             trace_id=trace.trace_id,
@@ -168,11 +289,11 @@ class DiagnosisService:
                 DiagnosisFinding(
                     category="retrieval_gap",
                     severity="high",
-                    rationale="参考证据没有完整出现在 retrieved_contexts 中，问题优先在检索层。",
+                    rationale="The reference evidence did not appear completely in retrieved_contexts, so the primary issue is in retrieval.",
                     suggested_actions=[
-                        "检查 chunk 切分是否过粗或过细。",
-                        "放大 retrieval top_k 并观察正确 chunk 排名。",
-                        "必要时引入 rerank 或更换 embedding 模型。",
+                        "Check whether chunking is too coarse or too fine.",
+                        "Increase retrieval top_k and inspect the rank of the correct chunk.",
+                        "Introduce rerank or change the embedding model if needed.",
                     ],
                     evidence={
                         "reference_context_recall": context_recall,
@@ -186,11 +307,11 @@ class DiagnosisService:
                 DiagnosisFinding(
                     category="generation_misalignment",
                     severity="medium",
-                    rationale="检索证据已经完整命中，但最终答案仍未命中参考答案，问题优先在生成层或评测口径。",
+                    rationale="The retrieval evidence was complete, but the final answer still missed the reference answer, so the issue is more likely generation or evaluation criteria.",
                     suggested_actions=[
-                        "检查 system prompt 是否过度保守或过于啰嗦。",
-                        "人工检查 exact_match 是否被格式差异放大。",
-                        "考虑增加语义相似度或 LLM judge 指标，而不只看 exact match。",
+                        "Check whether the system prompt is too conservative or too verbose.",
+                        "Manually inspect whether exact_match is overstating harmless formatting differences.",
+                        "Consider adding semantic similarity or an LLM-judge metric instead of relying only on exact match.",
                     ],
                     evidence={
                         "reference_context_recall": context_recall,
@@ -206,10 +327,10 @@ class DiagnosisService:
                 DiagnosisFinding(
                     category="refusal_bad_case",
                     severity="medium",
-                    rationale="坏例属于命中证据后仍拒答，通常是 prompt 约束或模型不稳定。",
+                    rationale="This bad case is a refusal despite sufficient evidence, which usually points to prompt constraints or model instability.",
                     suggested_actions=[
-                        "把这条样本加入回归集，专门验证拒答问题。",
-                        "强化 prompt 中“命中证据后直接回答”的约束。",
+                        "Add this sample to the regression set to track refusal behavior explicitly.",
+                        "Strengthen the prompt instruction that matched evidence should lead to a direct answer.",
                     ],
                     evidence={"answer_preview": answer[:200]},
                 )
@@ -220,8 +341,8 @@ class DiagnosisService:
                 DiagnosisFinding(
                     category="no_obvious_issue",
                     severity="info",
-                    rationale="这条评测样本没有暴露明显结构性问题。",
-                    suggested_actions=["继续查看坏例聚类，而不是单条样本。"],
+                    rationale="This eval sample does not expose an obvious structural issue.",
+                    suggested_actions=["Keep analyzing clustered bad cases instead of this single sample in isolation."],
                     evidence={
                         "reference_context_recall": context_recall,
                         "answer_exact_match": exact_match,
@@ -229,7 +350,7 @@ class DiagnosisService:
                 )
             )
 
-        summary = "；".join(finding.rationale for finding in findings[:2])
+        summary = "; ".join(finding.rationale for finding in findings[:2])
         return DiagnosisResponse(
             target_type="eval_result",
             trace_id=result.get("trace_id"),
@@ -248,8 +369,8 @@ class DiagnosisService:
             {
                 "role": "system",
                 "content": (
-                    "你是 RAG 系统诊断助手。请根据给定的 trace/eval 诊断结果，"
-                    "输出 3 条高优先级改进建议，要求短、具体、可执行。"
+                    "You are a RAG diagnosis assistant. Based on the given trace or eval diagnosis result, "
+                    "produce 3 high-priority improvement suggestions that are short, concrete, and actionable."
                 ),
             },
             {
