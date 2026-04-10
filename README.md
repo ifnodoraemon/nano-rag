@@ -10,7 +10,7 @@
 - 统一 `model_client`，所有模型调用都走 OpenAI-compatible Gateway
 - 默认直连外部 OpenAI-compatible 模型接口
 - `Milvus` 仓储抽象，默认走真实向量库，保留内存回退仅用于临时调试
-- `Docker Compose` 骨架，默认包含 `app / milvus / phoenix`，`LiteLLM` 为可选 profile
+- `Docker Compose` 骨架，包含 `app / milvus / phoenix / frontend (nginx)`
 - 基础测试、trace 存储、配置模板、离线评测和 benchmark 脚手架
 
 ## 目录
@@ -87,7 +87,7 @@ MILVUS_URI=http://milvus:19530
 
 ### 4. 直连外部模型接口
 
-如果外部 provider 已经提供 OpenAI-compatible 接口，直接配置根目录 `.env` 即可，不需要 LiteLLM：
+外部 provider 提供 OpenAI-compatible 接口，直接配置根目录 `.env`：
 
 ```bash
 export MODEL_GATEWAY_MODE=live
@@ -114,7 +114,6 @@ generation:
 
 - Gemini API 当前可直接覆盖 `/chat/completions` 和 `/embeddings`
 - 当前项目的 `/rerank` 阶段需要单独的 rerank provider；若走 Gemini API，请关闭 rerank
-- `/health` 现已同时兼容 LiteLLM 的 `/v1/models` 和 Gemini 的 `/models`
 - 业务 API 中的 `kb_id` 已预留，但当前部署仅支持 `default`
 
 ### 5. 按能力拆分模型网关
@@ -141,22 +140,22 @@ export RERANK_API_KEY=<your-rerank-api-key>
 
 对应 [models.yaml](/home/ifnodoraemon/myagent/nano-rag/configs/models.yaml) 里的 alias 也可以分开维护。
 
-### 6. 可选：通过 LiteLLM 统一多家 provider
+### 6. 可选：通过 Bifrost 统一多家 provider
 
-只有当你需要：
+只有当你需要把多家 provider 统一成一个网关地址、做负载均衡或故障转移时，才需要启用 Bifrost。
 
-- 把多家 provider 统一成一个网关地址
-- 做统一鉴权、限流或模型别名映射
-- 给不兼容 OpenAI 接口的上游做一层适配
-
-才需要启用 LiteLLM。
+Bifrost 支持 OpenAI Chat Completions、OpenAI Responses API、Anthropic Messages 三种格式，可透明路由到 15+ provider。
 
 ```bash
-cp docker/litellm/.env.example docker/litellm/.env
-docker compose -f docker/docker-compose.yml --profile litellm up -d litellm-gateway
+cp docker/bifrost/.env.example docker/bifrost/.env
+# 编辑 docker/bifrost/.env 填入 provider API key
+# 按需编辑 docker/bifrost/config.json 配置 provider 和模型列表
+docker compose -f docker/docker-compose.yml --profile bifrost up -d bifrost
 ```
 
-然后把 [`.env`](/home/ifnodoraemon/myagent/nano-rag/.env) 里的 `MODEL_GATEWAY_BASE_URL` 指到 `http://litellm-gateway:4000`，`MODEL_GATEWAY_API_KEY` 改成 `LITELLM_MASTER_KEY`。
+然后把 `.env` 里的 `MODEL_GATEWAY_BASE_URL` 指到 `http://bifrost:8080/v1`。
+
+Bifrost 还自带 Web UI（`http://127.0.0.1:8080`），可可视化管理 provider 配置。
 
 ## 示例
 
@@ -281,9 +280,9 @@ curl 'http://127.0.0.1:8000/benchmark/reports/detail?path=data/reports/eval/benc
 - 当前已补充 benchmark 服务和脚本，用于聚合离线质量、延迟和坏例诊断统计
 - 前端主流程默认走业务 API；如果配置了 `RAG_API_KEYS`，需要在前端工作区中填写对应 key
 - 默认 `MODEL_GATEWAY_MODE=live`
-- 默认推荐直连外部 OpenAI-compatible provider，不经过 LiteLLM
+- 直连外部 OpenAI-compatible provider
 - 如果直连 Gemini API，请设置 `MODEL_GATEWAY_API_KEY`，并通过 `DISABLE_RERANK=1` 跳过 rerank 阶段
-- 仅当需要网关聚合能力时，再启用 `docker compose --profile litellm`
+- 仅当需要网关聚合能力时，再启用 `docker compose --profile bifrost`
 
 ## 测试
 

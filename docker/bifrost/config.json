@@ -1,0 +1,28 @@
+{
+  "providers": {
+    "google": {
+      "keys": [
+        {
+          "value": "env.GOOGLE_API_KEY",
+          "models": [
+            "gemini-2.5-flash",
+            "gemini-embedding-2-preview"
+          ],
+          "weight": 1.0
+        }
+      ]
+    },
+    "openai": {
+      "keys": [
+        {
+          "value": "env.OPENAI_API_KEY",
+          "models": [
+            "gpt-4o",
+            "text-embedding-3-large"
+          ],
+          "weight": 1.0
+        }
+      ]
+    }
+  }
+}

@@ -6,7 +6,7 @@ frontend/dist/
 __pycache__/
 .pytest_cache/
 *.pyc
-docker/litellm/.env
+docker/bifrost/.env
 data/raw/*
 data/parsed/*
 data/samples/eval_report.json
