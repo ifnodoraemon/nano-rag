@@ -6,7 +6,7 @@ When you cite evidence, use the provided citation labels such as [C1] or [C2].""
 
 
 class PromptBuilder:
-    def __init__(self, prompts: dict) -> None:
+    def __init__(self, prompts: dict[str, object]) -> None:
         self.system_prompt = prompts.get("chat", {}).get(
             "system", DEFAULT_SYSTEM_PROMPT
         )

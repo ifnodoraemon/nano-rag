@@ -66,30 +66,29 @@ def build_contexts(
             if isinstance(section_path, list)
             else metadata.get("section_path_text")
         )
-        contexts.append(
-            {
-                "chunk_id": hit.chunk.chunk_id,
-                "text": parent_text or hit.chunk.text,
-                "source": hit.chunk.source_path,
-                "title": section_path_text or hit.chunk.title,
-                "score": round(hit.score, 6),
-                "wiki_kind": metadata.get("wiki_kind"),
-                "wiki_status": metadata.get("wiki_status"),
-                "original_source_path": metadata.get("original_source_path"),
-                "section_path": section_path,
-                "parent_chunk_id": parent_chunk_id,
-                "doc_type": metadata.get("doc_type"),
-                "effective_date": metadata.get("effective_date"),
-                "version": metadata.get("version"),
-                "source_key": metadata.get("source_key"),
-                "freshness_tier": metadata.get("freshness_tier"),
-                "is_latest_version": metadata.get("is_latest_version"),
-                "freshness_rank": metadata.get("freshness_rank"),
-                "chunk_kind": metadata.get("chunk_kind"),
-                "supporting_chunk_id": hit.chunk.chunk_id,
-            }
-        )
-        contexts[-1]["evidence_role"] = _evidence_role(contexts[-1])
+        context_entry: dict[str, object] = {
+            "chunk_id": hit.chunk.chunk_id,
+            "text": parent_text or hit.chunk.text,
+            "source": hit.chunk.source_path,
+            "title": section_path_text or hit.chunk.title,
+            "score": round(hit.score, 6),
+            "wiki_kind": metadata.get("wiki_kind"),
+            "wiki_status": metadata.get("wiki_status"),
+            "original_source_path": metadata.get("original_source_path"),
+            "section_path": section_path,
+            "parent_chunk_id": parent_chunk_id,
+            "doc_type": metadata.get("doc_type"),
+            "effective_date": metadata.get("effective_date"),
+            "version": metadata.get("version"),
+            "source_key": metadata.get("source_key"),
+            "freshness_tier": metadata.get("freshness_tier"),
+            "is_latest_version": metadata.get("is_latest_version"),
+            "freshness_rank": metadata.get("freshness_rank"),
+            "chunk_kind": metadata.get("chunk_kind"),
+            "supporting_chunk_id": hit.chunk.chunk_id,
+        }
+        context_entry["evidence_role"] = _evidence_role(context_entry)
+        contexts.append(context_entry)
     if quotas is None:
         return _with_citation_labels(_order_contexts_by_evidence(contexts[:limit]))
 

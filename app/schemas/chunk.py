@@ -8,4 +8,4 @@ class Chunk(BaseModel):
     text: str
     source_path: str
     title: str | None = None
-    metadata: dict = Field(default_factory=dict)
+    metadata: dict[str, object] = Field(default_factory=dict)

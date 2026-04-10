@@ -10,7 +10,8 @@ def _request_with_keys(keys: set[str]):
     return SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(container=SimpleNamespace(config=SimpleNamespace(business_api_keys=keys)))))
 
 
-def test_business_auth_allows_missing_key_when_not_configured() -> None:
+def test_business_auth_allows_missing_key_when_not_configured(monkeypatch) -> None:
+    monkeypatch.setenv("RAG_AUTH_DISABLED", "true")
     require_api_key(_request_with_keys(set()), authorization=None, x_api_key=None)
 
 

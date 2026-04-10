@@ -57,30 +57,40 @@ class GenerationService:
             )
             record = self.trace_store.get(str(trace["trace_id"]))
             if record is not None:
-                record.answer = response.answer
-                record.citations = [
-                    citation.model_dump() for citation in response.citations
-                ]
-                record.supporting_claims = [
-                    claim.model_dump() for claim in response.supporting_claims
-                ]
-                record.model_alias = self.generation_client.alias
-                record.kb_id = payload.kb_id or record.kb_id
-                record.tenant_id = payload.tenant_id or record.tenant_id
-                record.session_id = payload.session_id or record.session_id
-                record.sample_id = payload.sample_id or record.sample_id
-                record.prompt_version = str(self.config.settings["prompt"]["version"])
-                record.prompt_messages = messages
-                record.generation_finish_reason = (
-                    str(result["finish_reason"])
-                    if result.get("finish_reason") is not None
-                    else None
+                updated = record.model_copy(
+                    update={
+                        "answer": response.answer,
+                        "citations": [
+                            citation.model_dump()
+                            for citation in response.citations
+                        ],
+                        "supporting_claims": [
+                            claim.model_dump()
+                            for claim in response.supporting_claims
+                        ],
+                        "model_alias": self.generation_client.alias,
+                        "kb_id": payload.kb_id or record.kb_id,
+                        "tenant_id": payload.tenant_id or record.tenant_id,
+                        "session_id": payload.session_id or record.session_id,
+                        "sample_id": payload.sample_id or record.sample_id,
+                        "prompt_version": str(
+                            self.config.settings["prompt"]["version"]
+                        ),
+                        "prompt_messages": messages,
+                        "generation_finish_reason": (
+                            str(result["finish_reason"])
+                            if result.get("finish_reason") is not None
+                            else None
+                        ),
+                        "generation_usage": result.get("usage") or {},
+                        "step_latencies": {
+                            **record.step_latencies,
+                            "generation_seconds": generation_seconds,
+                            "end_to_end_seconds": float(
+                                record.latency_seconds or 0.0
+                            ),
+                        },
+                    }
                 )
-                record.generation_usage = result.get("usage") or {}
-                record.step_latencies = {
-                    **record.step_latencies,
-                    "generation_seconds": generation_seconds,
-                    "end_to_end_seconds": float(record.latency_seconds or 0.0),
-                }
-                self.trace_store.update(record)
+                self.trace_store.update(updated)
             return response

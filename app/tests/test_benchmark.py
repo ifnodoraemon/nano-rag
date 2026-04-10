@@ -7,7 +7,7 @@ from app.diagnostics.service import DiagnosisService
 
 def test_build_benchmark_report_aggregates_latency_and_diagnosis_counts() -> None:
     trace_store = TraceStore()
-    trace_store.save(
+    trace_store.save_raw(
         {
             "trace_id": "trace-1",
             "query": "q1",
@@ -16,7 +16,7 @@ def test_build_benchmark_report_aggregates_latency_and_diagnosis_counts() -> Non
             "contexts": [{"chunk_id": "wiki:topic:1", "wiki_status": "conflicting"}],
         }
     )
-    trace_store.save(
+    trace_store.save_raw(
         {
             "trace_id": "trace-2",
             "query": "q2",

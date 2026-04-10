@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import os
@@ -11,7 +12,7 @@ from app.ingestion.loader import IngestPathError, discover_files
 from app.ingestion.metadata import extract_document_metadata
 from app.ingestion.normalizer import normalize_text
 from app.ingestion.parser_docling import parse_document
-from app.ingestion.semantic_chunker import SemanticChunker, SemanticChunkerConfig
+from app.ingestion.semantic_chunker import SemanticChunker
 from app.core.exceptions import ParsingError
 from app.model_client.embeddings import EmbeddingClient
 from app.model_client.document_parser import DocumentParserClient
@@ -133,12 +134,18 @@ class IngestionPipeline:
                             f"Document parsing produced no chunks for {source_path}. "
                             "The extracted content may be empty or structurally invalid."
                         )
-                    for chunk in chunks:
-                        chunk.metadata = {
-                            **chunk.metadata,
-                            "kb_id": kb_id,
-                            "tenant_id": tenant_id,
-                        }
+                    chunks = [
+                        chunk.model_copy(
+                            update={
+                                "metadata": {
+                                    **chunk.metadata,
+                                    "kb_id": kb_id,
+                                    "tenant_id": tenant_id,
+                                }
+                            }
+                        )
+                        for chunk in chunks
+                    ]
                     if self.hybrid_retriever:
                         self.hybrid_retriever.remove_by_source(
                             source_path, kb_id=kb_id, tenant_id=tenant_id
@@ -154,7 +161,9 @@ class IngestionPipeline:
                         embeddings = await self.embedding_client.embed_texts(
                             [chunk.text for chunk in chunks]
                         )
-                        self.repository.upsert(document, chunks, embeddings)
+                        await asyncio.to_thread(
+                            self.repository.upsert, document, chunks, embeddings
+                        )
                         if self.hybrid_retriever:
                             self.hybrid_retriever.index_chunks(chunks)
                     if self.wiki_compiler:
@@ -179,7 +188,7 @@ class IngestionPipeline:
         self, source_path: str, kb_id: str, tenant_id: str | None = None
     ) -> str:
         identity = "|".join([kb_id, tenant_id or "", source_path])
-        digest = hashlib.sha1(identity.encode("utf-8")).hexdigest()
+        digest = hashlib.sha256(identity.encode("utf-8")).hexdigest()
         return f"doc-{digest[:24]}"
 
     def _cleanup_parsed_artifacts(

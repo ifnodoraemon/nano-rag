@@ -5,8 +5,8 @@ from app.core.tracing import TraceStore
 
 def test_trace_store_saves_and_lists_latest_first() -> None:
     store = TraceStore()
-    store.save({"trace_id": "t1", "query": "q1", "latency_seconds": 0.1})
-    store.save({"trace_id": "t2", "query": "q2", "latency_seconds": 0.2})
+    store.save_raw({"trace_id": "t1", "query": "q1", "latency_seconds": 0.1})
+    store.save_raw({"trace_id": "t2", "query": "q2", "latency_seconds": 0.2})
 
     result = store.list()
     summaries = result.items
@@ -34,9 +34,9 @@ def test_trace_store_prunes_old_persisted_files(tmp_path) -> None:
     trace_dir = tmp_path / "traces"
     store = TraceStore(max_records=2, persist_dir=trace_dir)
 
-    store.save({"trace_id": "t1"})
-    store.save({"trace_id": "t2"})
-    store.save({"trace_id": "t3"})
+    store.save_raw({"trace_id": "t1"})
+    store.save_raw({"trace_id": "t2"})
+    store.save_raw({"trace_id": "t3"})
 
     persisted = sorted(path.name for path in trace_dir.glob("*.json"))
     assert persisted == ["t2.json", "t3.json"]

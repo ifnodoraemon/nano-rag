@@ -1,8 +1,10 @@
-from pydantic import BaseModel
+from typing import Literal
+
+from pydantic import BaseModel, Field
 
 
 class ChatRequest(BaseModel):
-    query: str
+    query: str = Field(..., min_length=1, max_length=8192)
     top_k: int | None = None
     kb_id: str | None = None
     tenant_id: str | None = None
@@ -24,9 +26,9 @@ class Citation(BaseModel):
 
 
 class SupportingClaim(BaseModel):
-    claim_type: str = "factual"
+    claim_type: Literal["factual", "conditional", "conflict", "insufficiency"] = "factual"
     text: str
-    citation_labels: list[str] = []
+    citation_labels: list[str] = Field(default_factory=list)
 
 
 class ChatResponse(BaseModel):

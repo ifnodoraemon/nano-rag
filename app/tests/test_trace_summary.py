@@ -3,7 +3,7 @@ from app.core.tracing import TraceStore
 
 def test_trace_summary_contains_context_count() -> None:
     store = TraceStore()
-    store.save(
+    store.save_raw(
         {
             "trace_id": "t1",
             "query": "q1",

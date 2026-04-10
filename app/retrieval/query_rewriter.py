@@ -5,6 +5,10 @@ import os
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+import httpx
+
+from app.core.exceptions import ModelGatewayError
+
 if TYPE_CHECKING:
     from app.model_client.generation import GenerationClient
 
@@ -77,8 +81,8 @@ class QueryRewriter:
             )
             rewritten = result.get("content", "").strip()
             return rewritten if rewritten else query
-        except Exception:
-            logger.debug("query rewrite failed, returning original query")
+        except (ModelGatewayError, httpx.HTTPError) as exc:
+            logger.warning("query rewrite failed: %s", exc)
             return query
 
     async def generate_multi_queries(self, query: str) -> list[str]:
@@ -104,8 +108,8 @@ class QueryRewriter:
                     if cleaned and cleaned.lower() != query.lower():
                         queries.append(cleaned)
             return queries[: self.config.multi_query_count + 1]
-        except Exception:
-            logger.debug("multi-query generation failed, returning original query")
+        except (ModelGatewayError, httpx.HTTPError) as exc:
+            logger.warning("multi-query generation failed: %s", exc)
             return [query]
 
     async def generate_hyde(self, query: str) -> str:
@@ -118,8 +122,8 @@ class QueryRewriter:
             )
             hyde_doc = result.get("content", "").strip()
             return hyde_doc if hyde_doc else query
-        except Exception:
-            logger.debug("hyde generation failed, returning original query")
+        except (ModelGatewayError, httpx.HTTPError) as exc:
+            logger.warning("hyde generation failed: %s", exc)
             return query
 
     async def build_plan(self, query: str) -> QueryExpansionPlan:

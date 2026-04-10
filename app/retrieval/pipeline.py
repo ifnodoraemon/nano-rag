@@ -181,7 +181,7 @@ class RetrievalPipeline:
                     "rerank_model_alias", getattr(self.reranker.client, "alias", None)
                 )
             final_trace = trace.finish()
-            self.trace_store.save(final_trace)
+            self.trace_store.save_raw(final_trace)
             return contexts, final_trace
 
     async def debug(

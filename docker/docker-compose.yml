@@ -28,7 +28,7 @@ services:
       RAG_INGEST_ALLOWED_DIRS: /workspace/data/raw
       EVAL_DATASET_DIR: /workspace/data/eval
     volumes:
-      - ../configs:/workspace/configs
+      - ../configs:/workspace/configs:ro
       - ../data/raw:/workspace/data/raw:ro
       - ../data/eval:/workspace/data/eval:ro
       - app-parsed-data:/workspace/data/parsed
@@ -77,11 +77,11 @@ services:
   minio:
     image: pgsty/minio:RELEASE.2026-02-14T12-00-00Z
     environment:
-      MINIO_ROOT_USER: minioadmin
-      MINIO_ROOT_PASSWORD: minioadmin
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin}
     command: minio server /minio_data
     ports:
-      - "9000:9000"
+      - "127.0.0.1:9000:9000"
     volumes:
       - minio-data:/minio_data
     healthcheck:
@@ -98,8 +98,8 @@ services:
       ETCD_ENDPOINTS: etcd:2379
       MINIO_ADDRESS: minio:9000
     ports:
-      - "19530:19530"
-      - "9091:9091"
+      - "127.0.0.1:19530:19530"
+      - "127.0.0.1:9091:9091"
     depends_on:
       etcd:
         condition: service_healthy
@@ -129,7 +129,7 @@ services:
       - ./litellm/config.yaml:/app/config.yaml
 
   phoenix:
-    image: arizephoenix/phoenix:latest
+    image: arizephoenix/phoenix:8.22.1
     container_name: nano-rag-phoenix
     ports:
       - "6006:6006"

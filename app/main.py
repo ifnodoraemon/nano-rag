@@ -5,14 +5,29 @@ from pathlib import Path
 
 import httpx
 from fastapi import FastAPI, Request
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.types import ASGIApp
 
 from app.api.routes_business import router as business_router
 from app.api.routes_debug import router as debug_router
 from app.core.config import AppContainer
 from app.core.exceptions import ModelGatewayError, ParsingError
 from app.core.logging import configure_logging
+
+
+class SecurityHeadersMiddleware(BaseHTTPMiddleware):
+    def __init__(self, app: ASGIApp) -> None:
+        super().__init__(app)
+
+    async def dispatch(self, request: Request, call_next):
+        response = await call_next(request)
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["X-Frame-Options"] = "DENY"
+        response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+        return response
 
 
 FRONTEND_DIST = Path(
@@ -31,6 +46,16 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="nano-rag", version="0.1.0", lifespan=lifespan)
+
+app.add_middleware(SecurityHeadersMiddleware)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=os.getenv("ALLOWED_ORIGINS", "").split(",") if os.getenv("ALLOWED_ORIGINS") else [],
+    allow_credentials=True,
+    allow_methods=["GET", "POST"],
+    allow_headers=["Authorization", "X-Api-Key", "Content-Type"],
+)
+
 app.include_router(debug_router)
 app.include_router(business_router)
 
@@ -151,10 +176,8 @@ async def health(request: Request) -> dict[str, object]:
     return {
         "status": status,
         "service": "nano-rag",
-        "vectorstore_backend": os.getenv("VECTORSTORE_BACKEND", "memory"),
         "gateway_mode": container.config.gateway_mode,
         "gateway": {
-            "base_url": container.config.gateway_base_url,
             "reachable": gateway_ok,
             "error": next(
                 (
@@ -166,16 +189,12 @@ async def health(request: Request) -> dict[str, object]:
             ),
         },
         "phoenix": {
-            "collector_endpoint": container.config.phoenix_collector_endpoint,
-            "ui_endpoint": container.config.phoenix_ui_endpoint,
             "reachable": phoenix_ok,
             "error": phoenix_error,
         },
         "vectorstore": {
             "status": vectorstore_status,
             "error": vectorstore_error,
-            "details": vectorstore_stats,
         },
-        "parsed_dir": str(container.config.parsed_dir),
         "trace_count": container.trace_store.list().total,
     }

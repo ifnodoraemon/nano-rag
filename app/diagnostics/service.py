@@ -7,7 +7,6 @@ from typing import TYPE_CHECKING
 
 from app.schemas.diagnosis import DiagnosisFinding, DiagnosisResponse
 from app.schemas.trace import TraceRecord
-from app.utils.text import normalize_text
 
 logger = logging.getLogger(__name__)
 
@@ -271,7 +270,7 @@ class DiagnosisService:
         )
 
     def diagnose_eval_result(
-        self, report: dict, result_index: int
+        self, report: dict[str, object], result_index: int
     ) -> DiagnosisResponse:
         results = report.get("results", []) if isinstance(report, dict) else []
         if result_index < 0 or result_index >= len(results):
@@ -360,7 +359,7 @@ class DiagnosisService:
         )
 
     async def add_ai_suggestion(
-        self, diagnosis: DiagnosisResponse, payload: dict
+        self, diagnosis: DiagnosisResponse, payload: dict[str, object]
     ) -> DiagnosisResponse:
         if self.generation_client is None:
             return diagnosis
@@ -386,8 +385,8 @@ class DiagnosisService:
         ]
         try:
             result = await self.generation_client.generate(messages)
-            diagnosis.ai_suggestion = str(result.get("content", "")).strip() or None
+            suggestion = str(result.get("content", "")).strip() or None
         except Exception as exc:  # pragma: no cover
-            logger.debug("ai diagnosis suggestion failed: %s", exc)
-            diagnosis.ai_suggestion = f"AI diagnosis unavailable: {exc}"
-        return diagnosis
+            logger.warning("ai diagnosis suggestion failed: %s", exc)
+            suggestion = f"AI diagnosis unavailable: {exc}"
+        return diagnosis.model_copy(update={"ai_suggestion": suggestion})

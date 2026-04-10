@@ -159,6 +159,10 @@ class DocumentParserClient:
             upload_url = start_response.headers.get("X-Goog-Upload-URL")
             if not upload_url:
                 raise ParsingError(f"document parser did not return an upload URL for {path.name}")
+            if not upload_url.startswith(self.base_url):
+                raise ParsingError(
+                    f"upload URL from upstream does not match expected base: {self.base_url}"
+                )
             finalize_headers = {
                 "x-goog-api-key": self.api_key,
                 "X-Goog-Upload-Offset": "0",

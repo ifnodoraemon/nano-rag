@@ -5,12 +5,15 @@ WORKDIR /workspace
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
+RUN addgroup --system appgroup && adduser --system --ingroup appgroup appuser
+
 COPY app ./app
 COPY configs ./configs
 COPY scripts ./scripts
-COPY data/raw ./data/raw
-COPY data/eval ./data/eval
-COPY data/samples ./data/samples
 COPY frontend/dist ./frontend/dist
+
+RUN chown -R appuser:appgroup /workspace
+
+USER appuser
 
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]

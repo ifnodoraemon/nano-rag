@@ -1,10 +1,12 @@
-from pydantic import BaseModel, Field
+from typing import Literal
+
+from pydantic import BaseModel, Field, field_validator
 
 from app.schemas.chat import Citation
 
 
 class BusinessChatRequest(BaseModel):
-    query: str
+    query: str = Field(..., min_length=1, max_length=8192)
     kb_id: str = "default"
     tenant_id: str | None = None
     session_id: str | None = None
@@ -27,6 +29,14 @@ class BusinessIngestRequest(BaseModel):
     kb_id: str = "default"
     tenant_id: str | None = None
 
+    @field_validator("path")
+    @classmethod
+    def path_must_be_non_empty(cls, v: str) -> str:
+        v = v.strip()
+        if not v:
+            raise ValueError("path must not be empty")
+        return v
+
 
 class BusinessIngestResponse(BaseModel):
     status: str
@@ -40,7 +50,7 @@ class BusinessIngestResponse(BaseModel):
 
 class FeedbackRequest(BaseModel):
     trace_id: str
-    rating: str
+    rating: Literal["up", "down"]
     kb_id: str = "default"
     tenant_id: str | None = None
     session_id: str | None = None

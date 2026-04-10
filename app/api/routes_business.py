@@ -8,7 +8,8 @@ from uuid import uuid4
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, UploadFile
 
 from app.api.auth import require_api_key
-from app.ingestion.loader import SUPPORTED_EXTENSIONS
+from app.ingestion.loader import IngestPathError, SUPPORTED_EXTENSIONS
+from app.ingestion.pipeline import ChunkConfigurationError
 from app.schemas.benchmark import BenchmarkRunRequest, BenchmarkRunResponse
 from app.schemas.business import (
     BusinessChatRequest,
@@ -32,22 +33,23 @@ from app.benchmark.service import build_benchmark_report
 
 router = APIRouter(prefix="/v1/rag", tags=["rag"])
 
+MAX_UPLOAD_BYTES = int(os.getenv("MAX_UPLOAD_BYTES", str(50 * 1024 * 1024)))
+MAX_FILES_PER_BATCH = int(os.getenv("MAX_FILES_PER_BATCH", "10"))
+
 
 def _get_supported_kb_ids() -> set[str]:
     raw = os.getenv("RAG_SUPPORTED_KB_IDS", "default")
     return {item.strip() for item in raw.split(",") if item.strip()}
 
 
-SUPPORTED_KB_IDS = _get_supported_kb_ids()
-
-
 def _ensure_supported_kb_id(kb_id: str) -> None:
-    if kb_id not in SUPPORTED_KB_IDS:
+    supported = _get_supported_kb_ids()
+    if kb_id not in supported:
         raise HTTPException(
             status_code=400,
             detail=(
                 f"kb_id '{kb_id}' is not supported. "
-                f"Supported kb_ids: {', '.join(sorted(SUPPORTED_KB_IDS))}. "
+                f"Supported kb_ids: {', '.join(sorted(supported))}. "
                 "Set RAG_SUPPORTED_KB_IDS env var to configure additional knowledge bases."
             ),
         )
@@ -115,11 +117,16 @@ async def rag_ingest(
 ) -> BusinessIngestResponse:
     _ensure_supported_kb_id(payload.kb_id)
     container = request.app.state.container
-    response = await container.ingestion_pipeline.run(
-        payload.path,
-        kb_id=payload.kb_id,
-        tenant_id=payload.tenant_id,
-    )
+    try:
+        response = await container.ingestion_pipeline.run(
+            payload.path,
+            kb_id=payload.kb_id,
+            tenant_id=payload.tenant_id,
+        )
+    except IngestPathError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except ChunkConfigurationError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     return BusinessIngestResponse(
         status="ok",
         kb_id=payload.kb_id,
@@ -144,6 +151,11 @@ async def rag_ingest_upload(
     _ensure_supported_kb_id(kb_id)
     if not files:
         raise HTTPException(status_code=400, detail="at least one file is required")
+    if len(files) > MAX_FILES_PER_BATCH:
+        raise HTTPException(
+            status_code=400,
+            detail=f"max {MAX_FILES_PER_BATCH} files per request",
+        )
 
     container = request.app.state.container
     upload_batch_dir = container.config.upload_dir / uuid4().hex[:12]
@@ -159,8 +171,14 @@ async def rag_ingest_upload(
                 status_code=400,
                 detail=f"unsupported file type '{extension or 'unknown'}'. Supported types: {allowed}",
             )
+        data = await upload.read()
+        if len(data) > MAX_UPLOAD_BYTES:
+            raise HTTPException(
+                status_code=413,
+                detail=f"file '{original_name}' exceeds max size ({MAX_UPLOAD_BYTES} bytes)",
+            )
         target = upload_batch_dir / f"{uuid4().hex[:8]}_{original_name}"
-        target.write_bytes(await upload.read())
+        target.write_bytes(data)
         uploaded_files.append(original_name)
 
     response = await container.ingestion_pipeline.run(
@@ -194,7 +212,7 @@ async def rag_feedback(payload: FeedbackRequest, request: Request) -> FeedbackRe
         )
     _ensure_trace_scope(trace, payload.kb_id, payload.tenant_id, payload.session_id)
     feedback_id = f"fb-{uuid4().hex[:16]}"
-    container.feedback_store.save(
+    container.feedback_store.save_raw(
         {
             "feedback_id": feedback_id,
             "trace_id": payload.trace_id,

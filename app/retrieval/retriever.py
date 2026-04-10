@@ -1,7 +1,7 @@
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
 
 from app.core.exceptions import ModelGatewayError
 from app.model_client.embeddings import EmbeddingClient
@@ -101,7 +101,8 @@ class Retriever:
             vectors = await self.embedding_client.embed_texts([query])
             if not vectors:
                 raise ModelGatewayError("embedding service returned empty result")
-            raw_hits = self.repository.search(
+            raw_hits = await asyncio.to_thread(
+                self.repository.search,
                 vectors[0],
                 top_k,
                 kb_id=kb_id,

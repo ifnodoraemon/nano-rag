@@ -157,21 +157,18 @@ def build_section_metadata(
     child_chunk_count: int,
     child_chunk_index: int,
 ) -> dict[str, object]:
-    metadata = dict(base_metadata or {})
-    metadata.update(
-        {
-            "section_title": section.title,
-            "section_level": section.level,
-            "section_path": section.path,
-            "section_path_text": " > ".join(section.path),
-            "parent_chunk_id": parent_chunk_id,
-            "parent_text": _preview(section.text, MAX_PARENT_TEXT_CHARS),
-            "child_chunk_count": child_chunk_count,
-            "child_chunk_index": child_chunk_index,
-            "chunk_kind": "child",
-        }
-    )
-    return metadata
+    return {
+        **(base_metadata or {}),
+        "section_title": section.title,
+        "section_level": section.level,
+        "section_path": section.path,
+        "section_path_text": " > ".join(section.path),
+        "parent_chunk_id": parent_chunk_id,
+        "parent_text": _preview(section.text, MAX_PARENT_TEXT_CHARS),
+        "child_chunk_count": child_chunk_count,
+        "child_chunk_index": child_chunk_index,
+        "chunk_kind": "child",
+    }
 
 
 def _extract_first_match(text: str, patterns: tuple[re.Pattern[str], ...]) -> str | None:

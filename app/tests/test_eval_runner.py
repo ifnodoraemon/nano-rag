@@ -80,7 +80,7 @@ async def test_materialize_eval_records_passes_business_context() -> None:
     trace_store = TraceStore()
 
     async def fake_chat_run(payload):  # noqa: ANN001
-        trace_store.save(
+        trace_store.save_raw(
             {
                 "trace_id": "trace-eval-1",
                 "query": payload.query,

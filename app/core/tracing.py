@@ -4,7 +4,9 @@ import fcntl
 import json
 import os
 import threading
+from abc import ABC, abstractmethod
 from collections import OrderedDict
+from collections.abc import Generator
 from contextlib import contextmanager
 from pathlib import Path
 from time import time
@@ -16,12 +18,13 @@ from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExport
 from opentelemetry.sdk.resources import Resource
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import BatchSpanProcessor
+from pydantic import BaseModel
 
 from app.schemas.business import FeedbackRecord
 from app.schemas.common import PaginatedResponse
 from app.schemas.trace import TraceRecord, TraceSummary
 
-T = TypeVar("T")
+T = TypeVar("T", bound=BaseModel)
 
 TRACE_MAX_RECORDS = int(os.getenv("RAG_TRACE_MAX_RECORDS", "200"))
 FEEDBACK_MAX_RECORDS = int(os.getenv("RAG_FEEDBACK_MAX_RECORDS", "500"))
@@ -51,7 +54,7 @@ class TraceSession:
         return self.events
 
 
-class _PersistedStore(Generic[T]):
+class _PersistedStore(ABC, Generic[T]):
     def __init__(
         self, max_records: int, persist_dir: Path | None, record_id_field: str
     ) -> None:
@@ -65,7 +68,7 @@ class _PersistedStore(Generic[T]):
             self._load_persisted()
 
     @contextmanager
-    def _file_lock(self):
+    def _file_lock(self) -> Generator[None, None, None]:
         if self.persist_dir is None:
             yield
             return
@@ -100,8 +103,8 @@ class _PersistedStore(Generic[T]):
         for path in files[: -self.max_records]:
             path.unlink(missing_ok=True)
 
-    def _validate_record(self, payload: dict) -> T:
-        raise NotImplementedError
+    @abstractmethod
+    def _validate_record(self, payload: dict[str, object]) -> T: ...
 
     def _get_record_id(self, record: T) -> str:
         return getattr(record, self._record_id_field)
@@ -124,15 +127,17 @@ class _PersistedStore(Generic[T]):
 
     def save(self, record: T) -> T:
         with self._lock:
-            removed_id = self._save_internal(record)
             if self.persist_dir is not None:
                 with self._file_lock():
+                    removed_id = self._save_internal(record)
                     self._write_record(record)
                     if removed_id:
                         stale_file = self.persist_dir / f"{removed_id}.json"
                         if stale_file.exists():
                             stale_file.unlink()
                     self._prune_persisted()
+            else:
+                self._save_internal(record)
         return record
 
 
@@ -142,10 +147,10 @@ class TraceStore(_PersistedStore[TraceRecord]):
     ) -> None:
         super().__init__(max_records, persist_dir, "trace_id")
 
-    def _validate_record(self, payload: dict) -> TraceRecord:
+    def _validate_record(self, payload: dict[str, object]) -> TraceRecord:
         return TraceRecord.model_validate(payload)
 
-    def save(self, record: dict[str, object]) -> TraceRecord:
+    def save_raw(self, record: dict[str, object]) -> TraceRecord:
         trace = TraceRecord.model_validate(record)
         return super().save(trace)
 
@@ -214,10 +219,10 @@ class FeedbackStore(_PersistedStore[FeedbackRecord]):
     ) -> None:
         super().__init__(max_records, persist_dir, "feedback_id")
 
-    def _validate_record(self, payload: dict) -> FeedbackRecord:
+    def _validate_record(self, payload: dict[str, object]) -> FeedbackRecord:
         return FeedbackRecord.model_validate(payload)
 
-    def save(self, record: dict[str, object]) -> FeedbackRecord:
+    def save_raw(self, record: dict[str, object]) -> FeedbackRecord:
         feedback = FeedbackRecord.model_validate(record)
         return super().save(feedback)
 
@@ -245,7 +250,7 @@ class TracingManager:
         self.tracer = otel_trace.get_tracer(service_name)
 
     @contextmanager
-    def span(self, name: str, attributes: dict[str, object] | None = None):
+    def span(self, name: str, attributes: dict[str, object] | None = None) -> Generator[otel_trace.Span, None, None]:
         with self.tracer.start_as_current_span(name) as span:
             for key, value in (attributes or {}).items():
                 if value is None:

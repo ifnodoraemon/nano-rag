@@ -58,10 +58,8 @@ async def test_health_route() -> None:
         payload = await health(request)
     assert payload["service"] == "nano-rag"
     assert payload["status"] == "ok"
-    assert payload["gateway"]["base_url"] == "http://gateway.local"
-    assert payload["phoenix"]["collector_endpoint"] == "http://phoenix:4317"
-    assert payload["phoenix"]["ui_endpoint"] == "http://phoenix:6006"
-    assert payload["parsed_dir"] == "/tmp/parsed"
+    assert payload["gateway"]["reachable"] is True
+    assert payload["phoenix"]["reachable"] is True
 
 
 @pytest.mark.asyncio

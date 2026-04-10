@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import threading
@@ -41,12 +42,9 @@ class HybridRetriever:
     _bm25_enabled: bool = field(default=False, init=False)
 
     def __post_init__(self) -> None:
-        object.__setattr__(
-            self,
-            "_bm25_enabled",
-            os.getenv("RAG_HYBRID_SEARCH_ENABLED", "false").lower()
-            in ("true", "1", "yes"),
-        )
+        self._bm25_enabled = os.getenv(
+            "RAG_HYBRID_SEARCH_ENABLED", "false"
+        ).lower() in ("true", "1", "yes")
 
     @property
     def enabled(self) -> bool:
@@ -123,7 +121,8 @@ class HybridRetriever:
             vectors = await self.embedding_client.embed_texts([query])
             if not vectors:
                 return []
-            return self.repository.search(
+            return await asyncio.to_thread(
+                self.repository.search,
                 vectors[0],
                 top_k,
                 kb_id=kb_id,
@@ -134,7 +133,8 @@ class HybridRetriever:
         vectors = await self.embedding_client.embed_texts([query])
         if not vectors:
             return []
-        vector_hits = self.repository.search(
+        vector_hits = await asyncio.to_thread(
+            self.repository.search,
             vectors[0],
             top_k * 2,
             kb_id=kb_id,

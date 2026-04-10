@@ -30,7 +30,7 @@ def _request_with_container(container) -> SimpleNamespace:
 @pytest.mark.asyncio
 async def test_business_chat_preserves_business_metadata() -> None:
     trace_store = TraceStore()
-    trace_store.save({"trace_id": "trace-1", "query": "q1"})
+    trace_store.save_raw({"trace_id": "trace-1", "query": "q1"})
 
     async def fake_chat_run(payload):  # noqa: ANN001, ARG001
         return ChatResponse(
@@ -59,7 +59,7 @@ async def test_business_chat_preserves_business_metadata() -> None:
 @pytest.mark.asyncio
 async def test_business_chat_passes_metadata_filters() -> None:
     trace_store = TraceStore()
-    trace_store.save({"trace_id": "trace-1", "query": "policy"})
+    trace_store.save_raw({"trace_id": "trace-1", "query": "policy"})
 
     async def fake_chat_run(payload):  # noqa: ANN001
         assert payload.metadata_filters == {"doc_types": ["policy"]}
@@ -162,7 +162,7 @@ async def test_business_ingest_upload_rejects_unsupported_extension(tmp_path) ->
 @pytest.mark.asyncio
 async def test_feedback_is_saved() -> None:
     trace_store = TraceStore()
-    trace_store.save(
+    trace_store.save_raw(
         TraceRecord(trace_id="trace-1", kb_id="default", tenant_id="tenant-a", session_id="session-a").model_dump()
     )
     feedback_store = FeedbackStore()
@@ -187,7 +187,7 @@ async def test_feedback_is_saved() -> None:
 @pytest.mark.asyncio
 async def test_feedback_rejects_scope_mismatch() -> None:
     trace_store = TraceStore()
-    trace_store.save(
+    trace_store.save_raw(
         TraceRecord(trace_id="trace-1", kb_id="default", tenant_id="tenant-a", session_id="session-a").model_dump()
     )
     container = SimpleNamespace(trace_store=trace_store, feedback_store=FeedbackStore())
@@ -204,7 +204,7 @@ async def test_feedback_rejects_scope_mismatch() -> None:
 @pytest.mark.asyncio
 async def test_business_trace_requires_matching_scope() -> None:
     trace_store = TraceStore()
-    trace_store.save(
+    trace_store.save_raw(
         TraceRecord(trace_id="trace-1", kb_id="default", tenant_id="tenant-a", session_id="session-a").model_dump()
     )
     container = SimpleNamespace(trace_store=trace_store)
@@ -234,7 +234,7 @@ async def test_business_trace_requires_matching_scope() -> None:
 @pytest.mark.asyncio
 async def test_benchmark_route_returns_report() -> None:
     trace_store = TraceStore()
-    trace_store.save(
+    trace_store.save_raw(
         {
             "trace_id": "trace-1",
             "query": "q1",

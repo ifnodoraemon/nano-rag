@@ -24,14 +24,8 @@ def _get_allowed_ingest_dirs() -> list[Path]:
     return allowed_dirs
 
 
-_ALLOWED_INGEST_DIRS: list[Path] | None = None
-
-
 def _get_allowed_dirs() -> list[Path]:
-    global _ALLOWED_INGEST_DIRS
-    if _ALLOWED_INGEST_DIRS is None:
-        _ALLOWED_INGEST_DIRS = _get_allowed_ingest_dirs()
-    return _ALLOWED_INGEST_DIRS
+    return _get_allowed_ingest_dirs()
 
 
 def _is_path_allowed(path: Path) -> bool:
@@ -52,10 +46,8 @@ class IngestPathError(RuntimeError):
 def discover_files(root: str) -> list[Path]:
     base = Path(root).resolve()
     if not _is_path_allowed(base):
-        allowed_str = ", ".join(str(d) for d in _get_allowed_dirs())
         raise IngestPathError(
-            f"Path '{root}' is not within allowed ingest directories. "
-            f"Allowed directories: {allowed_str}. "
+            f"Path is not within allowed ingest directories. "
             "Set RAG_INGEST_ALLOWED_DIRS env var to configure additional directories."
         )
     if base.is_file():

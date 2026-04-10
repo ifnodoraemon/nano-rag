@@ -83,7 +83,7 @@ export const healthApi = {
 
 export const ingestApi = {
   run: (path: string) =>
-    api.post<IngestResponse>('/ingest', { path }).then((r) => r.data),
+    api.post<IngestResponse>('/v1/rag/ingest', { path }).then((r) => r.data),
 };
 
 export const businessIngestApi = {

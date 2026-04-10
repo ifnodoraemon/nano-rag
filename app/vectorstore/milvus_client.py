@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import time
@@ -10,7 +11,7 @@ from pymilvus.exceptions import MilvusException
 LOGGER = logging.getLogger(__name__)
 
 
-def create_milvus_client() -> MilvusClient:
+def _create_milvus_client_sync() -> MilvusClient:
     uri = os.getenv("MILVUS_URI", "http://localhost:19530")
     attempts = max(1, int(os.getenv("MILVUS_CONNECT_MAX_ATTEMPTS", "30")))
     retry_seconds = max(0.1, float(os.getenv("MILVUS_CONNECT_RETRY_SECONDS", "2")))
@@ -35,3 +36,16 @@ def create_milvus_client() -> MilvusClient:
     if last_error is not None:
         raise last_error
     raise RuntimeError("unexpected Milvus initialization failure")
+
+
+def create_milvus_client() -> MilvusClient:
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = None
+    if loop is not None and loop.is_running():
+        import concurrent.futures
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            return pool.submit(_create_milvus_client_sync).result()
+    return _create_milvus_client_sync()
