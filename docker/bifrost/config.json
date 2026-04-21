@@ -23,6 +23,21 @@
           "weight": 1.0
         }
       ]
+    },
+    "cohere": {
+      "keys": [
+        {
+          "value": "env.COHERE_API_KEY",
+          "models": [
+            "rerank-v3.5"
+          ],
+          "weight": 1.0
+        }
+      ]
     }
+  },
+  "fallback": {
+    "enabled": true,
+    "order": ["google", "openai"]
   }
 }

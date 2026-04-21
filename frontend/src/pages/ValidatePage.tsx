@@ -1,4 +1,5 @@
 import { WorkspacePanel } from './WorkspacePanel';
+import { DocumentsPanel } from './DocumentsPanel';
 import { IngestPanel } from './IngestPanel';
 import { ChatPanel } from './ChatPanel';
 
@@ -15,6 +16,7 @@ export function ValidatePage() {
 
       <WorkspacePanel audience="expert" />
       <IngestPanel audience="expert" />
+      <DocumentsPanel audience="expert" />
       <div id="chat-panel">
         <ChatPanel audience="expert" />
       </div>

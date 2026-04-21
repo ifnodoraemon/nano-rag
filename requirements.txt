@@ -7,10 +7,10 @@ opentelemetry-sdk==1.36.0
 pydantic==2.11.7
 pydantic-settings==2.10.1
 python-multipart==0.0.20
-pymilvus==2.5.6
+pymilvus>=2.6
 pypdf==5.9.0
 pytest==8.4.1
 pytest-asyncio==1.1.0
 pyyaml==6.0.2
-ragas==0.2.10
+ragas>=0.4.3
 uvicorn==0.35.0

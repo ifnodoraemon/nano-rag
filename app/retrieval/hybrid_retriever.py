@@ -142,9 +142,11 @@ class HybridRetriever:
             metadata_filters=metadata_filters,
         )
         vector_results = [(hit.chunk.chunk_id, hit.score) for hit in vector_hits]
+        with self._lock:
+            chunk_cache_snapshot = dict(self._chunk_cache)
         scoped_chunk_ids = {
             chunk_id
-            for chunk_id, chunk in self._chunk_cache.items()
+            for chunk_id, chunk in chunk_cache_snapshot.items()
             if chunk.metadata.get("kb_id", "default") == kb_id
             and (tenant_id is None or chunk.metadata.get("tenant_id") == tenant_id)
             and match_metadata_filters(chunk.metadata, metadata_filters)
@@ -162,8 +164,8 @@ class HybridRetriever:
             if doc_id in hits_by_id:
                 hit = hits_by_id[doc_id]
                 final_hits.append(hit)
-            elif doc_id in self._chunk_cache:
-                chunk = self._chunk_cache[doc_id]
+            elif doc_id in chunk_cache_snapshot:
+                chunk = chunk_cache_snapshot[doc_id]
                 final_hits.append(
                     SearchHit(
                         chunk=chunk,

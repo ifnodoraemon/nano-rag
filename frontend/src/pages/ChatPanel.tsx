@@ -29,6 +29,7 @@ function buildAnswerStatus(args: {
 
 export function ChatPanel({ audience = 'expert' }: ChatPanelProps) {
   const {
+    health,
     workspace,
     updateWorkspace,
     chatResult,
@@ -83,6 +84,7 @@ export function ChatPanel({ audience = 'expert' }: ChatPanelProps) {
     })
     .slice(0, 3);
   const currentChatTraceId = chatResult?.trace_id || selectedTraceId;
+  const diagnosisEnabled = !!health?.features?.diagnosis;
   const chatDiagnosis =
     diagnosis?.target_type === 'trace' && diagnosis.trace_id === currentChatTraceId
       ? diagnosis
@@ -147,7 +149,11 @@ export function ChatPanel({ audience = 'expert' }: ChatPanelProps) {
       return;
     }
     await loadTrace(traceId);
-    navigateToPage('investigate', 'traces-panel');
+    navigateToPage(
+      'investigate',
+      'traces-panel',
+      audience === 'simple' ? 'expert' : undefined,
+    );
   };
 
   const handleDiagnoseTrace = async () => {
@@ -288,9 +294,9 @@ export function ChatPanel({ audience = 'expert' }: ChatPanelProps) {
                 结果不靠谱
               </LoadingButton>
               <button type="button" className="secondary" onClick={handleViewTrace}>
-                查看处理过程
+                {audience === 'simple' ? '进入工程排查' : '查看处理过程'}
               </button>
-              {audience === 'expert' ? (
+              {audience === 'expert' && diagnosisEnabled ? (
                 <LoadingButton
                   loading={diagnosisLoading}
                   type="button"
@@ -301,6 +307,12 @@ export function ChatPanel({ audience = 'expert' }: ChatPanelProps) {
                 </LoadingButton>
               ) : null}
             </div>
+
+            {audience === 'expert' && !diagnosisEnabled ? (
+              <div className="status-line">
+                当前实例未启用 diagnosis，如需自动诊断建议，请开启 `RAG_DIAGNOSIS_ENABLED=true`。
+              </div>
+            ) : null}
 
             <label>
               备注（可选）

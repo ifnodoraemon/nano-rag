@@ -4,18 +4,29 @@ import asyncio
 import logging
 import os
 import time
-
-from pymilvus import MilvusClient
-from pymilvus.exceptions import MilvusException
+from typing import Any
 
 LOGGER = logging.getLogger(__name__)
 
 
-def _create_milvus_client_sync() -> MilvusClient:
+def _import_milvus() -> tuple[type[Any], type[Exception]]:
+    try:
+        from pymilvus import MilvusClient
+        from pymilvus.exceptions import MilvusException
+    except ImportError as exc:
+        raise RuntimeError(
+            "pymilvus is required when VECTORSTORE_BACKEND=milvus. "
+            "Install pymilvus or switch VECTORSTORE_BACKEND=memory."
+        ) from exc
+    return MilvusClient, MilvusException
+
+
+def _create_milvus_client_sync() -> Any:
+    MilvusClient, MilvusException = _import_milvus()
     uri = os.getenv("MILVUS_URI", "http://localhost:19530")
     attempts = max(1, int(os.getenv("MILVUS_CONNECT_MAX_ATTEMPTS", "30")))
     retry_seconds = max(0.1, float(os.getenv("MILVUS_CONNECT_RETRY_SECONDS", "2")))
-    last_error: MilvusException | None = None
+    last_error: Exception | None = None
 
     for attempt in range(1, attempts + 1):
         try:
@@ -38,7 +49,7 @@ def _create_milvus_client_sync() -> MilvusClient:
     raise RuntimeError("unexpected Milvus initialization failure")
 
 
-def create_milvus_client() -> MilvusClient:
+def create_milvus_client() -> Any:
     try:
         loop = asyncio.get_running_loop()
     except RuntimeError:

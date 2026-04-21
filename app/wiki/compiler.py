@@ -38,6 +38,11 @@ class WikiCompiler:
         self._append_log(document, metadata["updated_at"])
         return page_path
 
+    def remove_document(self, doc_id: str) -> None:
+        self._ensure_structure()
+        (self.sources_dir / f"{doc_id}.md").unlink(missing_ok=True)
+        self._write_index()
+
     def _ensure_structure(self) -> None:
         self.root_dir.mkdir(parents=True, exist_ok=True)
         self.sources_dir.mkdir(parents=True, exist_ok=True)

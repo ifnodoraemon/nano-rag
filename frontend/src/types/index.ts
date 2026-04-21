@@ -1,16 +1,30 @@
+export interface FeatureFlags {
+  wiki: boolean;
+  hybrid_search: boolean;
+  semantic_chunker: boolean;
+  query_rewrite: boolean;
+  diagnosis: boolean;
+  eval: boolean;
+  benchmark: boolean;
+}
+
 export interface HealthResponse {
   status: string;
   service: string;
+  auth_enabled: boolean;
   vectorstore_backend: string;
+  parsed_dir: string;
   gateway_mode: string;
   gateway: {
-    base_url: string;
+    base_url?: string | null;
     reachable: boolean;
     error: string | null;
+    capabilities?: Record<string, unknown>;
   };
   phoenix: {
-    collector_endpoint: string;
-    ui_endpoint: string;
+    enabled: boolean;
+    collector_endpoint?: string | null;
+    ui_endpoint?: string | null;
     reachable: boolean;
     error: string | null;
   };
@@ -19,7 +33,7 @@ export interface HealthResponse {
     error: string | null;
     details: Record<string, unknown>;
   };
-  parsed_dir: string;
+  features: FeatureFlags;
   trace_count: number;
 }
 
@@ -37,6 +51,18 @@ export interface IngestResponse {
   chunks: number;
   source?: 'path' | 'upload';
   uploaded_files?: string[];
+}
+
+export interface DocumentSummary {
+  doc_id: string;
+  title: string;
+  source_path: string;
+  kb_id: string;
+  tenant_id?: string | null;
+  chunk_count: number;
+  updated_at: number;
+  doc_type?: string | null;
+  source_key?: string | null;
 }
 
 export interface ChatRequest {

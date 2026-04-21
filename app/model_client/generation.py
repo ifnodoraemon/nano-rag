@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import logging
 from typing import TYPE_CHECKING, Any
 
 from app.model_client.base import GatewayClient
 
 if TYPE_CHECKING:
     from app.core.config import AppConfig
+
+logger = logging.getLogger(__name__)
 
 
 class GenerationClient(GatewayClient):
@@ -30,6 +33,12 @@ class GenerationClient(GatewayClient):
                 "raw": data,
             }
         choice = choices[0]
+        finish_reason = choice.get("finish_reason")
+        if finish_reason == "length":
+            logger.warning(
+                "generation truncated (finish_reason=length) for model %s",
+                model_alias or self.alias,
+            )
         message = choice.get("message", {})
         return {
             "content": message.get("content", ""),

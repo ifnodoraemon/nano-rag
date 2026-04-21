@@ -102,3 +102,19 @@ export function Card({ title, children, id, className }: CardProps) {
     </div>
   );
 }
+
+interface UnavailableStateProps {
+  title: string;
+  description: string;
+  hint?: string;
+}
+
+export function UnavailableState({ title, description, hint }: UnavailableStateProps) {
+  return (
+    <div className="unavailable-state">
+      <strong>{title}</strong>
+      <p>{description}</p>
+      {hint ? <div className="mono muted">{hint}</div> : null}
+    </div>
+  );
+}

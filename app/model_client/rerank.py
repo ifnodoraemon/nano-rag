@@ -38,4 +38,5 @@ class RerankClient(GatewayClient):
                         document=documents[idx],
                     )
                 )
-        return valid_results
+        valid_results.sort(key=lambda r: r.score, reverse=True)
+        return valid_results[:top_k]

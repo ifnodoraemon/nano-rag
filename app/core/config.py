@@ -9,9 +9,7 @@ from typing import Any
 import yaml
 
 from app.core.exceptions import ConfigurationError
-from app.eval.ragas_runner import RagasRunner
 from app.core.tracing import FeedbackStore, TraceStore, TracingManager
-from app.diagnostics.service import DiagnosisService
 from app.generation.answer_formatter import AnswerFormatter
 from app.generation.prompt_builder import PromptBuilder
 from app.generation.service import GenerationService
@@ -130,15 +128,15 @@ class AppConfig:
 
     @property
     def phoenix_collector_endpoint(self) -> str:
-        return os.getenv("PHOENIX_COLLECTOR_ENDPOINT", "http://phoenix:4317")
+        return os.getenv("PHOENIX_COLLECTOR_ENDPOINT", "").strip()
 
     @property
     def phoenix_ui_endpoint(self) -> str:
-        return os.getenv("PHOENIX_UI_ENDPOINT", "http://phoenix:6006")
+        return os.getenv("PHOENIX_UI_ENDPOINT", "").strip()
 
     @property
     def phoenix_ui_host_header(self) -> str:
-        return os.getenv("PHOENIX_UI_HOST_HEADER", "localhost")
+        return os.getenv("PHOENIX_UI_HOST_HEADER", "").strip()
 
     @property
     def trace_store_dir(self) -> Path:
@@ -175,6 +173,39 @@ class AppConfig:
         raw = os.getenv("RAG_API_KEYS", "")
         return {item.strip() for item in raw.split(",") if item.strip()}
 
+    @property
+    def wiki_enabled(self) -> bool:
+        return parse_bool_env(os.getenv("RAG_WIKI_ENABLED"))
+
+    @property
+    def hybrid_search_enabled(self) -> bool:
+        return parse_bool_env(os.getenv("RAG_HYBRID_SEARCH_ENABLED"))
+
+    @property
+    def semantic_chunker_enabled(self) -> bool:
+        return parse_bool_env(os.getenv("RAG_SEMANTIC_CHUNKER_ENABLED"))
+
+    @property
+    def query_rewrite_enabled(self) -> bool:
+        query_rewriter_config = QueryRewriterConfig.from_env()
+        return (
+            query_rewriter_config.enable_rewrite
+            or query_rewriter_config.enable_multi_query
+            or query_rewriter_config.enable_hyde
+        )
+
+    @property
+    def diagnosis_enabled(self) -> bool:
+        return parse_bool_env(os.getenv("RAG_DIAGNOSIS_ENABLED"))
+
+    @property
+    def eval_enabled(self) -> bool:
+        return parse_bool_env(os.getenv("RAG_EVAL_ENABLED"))
+
+    @property
+    def benchmark_enabled(self) -> bool:
+        return self.eval_enabled and self.diagnosis_enabled
+
 
 def load_config() -> AppConfig:
     config_dir = Path(
@@ -205,10 +236,10 @@ class AppContainer:
     ingestion_pipeline: IngestionPipeline
     retrieval_pipeline: RetrievalPipeline
     chat_pipeline: GenerationService
-    ragas_runner: RagasRunner
+    ragas_runner: object | None
     trace_store: TraceStore
     tracing_manager: TracingManager
-    diagnosis_service: DiagnosisService
+    diagnosis_service: object | None
     feedback_store: FeedbackStore
     query_rewriter: QueryRewriter | None = None
     semantic_chunker: SemanticChunker | None = None
@@ -221,6 +252,8 @@ class AppContainer:
         await self.rerank_client.close()
         await self.generation_client.close()
         await self.document_parser.close()
+        if hasattr(self.repository, "close"):
+            await self.repository.close()
 
     @classmethod
     def from_env(cls) -> "AppContainer":
@@ -233,20 +266,36 @@ class AppContainer:
         trace_store = TraceStore(persist_dir=config.trace_store_dir)
         feedback_store = FeedbackStore(persist_dir=config.feedback_store_dir)
         tracing_manager = TracingManager("nano-rag", config.phoenix_collector_endpoint)
-        wiki_compiler = WikiCompiler(config.wiki_dir)
-        wiki_searcher = WikiSearcher(config.wiki_dir)
-        query_rewriter_config = QueryRewriterConfig.from_env()
-        query_rewriter = QueryRewriter(
-            generation_client=generation_client,
-            config=query_rewriter_config,
-        )
-        hybrid_retriever = HybridRetriever(
-            repository=repository,
-            embedding_client=embedding_client,
-        )
-        hybrid_retriever.bootstrap_from_parsed_dir(config.parsed_dir)
-        semantic_chunker_config = SemanticChunkerConfig.from_env()
-        semantic_chunker = SemanticChunker(config=semantic_chunker_config)
+        wiki_compiler = WikiCompiler(config.wiki_dir) if config.wiki_enabled else None
+        wiki_searcher = WikiSearcher(config.wiki_dir) if config.wiki_enabled else None
+        query_rewriter = None
+        if config.query_rewrite_enabled:
+            query_rewriter_config = QueryRewriterConfig.from_env()
+            query_rewriter = QueryRewriter(
+                generation_client=generation_client,
+                config=query_rewriter_config,
+            )
+        hybrid_retriever = None
+        if config.hybrid_search_enabled:
+            hybrid_retriever = HybridRetriever(
+                repository=repository,
+                embedding_client=embedding_client,
+            )
+            hybrid_retriever.bootstrap_from_parsed_dir(config.parsed_dir)
+        semantic_chunker = None
+        if config.semantic_chunker_enabled:
+            semantic_chunker_config = SemanticChunkerConfig.from_env()
+            semantic_chunker = SemanticChunker(config=semantic_chunker_config)
+        ragas_runner = None
+        if config.eval_enabled:
+            from app.eval.ragas_runner import RagasRunner
+
+            ragas_runner = RagasRunner()
+        diagnosis_service = None
+        if config.diagnosis_enabled:
+            from app.diagnostics.service import DiagnosisService
+
+            diagnosis_service = DiagnosisService(generation_client=generation_client)
         retrieval_pipeline = RetrievalPipeline(
             config,
             repository,
@@ -287,10 +336,10 @@ class AppContainer:
             ),
             retrieval_pipeline=retrieval_pipeline,
             chat_pipeline=chat_pipeline,
-            ragas_runner=RagasRunner(),
+            ragas_runner=ragas_runner,
             trace_store=trace_store,
             tracing_manager=tracing_manager,
-            diagnosis_service=DiagnosisService(generation_client=generation_client),
+            diagnosis_service=diagnosis_service,
             feedback_store=feedback_store,
             query_rewriter=query_rewriter,
             semantic_chunker=semantic_chunker,

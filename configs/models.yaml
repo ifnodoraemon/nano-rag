@@ -9,7 +9,7 @@ embedding:
   api_key: ${EMBEDDING_API_KEY:-}
 
 rerank:
-  default_alias: disabled
+  default_alias: ${RERANK_MODEL_ALIAS:-disabled}
   base_url: ${RERANK_API_BASE_URL:-}
   api_key: ${RERANK_API_KEY:-}
 

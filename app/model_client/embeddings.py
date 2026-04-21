@@ -1,13 +1,17 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 from typing import TYPE_CHECKING
 
+from app.core.exceptions import ModelGatewayError
 from app.model_client.base import GatewayClient
 
 if TYPE_CHECKING:
     from app.core.config import AppConfig
+
+logger = logging.getLogger(__name__)
 
 DEFAULT_BATCH_SIZE = int(os.getenv("RAG_EMBED_BATCH_SIZE", "100"))
 DEFAULT_CONCURRENCY_LIMIT = int(os.getenv("RAG_EMBED_CONCURRENCY", "5"))
@@ -19,6 +23,7 @@ class EmbeddingClient(GatewayClient):
             config, config.settings["timeout"]["embeddings_seconds"], "embedding"
         )
         self.alias = config.models["embedding"]["default_alias"]
+        self.dimension = int(config.models["embedding"].get("dimension", 1024))
         self._semaphore = asyncio.Semaphore(DEFAULT_CONCURRENCY_LIMIT)
 
     async def embed_texts(
@@ -35,7 +40,24 @@ class EmbeddingClient(GatewayClient):
                 data = await self.post("/embeddings", payload)
                 for item in data.get("data", []):
                     idx = item.get("index", 0)
+                    embedding = item.get("embedding")
                     if 0 <= idx < len(batch) and results[i + idx] is None:
-                        results[i + idx] = item.get("embedding")
+                        if not isinstance(embedding, list) or len(embedding) == 0:
+                            raise ModelGatewayError(
+                                f"embedding API returned empty/invalid vector at index {idx}"
+                            )
+                        if len(embedding) != self.dimension:
+                            logger.warning(
+                                "embedding dimension mismatch: expected %d, got %d",
+                                self.dimension,
+                                len(embedding),
+                            )
+                        results[i + idx] = embedding
 
-        return [r if r is not None else [] for r in results]
+        for j, r in enumerate(results):
+            if r is None:
+                raise ModelGatewayError(
+                    f"embedding API did not return a vector for text at index {j}"
+                )
+
+        return results

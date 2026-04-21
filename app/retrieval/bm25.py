@@ -10,6 +10,7 @@ from dataclasses import dataclass
 class BM25Config:
     k1: float = 1.5
     b: float = 0.75
+    max_documents: int = 50000
 
 
 class BM25Index:
@@ -22,12 +23,31 @@ class BM25Index:
         self._avg_doc_length: float = 0.0
         self._is_built: bool = False
 
+    _CJK_RE = re.compile(r"[\u4e00-\u9fff\u3400-\u4dbf\uf900-\ufaff]+")
+
     def _tokenize(self, text: str) -> list[str]:
         text = text.lower()
-        tokens = re.findall(r"\b\w+\b|[^\w\s]", text)
-        return [t for t in tokens if len(t) > 1 or t.isalpha()]
+        tokens: list[str] = []
+        last = 0
+        for match in self._CJK_RE.finditer(text):
+            if match.start() > last:
+                segment = text[last : match.start()]
+                word_tokens = re.findall(r"\b\w+\b|[^\w\s]", segment)
+                tokens.extend(t for t in word_tokens if len(t) > 1 or t.isalpha())
+            cjk_chars = [c for c in match.group() if c.strip()]
+            tokens.extend(cjk_chars)
+            for i in range(len(cjk_chars) - 1):
+                tokens.append(cjk_chars[i] + cjk_chars[i + 1])
+            last = match.end()
+        if last < len(text):
+            segment = text[last:]
+            word_tokens = re.findall(r"\b\w+\b|[^\w\s]", segment)
+            tokens.extend(t for t in word_tokens if len(t) > 1 or t.isalpha())
+        return tokens
 
     def add_document(self, doc_id: str, text: str) -> None:
+        if len(self._documents) >= self.config.max_documents:
+            return
         self._documents[doc_id] = text
         tokens = self._tokenize(text)
         self._doc_lengths[doc_id] = len(tokens)

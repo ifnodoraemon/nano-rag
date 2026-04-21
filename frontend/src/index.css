@@ -195,6 +195,17 @@ body {
   gap: 12px;
 }
 
+.workflow-strip-compact {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  margin-top: 0;
+}
+
+.journey-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+}
+
 .simple-step {
   display: grid;
   gap: 8px;
@@ -203,6 +214,34 @@ body {
   background: rgba(255, 255, 255, 0.6);
   border: 1px solid rgba(77, 56, 26, 0.1);
   color: var(--muted);
+}
+
+.journey-card {
+  display: grid;
+  gap: 8px;
+  padding: 16px 18px;
+  border-radius: 18px;
+  background: rgba(255, 255, 255, 0.7);
+  border: 1px solid rgba(77, 56, 26, 0.1);
+}
+
+.journey-card span {
+  color: var(--muted);
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.journey-card strong {
+  font-size: 20px;
+  font-family: 'IBM Plex Serif', 'Source Han Serif SC', Georgia, serif;
+}
+
+.journey-card p,
+.unavailable-state p {
+  margin: 0;
+  color: var(--muted);
+  line-height: 1.6;
 }
 
 .simple-step span {
@@ -215,6 +254,83 @@ body {
   background: var(--accent-soft);
   color: var(--accent-strong);
   font-weight: 700;
+}
+
+.workflow-step strong {
+  color: var(--text);
+  font-size: 18px;
+  font-family: 'IBM Plex Serif', 'Source Han Serif SC', Georgia, serif;
+}
+
+.workflow-step p,
+.workflow-step small {
+  margin: 0;
+}
+
+.workflow-step-button {
+  text-align: left;
+  cursor: pointer;
+}
+
+.workflow-step-button:hover {
+  transform: translateY(-1px);
+}
+
+.workflow-step-button.current {
+  border-color: rgba(15, 118, 110, 0.28);
+  background: rgba(234, 250, 247, 0.96);
+}
+
+.workflow-step-button.done {
+  border-color: rgba(180, 83, 9, 0.18);
+  background: rgba(255, 255, 255, 0.74);
+}
+
+.workflow-step-button.pending {
+  opacity: 0.88;
+}
+
+.workflow-step-button small {
+  color: var(--accent-strong);
+  font-size: 12px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.simple-review {
+  display: grid;
+  gap: 14px;
+  padding: 22px 24px;
+  border: 1px solid var(--border);
+  border-radius: 24px;
+  background: rgba(255, 252, 248, 0.86);
+  box-shadow: var(--shadow);
+}
+
+.simple-review-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.simple-review-answer {
+  display: grid;
+  gap: 12px;
+  padding: 18px 20px;
+  border-radius: 18px;
+  border: 1px solid rgba(77, 56, 26, 0.1);
+  background: rgba(255, 255, 255, 0.78);
+}
+
+.simple-review-answer strong {
+  font-size: 18px;
+  font-family: 'IBM Plex Serif', 'Source Han Serif SC', Georgia, serif;
+}
+
+.simple-review-answer p {
+  margin: 0;
+  color: var(--muted);
+  line-height: 1.7;
 }
 
 .upload-dropzone {
@@ -669,6 +785,15 @@ textarea {
   white-space: pre-wrap;
 }
 
+.unavailable-state {
+  display: grid;
+  gap: 10px;
+  padding: 18px;
+  border-radius: 18px;
+  background: rgba(255, 255, 255, 0.68);
+  border: 1px dashed rgba(77, 56, 26, 0.18);
+}
+
 .trace-list {
   display: grid;
   gap: 10px;
@@ -755,6 +880,8 @@ textarea {
   .summary-strip,
   .compact-metric-grid,
   .simple-steps,
+  .journey-grid,
+  .simple-review-grid,
   .workflow-strip,
   .advanced-grid,
   .grid {

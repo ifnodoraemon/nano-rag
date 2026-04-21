@@ -14,11 +14,7 @@ export default defineConfig(({ mode }) => {
           target: backendTarget,
           changeOrigin: true,
         },
-        '/ingest': {
-          target: backendTarget,
-          changeOrigin: true,
-        },
-        '/chat': {
+        '/v1': {
           target: backendTarget,
           changeOrigin: true,
         },
@@ -34,7 +30,15 @@ export default defineConfig(({ mode }) => {
           target: backendTarget,
           changeOrigin: true,
         },
+        '/benchmark': {
+          target: backendTarget,
+          changeOrigin: true,
+        },
         '/diagnose': {
+          target: backendTarget,
+          changeOrigin: true,
+        },
+        '/debug': {
           target: backendTarget,
           changeOrigin: true,
         },

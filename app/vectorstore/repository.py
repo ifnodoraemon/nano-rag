@@ -7,8 +7,6 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
-from pymilvus import DataType
-
 from app.retrieval.filters import match_metadata_filters
 from app.schemas.chunk import Chunk
 from app.schemas.document import Document
@@ -147,6 +145,13 @@ class MilvusVectorRepository(VectorRepository):
         return cls(dimension=dimension)
 
     def _ensure_collection(self) -> None:
+        try:
+            from pymilvus import DataType
+        except ImportError as exc:
+            raise RuntimeError(
+                "pymilvus is required when VECTORSTORE_BACKEND=milvus. "
+                "Install pymilvus or switch VECTORSTORE_BACKEND=memory."
+            ) from exc
         if self.client.has_collection(CHUNKS_COLLECTION):
             collection = self.client.describe_collection(
                 collection_name=CHUNKS_COLLECTION
@@ -284,6 +289,12 @@ class MilvusVectorRepository(VectorRepository):
             "dimension": self.dimension,
             "collection": collection,
         }
+
+    def close(self) -> None:
+        try:
+            self.client.close()
+        except Exception:
+            pass
 
 
 def _cosine_similarity(lhs: list[float], rhs: list[float]) -> float:

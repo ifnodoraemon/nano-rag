@@ -6,6 +6,7 @@ import type {
   TraceSummary,
   TraceRecord,
   IngestResponse,
+  DocumentSummary,
   EvalRunResponse,
   EvalDatasetSummary,
   EvalReportSummary,
@@ -123,6 +124,11 @@ interface AppState {
   ingestError: string | null;
   runIngest: (path: string) => Promise<void>;
   runIngestUpload: (files: File[]) => Promise<void>;
+
+  documents: DocumentSummary[];
+  documentsLoading: boolean;
+  documentsError: string | null;
+  loadDocuments: () => Promise<void>;
 
   chatResult: ChatResponse | null;
   chatLoading: boolean;
@@ -260,6 +266,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       );
       set({ ingestResult: data, ingestLoading: false });
       await get().loadHealth();
+      await get().loadDocuments();
     } catch (e) {
       set({ ingestError: formatApiError(e), ingestLoading: false });
     }
@@ -278,8 +285,29 @@ export const useAppStore = create<AppState>((set, get) => ({
       );
       set({ ingestResult: data, ingestLoading: false });
       await get().loadHealth();
+      await get().loadDocuments();
     } catch (e) {
       set({ ingestError: formatApiError(e), ingestLoading: false });
+    }
+  },
+
+  documents: [],
+  documentsLoading: false,
+  documentsError: null,
+  loadDocuments: async () => {
+    set({ documentsLoading: true, documentsError: null });
+    try {
+      const { workspace } = get();
+      const data = await businessIngestApi.listDocuments(
+        {
+          kb_id: workspace.kbId,
+          tenant_id: workspace.tenantId || undefined,
+        },
+        workspace.apiKey,
+      );
+      set({ documents: data, documentsLoading: false });
+    } catch (e) {
+      set({ documentsError: formatApiError(e), documentsLoading: false });
     }
   },
 

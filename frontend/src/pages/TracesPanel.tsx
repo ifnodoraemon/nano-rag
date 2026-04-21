@@ -50,6 +50,7 @@ function traceClaimFilterLabel(claimFilter: TraceClaimFilter): string {
 
 export function TracesPanel() {
   const {
+    health,
     traces,
     tracesLoading,
     tracesError,
@@ -264,28 +265,37 @@ export function TracesPanel() {
           <LoadingButton loading={traceLoading} type="submit">
             加载详情
           </LoadingButton>
-          <LoadingButton
-            loading={diagnosisLoading}
-            type="button"
-            variant="secondary"
-            onClick={() => handleDiagnoseTrace(false)}
-          >
-            规则诊断
-          </LoadingButton>
-          <LoadingButton
-            loading={diagnosisLoading}
-            type="button"
-            variant="secondary"
-            onClick={() => handleDiagnoseTrace(true)}
-          >
-            AI 诊断
-          </LoadingButton>
+          {health?.features?.diagnosis ? (
+            <>
+              <LoadingButton
+                loading={diagnosisLoading}
+                type="button"
+                variant="secondary"
+                onClick={() => handleDiagnoseTrace(false)}
+              >
+                规则诊断
+              </LoadingButton>
+              <LoadingButton
+                loading={diagnosisLoading}
+                type="button"
+                variant="secondary"
+                onClick={() => handleDiagnoseTrace(true)}
+              >
+                AI 诊断
+              </LoadingButton>
+            </>
+          ) : null}
           {currentTrace?.query && (
             <button type="button" className="secondary" onClick={handleReplayTrace}>
               回放到 Chat
             </button>
           )}
         </div>
+        {!health?.features?.diagnosis && (
+          <div className="status-line">
+            当前实例未启用 diagnosis，只保留 trace 查看和 chat 回放。
+          </div>
+        )}
         <StatusLine
           message={
             traceLoading
@@ -409,39 +419,45 @@ export function TracesPanel() {
             </div>
           </div>
         )}
-        <StatusLine
-          message={
-            diagnosisLoading
-              ? '正在分析 trace...'
-              : diagnosisError
-                ? diagnosisError
-                : diagnosis
-                  ? diagnosis.summary
-                  : undefined
-          }
-          isError={!!diagnosisError}
-        />
-        {diagnosis && (
-          <div className="cards" style={{ marginBottom: 12 }}>
-            {diagnosisFindings.length ? (
-              diagnosisFindings.slice(0, 4).map((finding, index) => (
-                <Card
-                  key={`${finding.category}-${index}`}
-                  title={`${finding.category} | ${finding.severity}`}
-                >
-                  {finding.rationale}
-                </Card>
-              ))
-            ) : (
-              <div className="empty-state">这次诊断没有返回明确 finding。</div>
+        {health?.features?.diagnosis ? (
+          <>
+            <StatusLine
+              message={
+                diagnosisLoading
+                  ? '正在分析 trace...'
+                  : diagnosisError
+                    ? diagnosisError
+                    : diagnosis
+                      ? diagnosis.summary
+                      : undefined
+              }
+              isError={!!diagnosisError}
+            />
+            {diagnosis && (
+              <div className="cards" style={{ marginBottom: 12 }}>
+                {diagnosisFindings.length ? (
+                  diagnosisFindings.slice(0, 4).map((finding, index) => (
+                    <Card
+                      key={`${finding.category}-${index}`}
+                      title={`${finding.category} | ${finding.severity}`}
+                    >
+                      {finding.rationale}
+                    </Card>
+                  ))
+                ) : (
+                  <div className="empty-state">这次诊断没有返回明确 finding。</div>
+                )}
+              </div>
             )}
-          </div>
-        )}
+          </>
+        ) : null}
         <details className="details-panel">
           <summary>查看原始 trace 和诊断数据</summary>
           <div className="stack" style={{ marginTop: 12 }}>
             <JsonOutput data={currentTrace} placeholder="还没有加载任何 trace" />
-            <JsonOutput data={diagnosis} placeholder="还没有执行诊断" />
+            {health?.features?.diagnosis ? (
+              <JsonOutput data={diagnosis} placeholder="还没有执行诊断" />
+            ) : null}
           </div>
         </details>
       </form>

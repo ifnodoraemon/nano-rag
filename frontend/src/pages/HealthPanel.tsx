@@ -1,4 +1,3 @@
-import { useEffect } from 'react';
 import { useAppStore } from '../stores/appStore';
 import { Panel, Chip, JsonOutput, LoadingButton, StatusLine } from '../components/common';
 
@@ -14,14 +13,17 @@ export function HealthPanel() {
     diagnoseAuto,
   } = useAppStore();
 
-  useEffect(() => {
-    loadHealth();
-  }, [loadHealth]);
-
   const chips: { label: string; status: 'ok' | 'warn' | 'err' | 'neutral' }[] = health
     ? [
         { label: '模型网关', status: health.gateway?.reachable ? 'ok' : 'err' },
-        { label: 'Phoenix UI', status: health.phoenix?.reachable ? 'ok' : 'err' },
+        {
+          label: 'Phoenix UI',
+          status: !health.phoenix?.enabled
+            ? 'neutral'
+            : health.phoenix?.reachable
+              ? 'ok'
+              : 'warn',
+        },
         {
           label: '向量库',
           status: health.vectorstore?.status === 'ok' ? 'ok' : 'err',
@@ -30,25 +32,40 @@ export function HealthPanel() {
           label: `模型模式: ${health.gateway_mode || 'unknown'}`,
           status: health.gateway_mode === 'live' ? 'ok' : 'warn',
         },
+      ] 
+    : [];
+  const featureChips: { label: string; status: 'ok' | 'neutral' }[] = health
+    ? [
+        { label: 'Core Chat', status: 'ok' },
+        { label: 'Wiki', status: health.features?.wiki ? 'ok' : 'neutral' },
+        { label: 'Hybrid', status: health.features?.hybrid_search ? 'ok' : 'neutral' },
+        {
+          label: 'Diagnosis',
+          status: health.features?.diagnosis ? 'ok' : 'neutral',
+        },
+        { label: 'Eval', status: health.features?.eval ? 'ok' : 'neutral' },
+        { label: 'Benchmark', status: health.features?.benchmark ? 'ok' : 'neutral' },
       ]
     : [];
 
   return (
     <Panel
       title="运行状态"
-      subtitle="确认模型、知识库和观测链路是否就绪"
+      subtitle="确认核心链路是否可测，并识别当前实例开放了哪些扩展能力"
       actions={
         <>
           <LoadingButton loading={healthLoading} onClick={loadHealth} variant="secondary">
             刷新
           </LoadingButton>
-          <LoadingButton
-            loading={diagnosisLoading}
-            onClick={() => diagnoseAuto(true)}
-            variant="secondary"
-          >
-            一键 AI 诊断
-          </LoadingButton>
+          {health?.features?.diagnosis ? (
+            <LoadingButton
+              loading={diagnosisLoading}
+              onClick={() => diagnoseAuto(true)}
+              variant="secondary"
+            >
+              一键 AI 诊断
+            </LoadingButton>
+          ) : null}
         </>
       }
     >
@@ -76,8 +93,12 @@ export function HealthPanel() {
                 <strong>
                   {health.vectorstore_backend === 'milvus'
                     ? 'Milvus（真实向量库）'
-                    : health.vectorstore_backend || 'unknown'}
+                    : health.vectorstore_backend || 'memory'}
                 </strong>
+              </div>
+              <div className="info-row">
+                <span>业务鉴权</span>
+                <strong>{health.auth_enabled ? '已启用' : '未启用'}</strong>
               </div>
               <div className="info-row">
                 <span>Trace 数量</span>
@@ -88,7 +109,25 @@ export function HealthPanel() {
                 <strong className="mono">{health.parsed_dir}</strong>
               </div>
             </div>
-            {!health.phoenix?.reachable && (
+            <div>
+              <div className="section-label">当前启用能力</div>
+              <div className="chip-row">
+                {featureChips.map((chip) => (
+                  <Chip key={chip.label} label={chip.label} status={chip.status} />
+                ))}
+              </div>
+            </div>
+            {health.phoenix?.enabled === false && (
+              <div className="status-line">
+                Phoenix 未启用。主流程仍可运行，但不会上报外部追踪。
+              </div>
+            )}
+            {!health.features?.diagnosis && (
+              <div className="status-line">
+                当前实例只开启了 nano core，未启用 diagnosis / eval workbench。
+              </div>
+            )}
+            {health.phoenix?.enabled && !health.phoenix?.reachable && (
               <div className="status-line">
                 Phoenix UI 当前未连通，不影响问答主流程，但查看追踪时会受影响。
               </div>
@@ -99,13 +138,21 @@ export function HealthPanel() {
               </div>
             )}
             <StatusLine
-              message={diagnosisLoading ? '正在自动诊断最新问题...' : diagnosis?.summary}
+              message={
+                health.features?.diagnosis
+                  ? diagnosisLoading
+                    ? '正在自动诊断最新问题...'
+                    : diagnosis?.summary
+                  : undefined
+              }
               isError={false}
             />
-            <details className="details-panel">
-              <summary>查看最近诊断结果</summary>
-              <JsonOutput data={diagnosis} placeholder="还没有执行自动诊断" />
-            </details>
+            {health.features?.diagnosis ? (
+              <details className="details-panel">
+                <summary>查看最近诊断结果</summary>
+                <JsonOutput data={diagnosis} placeholder="还没有执行自动诊断" />
+              </details>
+            ) : null}
             <details className="details-panel">
               <summary>查看原始健康数据</summary>
               <JsonOutput data={health} placeholder="Loading..." />

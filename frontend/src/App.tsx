@@ -1,14 +1,18 @@
 import { useEffect, useState } from 'react';
 import { Chip } from './components/common';
-import { getPageFromHash, navigateToPage, type AppPage } from './navigation';
+import {
+  getPageFromHash,
+  getStoredAudienceMode,
+  navigateToPage,
+  type AppPage,
+  type AudienceMode,
+} from './navigation';
 import { SimpleHomePage } from './pages/SimpleHomePage';
 import { ValidatePage } from './pages/ValidatePage';
 import { InvestigatePage } from './pages/InvestigatePage';
 import { EvaluatePage } from './pages/EvaluatePage';
 import { useAppStore } from './stores/appStore';
 import './index.css';
-
-type AudienceMode = 'simple' | 'expert';
 
 const PAGE_META: Record<
   AppPage,
@@ -30,19 +34,31 @@ const PAGE_META: Record<
 
 function App() {
   const [page, setPage] = useState<AppPage>(() => getPageFromHash(window.location.hash));
-  const [mode, setMode] = useState<AudienceMode>('simple');
-  const { workspace, health, healthLoading, loadHealth } = useAppStore();
+  const [mode, setMode] = useState<AudienceMode>(() => getStoredAudienceMode());
+  const { workspace, health, healthLoading, loadHealth, ingestResult, chatResult } = useAppStore();
 
   useEffect(() => {
     void loadHealth();
   }, [loadHealth]);
 
   useEffect(() => {
+    window.localStorage.setItem('nano-rag-mode', mode);
+  }, [mode]);
+
+  useEffect(() => {
     const onHashChange = () => {
       setPage(getPageFromHash(window.location.hash));
     };
+    const onModeChange = (event: Event) => {
+      const customEvent = event as CustomEvent<AudienceMode>;
+      setMode(customEvent.detail === 'expert' ? 'expert' : 'simple');
+    };
     window.addEventListener('hashchange', onHashChange);
-    return () => window.removeEventListener('hashchange', onHashChange);
+    window.addEventListener('nano-rag:set-mode', onModeChange as EventListener);
+    return () => {
+      window.removeEventListener('hashchange', onHashChange);
+      window.removeEventListener('nano-rag:set-mode', onModeChange as EventListener);
+    };
   }, []);
 
   const pageMeta = PAGE_META[page];
@@ -61,6 +77,25 @@ function App() {
     : health?.status === 'ok'
       ? 'ok'
       : 'warn';
+  const evaluateAvailable = !!(health?.features?.eval || health?.features?.benchmark);
+  const expertPages: AppPage[] = evaluateAvailable
+    ? ['validate', 'investigate', 'evaluate']
+    : ['validate', 'investigate'];
+  const nextStep = !health
+    ? '等待系统健康检查'
+    : health.status !== 'ok'
+      ? '先修复运行状态，再开始导入'
+      : !ingestResult
+        ? '先上传一批资料'
+        : !chatResult
+          ? '下一步直接提一个真实问题'
+          : '继续复核引用，必要时进入排查页';
+
+  useEffect(() => {
+    if (page === 'evaluate' && !evaluateAvailable) {
+      navigateToPage('validate');
+    }
+  }, [evaluateAvailable, page]);
 
   return (
     <div className="app-shell">
@@ -97,7 +132,7 @@ function App() {
 
         {mode === 'expert' ? (
           <div className="nav-tabs" role="tablist" aria-label="workspace sections">
-            {(['validate', 'investigate', 'evaluate'] as AppPage[]).map((targetPage) => (
+            {expertPages.map((targetPage) => (
               <button
                 key={targetPage}
                 type="button"
@@ -117,6 +152,11 @@ function App() {
               <span>当前模式</span>
               <strong>快速测试</strong>
               <p>默认只保留上传资料、提问和结果判断。</p>
+            </div>
+            <div className="summary-card">
+              <span>推荐下一步</span>
+              <strong>{nextStep}</strong>
+              <p>让第一次体验更像产品流程，而不是先学一堆内部名词。</p>
             </div>
             <div className="summary-card">
               <span>支持资料</span>
@@ -145,6 +185,17 @@ function App() {
               <strong>{workspace.kbId}</strong>
               <p>
                 tenant {workspace.tenantId || 'n/a'} · session {workspace.sessionId || 'n/a'}
+              </p>
+            </div>
+            <div className="summary-card">
+              <span>工作台范围</span>
+              <strong>
+                {health?.features?.eval || health?.features?.benchmark ? 'Core + Workbench' : 'Nano Core'}
+              </strong>
+              <p>
+                {health?.features?.eval || health?.features?.benchmark
+                  ? '当前实例开放了评测/诊断扩展能力。'
+                  : '当前实例只暴露核心验证链路，更接近轻量产品形态。'}
               </p>
             </div>
             <div className="summary-card summary-health">

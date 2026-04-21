@@ -38,6 +38,8 @@ services:
         condition: service_healthy
       phoenix:
         condition: service_healthy
+      bifrost:
+        condition: service_started
     restart: unless-stopped
     healthcheck:
       test:
@@ -92,7 +94,7 @@ services:
       start_period: 10s
 
   milvus:
-    image: milvusdb/milvus:v2.5.27
+    image: milvusdb/milvus:v2.6.15
     command: ["milvus", "run", "standalone"]
     environment:
       ETCD_ENDPOINTS: etcd:2379
@@ -118,8 +120,6 @@ services:
   bifrost:
     image: maximhq/bifrost:v1.3.9
     container_name: nano-rag-bifrost
-    profiles:
-      - bifrost
     env_file:
       - ./bifrost/.env
     ports:
@@ -141,7 +141,7 @@ services:
     restart: unless-stopped
 
   phoenix:
-    image: arizephoenix/phoenix:8.22.1
+    image: arizephoenix/phoenix:latest
     container_name: nano-rag-phoenix
     ports:
       - "127.0.0.1:6006:6006"
@@ -152,6 +152,19 @@ services:
       timeout: 5s
       retries: 6
       start_period: 10s
+
+  litellm:
+    image: ghcr.io/berriai/litellm:main-stable
+    container_name: nano-rag-litellm
+    profiles:
+      - litellm
+    ports:
+      - "127.0.0.1:4000:4000"
+    environment:
+      LITELLM_MASTER_KEY: ${LITELLM_MASTER_KEY:-change-me}
+    volumes:
+      - ./litellm/config.yaml:/app/config.yaml:ro
+    restart: unless-stopped
 
 volumes:
   app-parsed-data:

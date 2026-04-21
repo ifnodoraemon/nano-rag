@@ -57,9 +57,12 @@ def mock_chat(messages: list[dict[str, str]]) -> dict:
                 "message": {
                     "role": "assistant",
                     "content": answer,
-                }
+                },
+                "finish_reason": "stop",
             }
-        ]
+        ],
+        "model": "mock",
+        "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
     }
 
 

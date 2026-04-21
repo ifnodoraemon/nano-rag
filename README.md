@@ -1,15 +1,16 @@
 # Nano RAG
 
-根据 `rag_project_plan_v2.md` 初始化的第一阶段企业级 RAG 项目骨架。
+根据 `rag_project_plan_v2.md` 初始化的企业级 RAG 项目骨架，当前默认更偏向 `nano core + optional workbench`。
 
 当前版本提供：
 
-- `FastAPI` 服务，包含 `/health`、`/ingest`、`/chat`、`/retrieve/debug`、`/traces`
-- 业务接入版 API，包含 `/v1/rag/chat`、`/v1/rag/ingest`、`/v1/rag/feedback`、`/v1/rag/traces/{trace_id}`、`/v1/rag/benchmark/run`
+- `FastAPI` 服务，核心公开入口为 `/health`
+- 调试/评测 API：`/retrieve/debug`、`/traces`、`/eval/*`、`/benchmark/*`、`/diagnose/*`
+- 业务接入 API：`/v1/rag/chat`、`/v1/rag/ingest`、`/v1/rag/ingest/upload`、`/v1/rag/feedback`、`/v1/rag/traces/{trace_id}`、`/v1/rag/benchmark/run`
 - `ingestion / retrieval / generation` 主链路模块拆分
 - 统一 `model_client`，所有模型调用都走 OpenAI-compatible Gateway
-- 默认直连外部 OpenAI-compatible 模型接口
-- `Milvus` 仓储抽象，默认走真实向量库，保留内存回退仅用于临时调试
+- 默认本地走 `memory` 向量仓储，可切换到 `Milvus`
+- `Phoenix`、`Milvus`、`benchmark/eval/diagnosis` 都保留，但不再要求本地最小启动必须依赖
 - `Docker Compose` 骨架，包含 `app / milvus / phoenix / frontend (nginx)`
 - 基础测试、trace 存储、配置模板、离线评测和 benchmark 脚手架
 
@@ -33,8 +34,25 @@ cd nano-rag
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
+export MODEL_GATEWAY_MODE=mock
+export RAG_INGEST_ALLOWED_DIRS=$PWD/data/raw
 uvicorn app.main:app --reload --app-dir .
 ```
+
+说明：
+
+- 本地最小启动默认推荐 `MODEL_GATEWAY_MODE=mock`，先把 ingest / retrieve / trace 跑通
+- 如果要直连真实模型，把 `MODEL_GATEWAY_MODE` 改成 `live`，并配置 `MODEL_GATEWAY_BASE_URL / MODEL_GATEWAY_API_KEY`
+- ingest 默认要求显式配置白名单目录；上面的 `RAG_INGEST_ALLOWED_DIRS=$PWD/data/raw` 是为了让 README 里的示例可直接运行
+- 当前默认只启用 nano core。下面这些能力现在需要显式打开：
+
+```bash
+export RAG_WIKI_ENABLED=true
+export RAG_DIAGNOSIS_ENABLED=true
+export RAG_EVAL_ENABLED=true
+```
+
+- `RAG_HYBRID_SEARCH_ENABLED`、`RAG_SEMANTIC_CHUNKER_ENABLED`、`RAG_QUERY_REWRITE_ENABLED` / `RAG_MULTI_QUERY_ENABLED` / `RAG_HYDE_ENABLED` 也都属于可选增强，不再默认启动
 
 ### 2. 启动 React 前端
 
@@ -61,7 +79,9 @@ VITE_DEV_API_TARGET=http://your-backend-host:8000 npm run dev
 - 问答验证：调用 `/v1/rag/chat`
 - 反馈回流：调用 `/v1/rag/feedback`
 - 高级区：`retrieve/debug`、`traces`、`eval`、`benchmark`
-- 当配置了 `RAG_API_KEYS` 后，业务 API 与高级调试 API 都会要求同一套 key
+- 默认未配置 `RAG_API_KEYS` 时，业务 API 与高级调试 API 都可直接访问
+- 当配置了 `RAG_API_KEYS` 后，业务 API 与高级调试 API 会要求同一套 key
+- 如果你希望未配置 key 时直接拒绝访问，可额外设置 `RAG_AUTH_REQUIRED=true`
 - 前端不会把业务 API Key 持久化到本地存储，刷新页面后需要重新输入
 
 ### 3. Docker Compose
@@ -78,7 +98,7 @@ Docker 模式下：
 - Phoenix: `http://127.0.0.1:6006`
 - Milvus: `http://127.0.0.1:19530`
 
-Compose 默认启用真实向量库：
+Compose 默认启用真实向量库和 Phoenix：
 
 ```bash
 VECTORSTORE_BACKEND=milvus
@@ -159,20 +179,18 @@ Bifrost 还自带 Web UI（`http://127.0.0.1:8080`），可可视化管理 provi
 
 ## 示例
 
-### ingest
+### health
 
 ```bash
-curl -X POST http://127.0.0.1:8000/ingest \
-  -H 'Content-Type: application/json' \
-  -d '{"path":"./data/raw"}'
+curl http://127.0.0.1:8000/health
 ```
 
-### chat
+### business ingest
 
 ```bash
-curl -X POST http://127.0.0.1:8000/chat \
+curl -X POST http://127.0.0.1:8000/v1/rag/ingest \
   -H 'Content-Type: application/json' \
-  -d '{"query":"差旅报销多久内提交？","top_k":10}'
+  -d '{"path":"./data/raw","kb_id":"default","tenant_id":"demo-tenant"}'
 ```
 
 ### business chat
@@ -207,6 +225,8 @@ curl -X POST http://127.0.0.1:8000/retrieve/debug \
 
 ### run eval by API
 
+先确认已经设置 `RAG_EVAL_ENABLED=true`。
+
 ```bash
 curl -X POST http://127.0.0.1:8000/eval/run \
   -H 'Content-Type: application/json' \
@@ -236,6 +256,8 @@ python3 scripts/run_eval.py \
 ```
 
 ### benchmark
+
+先确认已经同时设置 `RAG_EVAL_ENABLED=true` 和 `RAG_DIAGNOSIS_ENABLED=true`。
 
 ```bash
 curl -X POST http://127.0.0.1:8000/v1/rag/benchmark/run \
@@ -272,14 +294,14 @@ curl 'http://127.0.0.1:8000/benchmark/reports/detail?path=data/reports/eval/benc
 
 ## 现阶段说明
 
-- 默认向量仓储使用 `Milvus`
-- 如需临时回退内存模式，可显式设置 `VECTORSTORE_BACKEND=memory`
+- 本地默认向量仓储使用 `memory`
+- Docker Compose 默认把 `VECTORSTORE_BACKEND` 设成 `milvus`
 - PDF 优先走 `Docling`，未安装时回退 `pypdf`
-- `Phoenix` 已在运行环境中拉起，当前代码侧仍以本地 trace store 为最小实现
+- `Phoenix` 现在是可选项；未配置 endpoint 时不会影响主流程健康状态
 - `RAGAS` 相关脚本已接入离线评测入口，当前默认使用确定性聚合指标，后续可替换成真实 RAGAS 流程
 - 当前已补充 benchmark 服务和脚本，用于聚合离线质量、延迟和坏例诊断统计
 - 前端主流程默认走业务 API；如果配置了 `RAG_API_KEYS`，需要在前端工作区中填写对应 key
-- 默认 `MODEL_GATEWAY_MODE=live`
+- 默认建议本地使用 `MODEL_GATEWAY_MODE=mock`；接真实 provider 时再切到 `live`
 - 直连外部 OpenAI-compatible provider
 - 如果直连 Gemini API，请设置 `MODEL_GATEWAY_API_KEY`，并通过 `DISABLE_RERANK=1` 跳过 rerank 阶段
 - 仅当需要网关聚合能力时，再启用 `docker compose --profile bifrost`

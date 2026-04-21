@@ -81,7 +81,9 @@ class DocumentParserClient:
 
     def _get_client(self) -> httpx.AsyncClient:
         if self._client is None:
-            self._client = httpx.AsyncClient(timeout=self.timeout)
+            self._client = httpx.AsyncClient(
+                timeout=self.timeout, follow_redirects=False
+            )
         return self._client
 
     async def close(self) -> None:
@@ -140,11 +142,13 @@ class DocumentParserClient:
 
     async def _upload_file(self, path: Path, mime_type: str) -> str:
         client = self._get_client()
+        file_bytes = path.read_bytes()
+        file_size = len(file_bytes)
         start_headers = {
             "x-goog-api-key": self.api_key,
             "X-Goog-Upload-Protocol": "resumable",
             "X-Goog-Upload-Command": "start",
-            "X-Goog-Upload-Header-Content-Length": str(path.stat().st_size),
+            "X-Goog-Upload-Header-Content-Length": str(file_size),
             "X-Goog-Upload-Header-Content-Type": mime_type,
             "Content-Type": "application/json",
         }
@@ -172,7 +176,7 @@ class DocumentParserClient:
             finalize_response = await client.post(
                 upload_url,
                 headers=finalize_headers,
-                content=path.read_bytes(),
+                content=file_bytes,
             )
             finalize_response.raise_for_status()
         except httpx.TimeoutException as exc:

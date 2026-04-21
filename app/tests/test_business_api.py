@@ -9,6 +9,7 @@ from app.api.routes_business import (
     BenchmarkRunRequest,
     BusinessChatRequest,
     BusinessIngestRequest,
+    rag_documents,
     FeedbackRequest,
     rag_benchmark,
     rag_chat,
@@ -89,10 +90,13 @@ async def test_business_chat_passes_metadata_filters() -> None:
 
 @pytest.mark.asyncio
 async def test_business_ingest_wraps_ingest_response() -> None:
-    async def fake_ingest_run(path, kb_id="default", tenant_id=None):  # noqa: ANN001
+    async def fake_ingest_run(  # noqa: ANN001
+        path, kb_id="default", tenant_id=None, source_path_overrides=None
+    ):
         assert path == "./data/raw"
         assert kb_id == "default"
         assert tenant_id == "tenant-a"
+        assert source_path_overrides is None
         return SimpleNamespace(documents=2, chunks=4)
 
     container = SimpleNamespace(ingestion_pipeline=SimpleNamespace(run=fake_ingest_run))
@@ -111,10 +115,13 @@ async def test_business_ingest_wraps_ingest_response() -> None:
 async def test_business_ingest_upload_wraps_ingest_response(tmp_path) -> None:
     captured: dict[str, object] = {}
 
-    async def fake_ingest_run(path, kb_id="default", tenant_id=None):  # noqa: ANN001
+    async def fake_ingest_run(  # noqa: ANN001
+        path, kb_id="default", tenant_id=None, source_path_overrides=None
+    ):
         captured["path"] = path
         captured["kb_id"] = kb_id
         captured["tenant_id"] = tenant_id
+        captured["source_path_overrides"] = source_path_overrides
         assert tmp_path.as_posix() in path
         return SimpleNamespace(documents=1, chunks=2)
 
@@ -138,6 +145,13 @@ async def test_business_ingest_upload_wraps_ingest_response(tmp_path) -> None:
     assert response.chunks == 2
     assert captured["kb_id"] == "default"
     assert captured["tenant_id"] == "tenant-a"
+    source_path_overrides = captured["source_path_overrides"]
+    assert isinstance(source_path_overrides, dict)
+    assert len(source_path_overrides) == 1
+    assert next(iter(source_path_overrides.values())) == (
+        "uploads/default/tenant-a/policy.md"
+    )
+    assert not any(tmp_path.iterdir())
 
 
 @pytest.mark.asyncio
@@ -157,6 +171,88 @@ async def test_business_ingest_upload_rejects_unsupported_extension(tmp_path) ->
         )
 
     assert exc_info.value.status_code == 400
+    assert not any(tmp_path.iterdir())
+
+
+@pytest.mark.asyncio
+async def test_business_ingest_upload_rejects_duplicate_filenames(tmp_path) -> None:
+    container = SimpleNamespace(
+        ingestion_pipeline=SimpleNamespace(run=None),
+        config=SimpleNamespace(upload_dir=tmp_path),
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        await rag_ingest_upload(
+            _request_with_container(container),
+            files=[
+                UploadFile(filename="policy.md", file=BytesIO(b"first")),
+                UploadFile(filename="policy.md", file=BytesIO(b"second")),
+            ],
+            kb_id="default",
+            tenant_id=None,
+        )
+
+    assert exc_info.value.status_code == 400
+    assert "duplicate upload filename" in str(exc_info.value.detail)
+    assert not any(tmp_path.iterdir())
+
+
+@pytest.mark.asyncio
+async def test_business_documents_lists_current_scope_only(tmp_path) -> None:
+    parsed_dir = tmp_path / "parsed"
+    parsed_dir.mkdir(parents=True, exist_ok=True)
+    (parsed_dir / "doc-a.json").write_text(
+        """
+{
+  "document": {
+    "doc_id": "doc-a",
+    "source_path": "uploads/default/tenant-a/policy.md",
+    "title": "Policy",
+    "content": "body",
+    "metadata": {
+      "kb_id": "default",
+      "tenant_id": "tenant-a",
+      "doc_type": "policy",
+      "source_key": "policy"
+    }
+  },
+  "chunks": [{}, {}]
+}
+        """.strip(),
+        encoding="utf-8",
+    )
+    (parsed_dir / "doc-b.json").write_text(
+        """
+{
+  "document": {
+    "doc_id": "doc-b",
+    "source_path": "uploads/default/tenant-b/guide.md",
+    "title": "Guide",
+    "content": "body",
+    "metadata": {
+      "kb_id": "default",
+      "tenant_id": "tenant-b"
+    }
+  },
+  "chunks": [{}]
+}
+        """.strip(),
+        encoding="utf-8",
+    )
+
+    container = SimpleNamespace(config=SimpleNamespace(parsed_dir=parsed_dir))
+
+    response = await rag_documents(
+        _request_with_container(container),
+        kb_id="default",
+        tenant_id="tenant-a",
+    )
+
+    assert len(response) == 1
+    assert response[0].doc_id == "doc-a"
+    assert response[0].chunk_count == 2
+    assert response[0].doc_type == "policy"
+    assert response[0].source_path == "uploads/default/tenant-a/policy.md"
 
 
 @pytest.mark.asyncio
@@ -317,3 +413,39 @@ async def test_benchmark_route_rejects_dataset_outside_eval_dir() -> None:
         )
 
     assert exc_info.value.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_benchmark_route_returns_503_when_eval_disabled() -> None:
+    container = SimpleNamespace(
+        trace_store=TraceStore(),
+        diagnosis_service=DiagnosisService(),
+        ragas_runner=None,
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        await rag_benchmark(
+            BenchmarkRunRequest(dataset_path="data/eval/sample.jsonl"),
+            _request_with_container(container),
+        )
+
+    assert exc_info.value.status_code == 503
+    assert "RAG_EVAL_ENABLED=true" in str(exc_info.value.detail)
+
+
+@pytest.mark.asyncio
+async def test_benchmark_route_returns_503_when_diagnosis_disabled() -> None:
+    container = SimpleNamespace(
+        trace_store=TraceStore(),
+        diagnosis_service=None,
+        ragas_runner=SimpleNamespace(run=lambda records: {"records": len(records)}),
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        await rag_benchmark(
+            BenchmarkRunRequest(dataset_path="data/eval/sample.jsonl"),
+            _request_with_container(container),
+        )
+
+    assert exc_info.value.status_code == 503
+    assert "RAG_DIAGNOSIS_ENABLED=true" in str(exc_info.value.detail)

@@ -20,6 +20,7 @@ from app.eval.dataset import (
     save_json,
 )
 from app.eval.service import materialize_eval_records
+from app.eval.replay import replay_trace
 from app.schemas.chat import ChatRequest
 from app.schemas.common import PaginatedResponse
 from app.schemas.diagnosis import (
@@ -33,6 +34,26 @@ from app.schemas.trace import RetrievalDebugResponse, TraceRecord, TraceSummary
 from app.utils.text import safe_float
 
 router = APIRouter()
+
+
+def _require_eval_runner(container) -> object:
+    runner = getattr(container, "ragas_runner", None)
+    if runner is None:
+        raise HTTPException(
+            status_code=503,
+            detail="evaluation is disabled. Set RAG_EVAL_ENABLED=true to enable eval and benchmark runs.",
+        )
+    return runner
+
+
+def _require_diagnosis_service(container) -> object:
+    service = getattr(container, "diagnosis_service", None)
+    if service is None:
+        raise HTTPException(
+            status_code=503,
+            detail="diagnosis is disabled. Set RAG_DIAGNOSIS_ENABLED=true to enable diagnosis endpoints.",
+        )
+    return service
 
 
 @router.post(
@@ -62,9 +83,13 @@ async def list_traces(
     request: Request,
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=20, ge=1, le=100),
+    kb_id: str | None = Query(default=None),
+    tenant_id: str | None = Query(default=None),
 ) -> PaginatedResponse[TraceSummary]:
     container = request.app.state.container
-    return container.trace_store.list(page=page, page_size=page_size)
+    return container.trace_store.list(
+        page=page, page_size=page_size, kb_id=kb_id, tenant_id=tenant_id
+    )
 
 
 @router.get(
@@ -72,10 +97,19 @@ async def list_traces(
     response_model=TraceRecord,
     dependencies=[Depends(require_api_key)],
 )
-async def get_trace(trace_id: str, request: Request) -> TraceRecord:
+async def get_trace(
+    trace_id: str,
+    request: Request,
+    kb_id: str | None = Query(default=None),
+    tenant_id: str | None = Query(default=None),
+) -> TraceRecord:
     container = request.app.state.container
     record = container.trace_store.get(trace_id)
     if record is None:
+        raise HTTPException(status_code=404, detail=f"trace not found: {trace_id}")
+    if kb_id and record.kb_id and record.kb_id != kb_id:
+        raise HTTPException(status_code=404, detail=f"trace not found: {trace_id}")
+    if tenant_id and record.tenant_id and record.tenant_id != tenant_id:
         raise HTTPException(status_code=404, detail=f"trace not found: {trace_id}")
     return record
 
@@ -124,13 +158,14 @@ async def get_benchmark_report_detail(path: str = Query(...)) -> dict:
 )
 async def run_eval(payload: EvalRunRequest, request: Request) -> EvalRunResponse:
     container = request.app.state.container
+    ragas_runner = _require_eval_runner(container)
     try:
         dataset_path = resolve_eval_dataset_path(payload.dataset_path)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     dataset = load_jsonl_dataset(str(dataset_path))
     evaluated_records = await materialize_eval_records(container, dataset)
-    report = container.ragas_runner.run(evaluated_records)
+    report = ragas_runner.run(evaluated_records)
     output_path = payload.output_path
     if output_path:
         try:
@@ -157,14 +192,15 @@ async def diagnose_trace(
     payload: TraceDiagnosisRequest, request: Request
 ) -> DiagnosisResponse:
     container = request.app.state.container
+    diagnosis_service = _require_diagnosis_service(container)
     trace = container.trace_store.get(payload.trace_id)
     if trace is None:
         raise HTTPException(
             status_code=404, detail=f"trace not found: {payload.trace_id}"
         )
-    diagnosis = container.diagnosis_service.diagnose_trace(trace)
+    diagnosis = diagnosis_service.diagnose_trace(trace)
     if payload.include_ai:
-        diagnosis = await container.diagnosis_service.add_ai_suggestion(
+        diagnosis = await diagnosis_service.add_ai_suggestion(
             diagnosis,
             {"trace": trace.model_dump()},
         )
@@ -180,6 +216,7 @@ async def diagnose_eval(
     payload: EvalDiagnosisRequest, request: Request
 ) -> DiagnosisResponse:
     container = request.app.state.container
+    diagnosis_service = _require_diagnosis_service(container)
     try:
         report_path = resolve_eval_report_path(payload.report_path)
     except ValueError as exc:
@@ -190,13 +227,11 @@ async def diagnose_eval(
         )
     report = load_json(str(report_path))
     try:
-        diagnosis = container.diagnosis_service.diagnose_eval_result(
-            report, payload.result_index
-        )
+        diagnosis = diagnosis_service.diagnose_eval_result(report, payload.result_index)
     except IndexError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     if payload.include_ai:
-        diagnosis = await container.diagnosis_service.add_ai_suggestion(
+        diagnosis = await diagnosis_service.add_ai_suggestion(
             diagnosis,
             {
                 "report_path": payload.report_path,
@@ -216,22 +251,24 @@ async def diagnose_auto(
     payload: AutoDiagnosisRequest, request: Request
 ) -> DiagnosisResponse:
     container = request.app.state.container
+    diagnosis_service = _require_diagnosis_service(container)
 
     reports = list_eval_reports()
+    max_iterations = 10
     if reports:
         latest_report = reports[0]
         report = load_json(str(ROOT / latest_report["path"]))
         results = report.get("results", []) if isinstance(report, dict) else []
         for index, result in enumerate(results):
+            if index >= max_iterations:
+                break
             if (
                 safe_float(result.get("answer_exact_match")) < 1.0
                 or safe_float(result.get("reference_context_recall")) < 1.0
             ):
-                diagnosis = container.diagnosis_service.diagnose_eval_result(
-                    report, index
-                )
+                diagnosis = diagnosis_service.diagnose_eval_result(report, index)
                 if payload.include_ai:
-                    diagnosis = await container.diagnosis_service.add_ai_suggestion(
+                    diagnosis = await diagnosis_service.add_ai_suggestion(
                         diagnosis,
                         {
                             "report_path": latest_report["path"],
@@ -246,9 +283,9 @@ async def diagnose_auto(
         latest_trace_id = traces.items[0].trace_id
         trace = container.trace_store.get(latest_trace_id)
         if trace is not None:
-            diagnosis = container.diagnosis_service.diagnose_trace(trace)
+            diagnosis = diagnosis_service.diagnose_trace(trace)
             if payload.include_ai:
-                diagnosis = await container.diagnosis_service.add_ai_suggestion(
+                diagnosis = await diagnosis_service.add_ai_suggestion(
                     diagnosis,
                     {"trace": trace.model_dump()},
                 )
@@ -257,6 +294,27 @@ async def diagnose_auto(
     raise HTTPException(
         status_code=404, detail="no eval bad cases or traces available for diagnosis"
     )
+
+
+@router.post(
+    "/replay/{trace_id}",
+    dependencies=[Depends(require_api_key)],
+)
+async def replay_trace_endpoint(trace_id: str, request: Request) -> dict:
+    container = request.app.state.container
+    result = await replay_trace(container, trace_id)
+    return {
+        "trace_id": result.trace_id,
+        "status": result.status,
+        "diffs": [
+            {"field": d.field, "original": d.original, "replayed": d.replayed}
+            for d in result.diffs
+        ],
+        "original_context_count": len(result.original_contexts),
+        "replayed_context_count": len(result.replayed_contexts),
+        "original_answer_preview": (result.original_answer or "")[:200],
+        "replayed_answer_preview": (result.replayed_answer or "")[:200],
+    }
 
 
 @router.get("/debug/storage", dependencies=[Depends(require_api_key)])

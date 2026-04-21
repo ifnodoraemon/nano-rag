@@ -4,17 +4,18 @@ import os
 from pathlib import Path
 
 import httpx
-from fastapi import FastAPI, Request
+from fastapi import Depends, FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.types import ASGIApp
 
+from app.api.auth import require_api_key
 from app.api.routes_business import router as business_router
 from app.api.routes_debug import router as debug_router
 from app.core.config import AppContainer
-from app.core.exceptions import ModelGatewayError, ParsingError
+from app.core.exceptions import ConfigurationError, ModelGatewayError, ParsingError
 from app.core.logging import configure_logging
 
 
@@ -47,14 +48,16 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="nano-rag", version="0.1.0", lifespan=lifespan)
 
+allowed_origins_str = os.getenv("ALLOWED_ORIGINS", "")
+if allowed_origins_str.strip():
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=allowed_origins_str.split(","),
+        allow_credentials=True,
+        allow_methods=["GET", "POST"],
+        allow_headers=["Authorization", "X-API-Key", "X-Api-Key", "Content-Type"],
+    )
 app.add_middleware(SecurityHeadersMiddleware)
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=os.getenv("ALLOWED_ORIGINS", "").split(",") if os.getenv("ALLOWED_ORIGINS") else [],
-    allow_credentials=True,
-    allow_methods=["GET", "POST"],
-    allow_headers=["Authorization", "X-Api-Key", "Content-Type"],
-)
 
 app.include_router(debug_router)
 app.include_router(business_router)
@@ -121,45 +124,69 @@ async def handle_parsing_error(_: Request, exc: ParsingError) -> JSONResponse:
 
 
 @app.get("/health")
-async def health(request: Request) -> dict[str, object]:
+async def health(_request: Request) -> dict[str, str]:
+    return {"status": "ok"}
+
+
+@app.get("/health/detail", dependencies=[Depends(require_api_key)])
+async def health_detail(request: Request) -> dict[str, object]:
     container = request.app.state.container
+    config = container.config
+    auth_disabled = os.getenv("RAG_AUTH_DISABLED", "").lower() in ("true", "1")
+    auth_required = os.getenv("RAG_AUTH_REQUIRED", "").lower() in ("true", "1")
     capability_gateways: dict[str, dict[str, object]] = {}
     phoenix_ok = False
     phoenix_error: str | None = None
+    phoenix_enabled = bool(config.phoenix_ui_endpoint)
 
     required_capabilities = ["generation", "embedding"]
-    if container.config.rerank_enabled:
+    if config.rerank_enabled:
         required_capabilities.append("rerank")
 
     gateway_ok = True
-    if container.config.gateway_mode == "mock":
+    if config.gateway_mode == "mock":
         for capability in required_capabilities:
-            capability_gateways[capability] = {"reachable": True, "error": None}
+            capability_gateways[capability] = {
+                "base_url": config.gateway_base_url,
+                "reachable": True,
+                "error": None,
+            }
     else:
         for capability in required_capabilities:
-            gateway = container.config.gateway_for(capability)
+            try:
+                gateway = config.gateway_for(capability)
+            except ConfigurationError as exc:
+                capability_gateways[capability] = {
+                    "base_url": None,
+                    "reachable": False,
+                    "error": str(exc),
+                }
+                gateway_ok = False
+                continue
             reachable, error = await _probe_gateway(
                 gateway["base_url"],
                 gateway["api_key"],
-                container.config.gateway_models_probe_paths,
+                config.gateway_models_probe_paths,
             )
             capability_gateways[capability] = {
+                "base_url": gateway["base_url"],
                 "reachable": reachable,
                 "error": error,
             }
             gateway_ok = gateway_ok and reachable
 
-    try:
-        async with httpx.AsyncClient(timeout=5) as client:
-            headers = {}
-            if container.config.phoenix_ui_host_header:
-                headers["Host"] = container.config.phoenix_ui_host_header
-            response = await client.get(
-                container.config.phoenix_ui_endpoint, headers=headers
-            )
-            phoenix_ok = response.status_code < 500
-    except httpx.HTTPError as exc:
-        phoenix_error = str(exc)
+    if phoenix_enabled:
+        try:
+            async with httpx.AsyncClient(timeout=5) as client:
+                headers = {}
+                if config.phoenix_ui_host_header:
+                    headers["Host"] = config.phoenix_ui_host_header
+                response = await client.get(
+                    config.phoenix_ui_endpoint, headers=headers
+                )
+                phoenix_ok = response.status_code < 500
+        except httpx.HTTPError as exc:
+            phoenix_error = str(exc)
 
     vectorstore_status = "ok"
     vectorstore_error: str | None = None
@@ -170,14 +197,28 @@ async def health(request: Request) -> dict[str, object]:
         vectorstore_status = "error"
         vectorstore_error = str(exc)
 
-    status = (
-        "ok" if gateway_ok and phoenix_ok and vectorstore_status == "ok" else "degraded"
-    )
+    features = {
+        "wiki": bool(getattr(config, "wiki_enabled", False)),
+        "hybrid_search": bool(getattr(config, "hybrid_search_enabled", False)),
+        "semantic_chunker": bool(getattr(config, "semantic_chunker_enabled", False)),
+        "query_rewrite": bool(getattr(config, "query_rewrite_enabled", False)),
+        "diagnosis": bool(getattr(config, "diagnosis_enabled", False)),
+        "eval": bool(getattr(config, "eval_enabled", False)),
+        "benchmark": bool(getattr(config, "benchmark_enabled", False)),
+    }
+
+    status = "ok" if gateway_ok and vectorstore_status == "ok" else "degraded"
+    generation_gateway = capability_gateways.get("generation", {})
     return {
         "status": status,
         "service": "nano-rag",
-        "gateway_mode": container.config.gateway_mode,
+        "gateway_mode": config.gateway_mode,
+        "auth_enabled": (bool(config.business_api_keys) or auth_required)
+        and not auth_disabled,
+        "vectorstore_backend": vectorstore_stats.get("backend", "unknown"),
+        "parsed_dir": str(config.parsed_dir),
         "gateway": {
+            "base_url": generation_gateway.get("base_url"),
             "reachable": gateway_ok,
             "error": next(
                 (
@@ -187,14 +228,20 @@ async def health(request: Request) -> dict[str, object]:
                 ),
                 None,
             ),
+            "capabilities": capability_gateways,
         },
         "phoenix": {
+            "enabled": phoenix_enabled,
+            "collector_endpoint": config.phoenix_collector_endpoint or None,
+            "ui_endpoint": config.phoenix_ui_endpoint or None,
             "reachable": phoenix_ok,
             "error": phoenix_error,
         },
         "vectorstore": {
             "status": vectorstore_status,
             "error": vectorstore_error,
+            "details": vectorstore_stats,
         },
+        "features": features,
         "trace_count": container.trace_store.list().total,
     }

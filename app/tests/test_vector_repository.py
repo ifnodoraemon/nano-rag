@@ -134,6 +134,12 @@ def test_in_memory_repository_search_supports_metadata_filters() -> None:
 
 
 def test_milvus_repository_refuses_to_drop_collection_on_dimension_mismatch(monkeypatch) -> None:
+    import types
+
+    fake_pymilvus = types.ModuleType("pymilvus")
+    fake_pymilvus.DataType = type("DataType", (), {"VARCHAR": 1, "FLOAT_VECTOR": 2})
+    monkeypatch.setitem(__import__("sys").modules, "pymilvus", fake_pymilvus)
+
     class FakeMilvusClient:
         def has_collection(self, collection_name):  # noqa: ANN001, ARG002
             return True

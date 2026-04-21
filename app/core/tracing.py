@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import fcntl
 import json
+import logging
 import os
 import threading
 from abc import ABC, abstractmethod
@@ -10,19 +11,16 @@ from collections.abc import Generator
 from contextlib import contextmanager
 from pathlib import Path
 from time import time
-from typing import Generic, TypeVar
+from typing import Any, Generic, TypeVar
 from uuid import uuid4
 
-from opentelemetry import trace as otel_trace
-from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter
-from opentelemetry.sdk.resources import Resource
-from opentelemetry.sdk.trace import TracerProvider
-from opentelemetry.sdk.trace.export import BatchSpanProcessor
 from pydantic import BaseModel
 
 from app.schemas.business import FeedbackRecord
 from app.schemas.common import PaginatedResponse
 from app.schemas.trace import TraceRecord, TraceSummary
+
+logger = logging.getLogger(__name__)
 
 T = TypeVar("T", bound=BaseModel)
 
@@ -35,13 +33,21 @@ OTLP_TLS_ENABLED = os.getenv("OTLP_TLS_ENABLED", "false").lower() in (
 )
 
 
+def _current_otel_trace_id() -> str | None:
+    try:
+        from opentelemetry import trace as otel_trace
+    except ImportError:
+        return None
+
+    current_context = otel_trace.get_current_span().get_span_context()
+    if current_context and current_context.trace_id:
+        return format(current_context.trace_id, "032x")
+    return None
+
+
 class TraceSession:
     def __init__(self) -> None:
-        current_context = otel_trace.get_current_span().get_span_context()
-        if current_context and current_context.trace_id:
-            self.trace_id = format(current_context.trace_id, "032x")
-        else:
-            self.trace_id = str(uuid4())
+        self.trace_id = _current_otel_trace_id() or str(uuid4())
         self.started_at = time()
         self.events: dict[str, object] = {}
 
@@ -58,7 +64,7 @@ class _PersistedStore(ABC, Generic[T]):
     def __init__(
         self, max_records: int, persist_dir: Path | None, record_id_field: str
     ) -> None:
-        self.max_records = max_records
+        self.max_records = max(max_records, 1)
         self.persist_dir = persist_dir
         self._record_id_field = record_id_field
         self._records: OrderedDict[str, T] = OrderedDict()
@@ -73,12 +79,13 @@ class _PersistedStore(ABC, Generic[T]):
             yield
             return
         lock_path = self.persist_dir / ".lock"
-        with open(lock_path, "a") as lock_file:
-            try:
-                fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
-                yield
-            finally:
-                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+        lock_fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR, 0o644)
+        try:
+            fcntl.flock(lock_fd, fcntl.LOCK_EX)
+            yield
+        finally:
+            fcntl.flock(lock_fd, fcntl.LOCK_UN)
+            os.close(lock_fd)
 
     def _load_persisted(self) -> None:
         assert self.persist_dir is not None
@@ -100,8 +107,9 @@ class _PersistedStore(ABC, Generic[T]):
         files = sorted(
             self.persist_dir.glob("*.json"), key=lambda path: path.stat().st_mtime
         )
-        for path in files[: -self.max_records]:
-            path.unlink(missing_ok=True)
+        if len(files) > self.max_records:
+            for path in files[: len(files) - self.max_records]:
+                path.unlink(missing_ok=True)
 
     @abstractmethod
     def _validate_record(self, payload: dict[str, object]) -> T: ...
@@ -113,7 +121,9 @@ class _PersistedStore(ABC, Generic[T]):
         assert self.persist_dir is not None
         record_id = self._get_record_id(record)
         path = self.persist_dir / f"{record_id}.json"
-        path.write_text(record.model_dump_json(indent=2), encoding="utf-8")
+        tmp_path = path.with_suffix(".json.tmp")
+        tmp_path.write_text(record.model_dump_json(indent=2), encoding="utf-8")
+        os.replace(str(tmp_path), str(path))
 
     def _save_internal(self, record: T) -> str | None:
         record_id = self._get_record_id(record)
@@ -191,7 +201,8 @@ class TraceStore(_PersistedStore[TraceRecord]):
             conditional_claim_count = sum(
                 1
                 for claim in record.supporting_claims
-                if isinstance(claim, dict) and claim.get("claim_type") == "conditional"
+                if isinstance(claim, dict)
+                and claim.get("claim_type") == "conditional"
             )
             summaries.append(
                 TraceSummary(
@@ -235,22 +246,47 @@ class TracingManager:
     def __init__(self, service_name: str, collector_endpoint: str) -> None:
         self.service_name = service_name
         self.collector_endpoint = collector_endpoint
-        if collector_endpoint:
-            provider = TracerProvider(
-                resource=Resource.create({"service.name": service_name})
+        self.tracer: Any | None = None
+
+        if not collector_endpoint:
+            return
+
+        try:
+            from opentelemetry import trace as otel_trace
+            from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import (
+                OTLPSpanExporter,
             )
-            provider.add_span_processor(
-                BatchSpanProcessor(
-                    OTLPSpanExporter(
-                        endpoint=collector_endpoint, insecure=not OTLP_TLS_ENABLED
-                    )
+            from opentelemetry.sdk.resources import Resource
+            from opentelemetry.sdk.trace import TracerProvider
+            from opentelemetry.sdk.trace.export import BatchSpanProcessor
+        except ImportError as exc:
+            logger.warning(
+                "Tracing dependencies are not installed; disabling OTLP export: %s",
+                exc,
+            )
+            return
+
+        provider = TracerProvider(
+            resource=Resource.create({"service.name": service_name})
+        )
+        provider.add_span_processor(
+            BatchSpanProcessor(
+                OTLPSpanExporter(
+                    endpoint=collector_endpoint, insecure=not OTLP_TLS_ENABLED
                 )
             )
-            otel_trace.set_tracer_provider(provider)
+        )
+        otel_trace.set_tracer_provider(provider)
         self.tracer = otel_trace.get_tracer(service_name)
 
     @contextmanager
-    def span(self, name: str, attributes: dict[str, object] | None = None) -> Generator[otel_trace.Span, None, None]:
+    def span(
+        self, name: str, attributes: dict[str, object] | None = None
+    ) -> Generator[Any | None, None, None]:
+        if self.tracer is None:
+            yield None
+            return
+
         with self.tracer.start_as_current_span(name) as span:
             for key, value in (attributes or {}).items():
                 if value is None:

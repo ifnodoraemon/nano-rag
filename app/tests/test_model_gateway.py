@@ -31,7 +31,7 @@ def test_gateway_api_key_prefers_explicit_env(monkeypatch) -> None:
     assert client.headers["Authorization"] == "Bearer gemini-secret"
 
 
-def test_phoenix_ui_host_header_defaults_to_localhost() -> None:
+def test_phoenix_endpoints_are_disabled_by_default() -> None:
     config = AppConfig(
         config_dir=None,  # type: ignore[arg-type]
         settings={},
@@ -41,7 +41,9 @@ def test_phoenix_ui_host_header_defaults_to_localhost() -> None:
         },
         prompts={},
     )
-    assert config.phoenix_ui_host_header == "localhost"
+    assert config.phoenix_collector_endpoint == ""
+    assert config.phoenix_ui_endpoint == ""
+    assert config.phoenix_ui_host_header == ""
 
 
 def test_capability_gateway_prefers_capability_specific_env(monkeypatch) -> None:

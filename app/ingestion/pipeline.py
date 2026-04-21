@@ -1,23 +1,27 @@
 from __future__ import annotations
 
-import asyncio
 import hashlib
 import json
+import logging
 import os
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 from app.ingestion.chunker import build_chunks
-from app.ingestion.loader import IngestPathError, discover_files
+from app.ingestion.loader import discover_files
 from app.ingestion.metadata import extract_document_metadata
 from app.ingestion.normalizer import normalize_text
 from app.ingestion.parser_docling import parse_document
 from app.ingestion.semantic_chunker import SemanticChunker
-from app.core.exceptions import ParsingError
+from app.core.exceptions import ModelGatewayError, ParsingError
 from app.model_client.embeddings import EmbeddingClient
 from app.model_client.document_parser import DocumentParserClient
 from app.retrieval.hybrid_retriever import HybridRetriever
+from app.schemas.chunk import Chunk
 from app.schemas.document import Document, IngestResponse
+
+logger = logging.getLogger(__name__)
 from app.vectorstore.repository import VectorRepository
 from app.wiki.compiler import WikiCompiler
 from app.wiki.search import WikiSearcher
@@ -29,6 +33,21 @@ if TYPE_CHECKING:
 
 class ChunkConfigurationError(RuntimeError):
     pass
+
+
+@dataclass
+class ParsedArtifactSnapshot:
+    document: Document
+    chunks: list[Chunk]
+
+
+@dataclass
+class PreparedDocument:
+    source_path: str
+    doc_id: str
+    document: Document
+    chunks: list[Chunk]
+    embeddings: list[list[float]]
 
 
 class IngestionPipeline:
@@ -58,7 +77,11 @@ class IngestionPipeline:
         ).lower() in ("true", "1", "yes")
 
     async def run(
-        self, path: str, kb_id: str = "default", tenant_id: str | None = None
+        self,
+        path: str,
+        kb_id: str = "default",
+        tenant_id: str | None = None,
+        source_path_overrides: dict[str, str] | None = None,
     ) -> IngestResponse:
         with self.tracing_manager.span(
             "ingestion.run",
@@ -72,109 +95,205 @@ class IngestionPipeline:
             chunk_count = 0
             doc_count = 0
             wiki_updated = False
-            self.config.parsed_dir.mkdir(parents=True, exist_ok=True)
+            prepared_documents: list[PreparedDocument] = []
 
             for file_path in files:
                 with self.tracing_manager.span(
                     "ingestion.file", {"ingestion.file_path": str(file_path)}
                 ):
-                    source_path = self._normalize_source_path(file_path)
-                    doc_id = self._stable_doc_id(source_path, kb_id, tenant_id)
-                    text = normalize_text(
-                        await parse_document(file_path, self.document_parser)
-                    )
-                    if not text:
-                        raise ParsingError(
-                            f"Document parsing returned empty content for {source_path}. "
-                            "If this is a scanned or image-heavy file, enable a multimodal document parser model."
-                        )
-                    document_metadata = extract_document_metadata(
-                        source_path=source_path,
-                        title=Path(file_path).stem,
-                        text=text,
+                    prepared = await self._prepare_document(
+                        file_path,
                         kb_id=kb_id,
                         tenant_id=tenant_id,
+                        source_path_overrides=source_path_overrides,
                     )
-                    document = Document(
-                        doc_id=doc_id,
-                        source_path=source_path,
-                        title=Path(file_path).stem,
-                        content=text,
-                        metadata=document_metadata,
-                    )
-                    chunk_size = self.config.settings["chunk"]["size"]
-                    overlap = self.config.settings["chunk"]["overlap"]
-                    try:
-                        if self._use_semantic_chunker and self.semantic_chunker:
-                            chunks = self.semantic_chunker.chunk(
-                                text,
-                                doc_id,
-                                source_path,
-                                document.title,
-                                metadata=document.metadata,
-                            )
-                        else:
-                            chunks = build_chunks(
-                                doc_id,
-                                source_path,
-                                document.title,
-                                text,
-                                chunk_size,
-                                overlap,
-                                document.metadata,
-                            )
-                    except ValueError as exc:
-                        raise ChunkConfigurationError(
-                            f"Invalid chunk configuration for {source_path}: {exc}. "
-                            f"chunk_size={chunk_size}, overlap={overlap}. "
-                            "Ensure chunk_size > overlap in configs/settings.yaml"
-                        ) from exc
-                    if not chunks:
-                        raise ParsingError(
-                            f"Document parsing produced no chunks for {source_path}. "
-                            "The extracted content may be empty or structurally invalid."
-                        )
-                    chunks = [
-                        chunk.model_copy(
-                            update={
-                                "metadata": {
-                                    **chunk.metadata,
-                                    "kb_id": kb_id,
-                                    "tenant_id": tenant_id,
-                                }
-                            }
-                        )
-                        for chunk in chunks
-                    ]
-                    if self.hybrid_retriever:
-                        self.hybrid_retriever.remove_by_source(
-                            source_path, kb_id=kb_id, tenant_id=tenant_id
-                        )
-                    self.repository.delete_by_source(
-                        source_path, kb_id=kb_id, tenant_id=tenant_id
-                    )
-                    self._cleanup_parsed_artifacts(
-                        source_path, doc_id, kb_id, tenant_id
-                    )
-                    self._write_parsed_artifact(document, chunks)
-                    if chunks:
-                        embeddings = await self.embedding_client.embed_texts(
-                            [chunk.text for chunk in chunks]
-                        )
-                        await asyncio.to_thread(
-                            self.repository.upsert, document, chunks, embeddings
-                        )
-                        if self.hybrid_retriever:
-                            self.hybrid_retriever.index_chunks(chunks)
-                    if self.wiki_compiler:
-                        self.wiki_compiler.upsert_document(document, chunks)
-                        wiki_updated = True
+                    prepared_documents.append(prepared)
                     doc_count += 1
-                    chunk_count += len(chunks)
+                    chunk_count += len(prepared.chunks)
+
+            self.config.parsed_dir.mkdir(parents=True, exist_ok=True)
+            applied_snapshots: list[
+                tuple[PreparedDocument, ParsedArtifactSnapshot | None]
+            ] = []
+            try:
+                for prepared in prepared_documents:
+                    applied_snapshots.append(
+                        (
+                            prepared,
+                            self._load_parsed_artifact(
+                                prepared.source_path, prepared.doc_id, kb_id, tenant_id
+                            ),
+                        )
+                    )
+                    self._delete_committed_state(
+                        prepared.source_path, prepared.doc_id, kb_id, tenant_id
+                    )
+                    self.repository.upsert(
+                        prepared.document,
+                        prepared.chunks,
+                        prepared.embeddings,
+                    )
+                    if self.hybrid_retriever:
+                        self.hybrid_retriever.index_chunks(prepared.chunks)
+                    self._write_parsed_artifact(prepared.document, prepared.chunks)
+                    if self.wiki_compiler:
+                        self.wiki_compiler.upsert_document(
+                            prepared.document, prepared.chunks
+                        )
+                        wiki_updated = True
+            except Exception:
+                await self._rollback_applied_documents(
+                    applied_snapshots, kb_id=kb_id, tenant_id=tenant_id
+                )
+                raise
 
             if wiki_updated and self.wiki_searcher:
                 self.wiki_searcher.refresh()
             return IngestResponse(documents=doc_count, chunks=chunk_count)
+
+    async def _prepare_document(
+        self,
+        file_path: Path,
+        kb_id: str,
+        tenant_id: str | None = None,
+        source_path_overrides: dict[str, str] | None = None,
+    ) -> PreparedDocument:
+        source_path = self._resolve_source_path(file_path, source_path_overrides)
+        doc_id = self._stable_doc_id(source_path, kb_id, tenant_id)
+        text = normalize_text(await parse_document(file_path, self.document_parser))
+        if not text:
+            raise ParsingError(
+                f"Document parsing returned empty content for {source_path}. "
+                "If this is a scanned or image-heavy file, enable a multimodal document parser model."
+            )
+        document_metadata = extract_document_metadata(
+            source_path=source_path,
+            title=Path(file_path).stem,
+            text=text,
+            kb_id=kb_id,
+            tenant_id=tenant_id,
+        )
+        document = Document(
+            doc_id=doc_id,
+            source_path=source_path,
+            title=Path(file_path).stem,
+            content=text,
+            metadata=document_metadata,
+        )
+        chunk_size = self.config.settings["chunk"]["size"]
+        overlap = self.config.settings["chunk"]["overlap"]
+        try:
+            if self._use_semantic_chunker and self.semantic_chunker:
+                chunks = self.semantic_chunker.chunk(
+                    text,
+                    doc_id,
+                    source_path,
+                    document.title,
+                    metadata=document.metadata,
+                )
+            else:
+                chunks = build_chunks(
+                    doc_id,
+                    source_path,
+                    document.title,
+                    text,
+                    chunk_size,
+                    overlap,
+                    document.metadata,
+                )
+        except ValueError as exc:
+            raise ChunkConfigurationError(
+                f"Invalid chunk configuration for {source_path}: {exc}. "
+                f"chunk_size={chunk_size}, overlap={overlap}. "
+                "Ensure chunk_size > overlap in configs/settings.yaml"
+            ) from exc
+        if not chunks:
+            raise ParsingError(
+                f"Document parsing produced no chunks for {source_path}. "
+                "The extracted content may be empty or structurally invalid."
+            )
+        chunks = [
+            chunk.model_copy(
+                update={
+                    "metadata": {
+                        **chunk.metadata,
+                        "kb_id": kb_id,
+                        "tenant_id": tenant_id,
+                    }
+                }
+            )
+            for chunk in chunks
+        ]
+        embeddings = await self.embedding_client.embed_texts(
+            [chunk.text for chunk in chunks]
+        )
+        if len(embeddings) != len(chunks):
+            raise ModelGatewayError(
+                "embedding service returned an inconsistent number of vectors"
+            )
+        return PreparedDocument(
+            source_path=source_path,
+            doc_id=doc_id,
+            document=document,
+            chunks=chunks,
+            embeddings=embeddings,
+        )
+
+    async def _rollback_applied_documents(
+        self,
+        applied_snapshots: list[tuple[PreparedDocument, ParsedArtifactSnapshot | None]],
+        kb_id: str,
+        tenant_id: str | None = None,
+    ) -> None:
+        wiki_needs_refresh = False
+        for prepared, snapshot in reversed(applied_snapshots):
+            try:
+                if self.wiki_compiler:
+                    wiki_needs_refresh = True
+                self._delete_committed_state(
+                    prepared.source_path, prepared.doc_id, kb_id, tenant_id
+                )
+                if snapshot is None:
+                    continue
+                embeddings = await self.embedding_client.embed_texts(
+                    [chunk.text for chunk in snapshot.chunks]
+                )
+                if len(embeddings) != len(snapshot.chunks):
+                    raise ModelGatewayError(
+                        "embedding service returned an inconsistent number of vectors"
+                    )
+                self.repository.upsert(
+                    snapshot.document,
+                    snapshot.chunks,
+                    embeddings,
+                )
+                if self.hybrid_retriever:
+                    self.hybrid_retriever.index_chunks(snapshot.chunks)
+                self._write_parsed_artifact(snapshot.document, snapshot.chunks)
+                if self.wiki_compiler:
+                    self.wiki_compiler.upsert_document(
+                        snapshot.document, snapshot.chunks
+                    )
+                    wiki_needs_refresh = True
+            except Exception:
+                logger.warning(
+                    "rollback failed for document %s — manual repair may be needed",
+                    prepared.doc_id,
+                    exc_info=True,
+                )
+                continue
+        if wiki_needs_refresh and self.wiki_searcher:
+            self.wiki_searcher.refresh()
+
+    def _resolve_source_path(
+        self, file_path: Path, source_path_overrides: dict[str, str] | None = None
+    ) -> str:
+        resolved = file_path.resolve()
+        if source_path_overrides:
+            override = source_path_overrides.get(str(resolved))
+            if override:
+                return override
+        return self._normalize_source_path(resolved)
 
     def _normalize_source_path(self, file_path: Path) -> str:
         resolved = file_path.resolve()
@@ -197,11 +316,12 @@ class IngestionPipeline:
         active_doc_id: str,
         kb_id: str,
         tenant_id: str | None = None,
+        remove_active_doc: bool = False,
     ) -> None:
         if not self.config.parsed_dir.exists():
             return
         for artifact in self.config.parsed_dir.glob("*.json"):
-            if artifact.stem == active_doc_id:
+            if artifact.stem == active_doc_id and not remove_active_doc:
                 continue
             try:
                 payload = json.loads(artifact.read_text(encoding="utf-8"))
@@ -218,6 +338,82 @@ class IngestionPipeline:
                 and metadata.get("tenant_id") == tenant_id
             ):
                 artifact.unlink(missing_ok=True)
+
+    def _delete_committed_state(
+        self,
+        source_path: str,
+        doc_id: str,
+        kb_id: str,
+        tenant_id: str | None = None,
+    ) -> None:
+        if self.hybrid_retriever:
+            self.hybrid_retriever.remove_by_source(
+                source_path, kb_id=kb_id, tenant_id=tenant_id
+            )
+        self.repository.delete_by_source(source_path, kb_id=kb_id, tenant_id=tenant_id)
+        self._cleanup_parsed_artifacts(
+            source_path,
+            doc_id,
+            kb_id,
+            tenant_id,
+            remove_active_doc=True,
+        )
+        if self.wiki_compiler:
+            self.wiki_compiler.remove_document(doc_id)
+
+    def _load_parsed_artifact(
+        self,
+        source_path: str,
+        doc_id: str,
+        kb_id: str,
+        tenant_id: str | None = None,
+    ) -> ParsedArtifactSnapshot | None:
+        if not self.config.parsed_dir.exists():
+            return None
+        primary_artifact = self.config.parsed_dir / f"{doc_id}.json"
+        if primary_artifact.exists():
+            snapshot = self._read_parsed_artifact(primary_artifact)
+            if snapshot and self._snapshot_matches_scope(
+                snapshot, source_path, kb_id, tenant_id
+            ):
+                return snapshot
+        for artifact in sorted(self.config.parsed_dir.glob("*.json")):
+            snapshot = self._read_parsed_artifact(artifact)
+            if snapshot and self._snapshot_matches_scope(
+                snapshot, source_path, kb_id, tenant_id
+            ):
+                return snapshot
+        return None
+
+    def _snapshot_matches_scope(
+        self,
+        snapshot: ParsedArtifactSnapshot,
+        source_path: str,
+        kb_id: str,
+        tenant_id: str | None = None,
+    ) -> bool:
+        return (
+            snapshot.document.source_path == source_path
+            and snapshot.document.metadata.get("kb_id", "default") == kb_id
+            and snapshot.document.metadata.get("tenant_id") == tenant_id
+        )
+
+    def _read_parsed_artifact(self, artifact: Path) -> ParsedArtifactSnapshot | None:
+        try:
+            payload = json.loads(artifact.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return None
+        document_payload = payload.get("document") if isinstance(payload, dict) else None
+        chunks_payload = payload.get("chunks") if isinstance(payload, dict) else None
+        if not isinstance(document_payload, dict) or not isinstance(chunks_payload, list):
+            return None
+        try:
+            return ParsedArtifactSnapshot(
+                document=Document.model_validate(document_payload),
+                chunks=[Chunk.model_validate(chunk) for chunk in chunks_payload],
+            )
+        except Exception:
+            return None
 
     def _write_parsed_artifact(self, document: Document, chunks) -> None:
         artifact = {

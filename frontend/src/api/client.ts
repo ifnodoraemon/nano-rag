@@ -4,6 +4,7 @@ import type {
   HealthResponse,
   IngestRequest,
   IngestResponse,
+  DocumentSummary,
   ChatRequest,
   ChatResponse,
   RetrievalDebugResponse,
@@ -68,6 +69,12 @@ export function formatApiError(error: unknown): string {
   if (normalized.includes('unsupported file type')) {
     return parsed.detail || '文件类型不受支持，请上传 PDF、Markdown、TXT、HTML 或常见图片。';
   }
+  if (normalized.includes('evaluation is disabled') || normalized.includes('benchmark is disabled because evaluation is off')) {
+    return '当前实例没有开启离线评测能力；如果需要 Eval 或 Benchmark，请在后端启用 RAG_EVAL_ENABLED=true。';
+  }
+  if (normalized.includes('diagnosis is disabled') || normalized.includes('benchmark is disabled because diagnosis is off')) {
+    return '当前实例没有开启诊断能力；如果需要自动诊断或完整 Benchmark，请在后端启用 RAG_DIAGNOSIS_ENABLED=true。';
+  }
   if (normalized.includes('returned empty content') || normalized.includes('produced no chunks')) {
     return '文件已经上传，但模型没有成功读出可检索内容。请优先尝试更清晰的 PDF，或改用支持文档理解的模型配置。';
   }
@@ -79,11 +86,6 @@ export function formatApiError(error: unknown): string {
 
 export const healthApi = {
   get: () => api.get<HealthResponse>('/health').then((r) => r.data),
-};
-
-export const ingestApi = {
-  run: (path: string) =>
-    api.post<IngestResponse>('/v1/rag/ingest', { path }).then((r) => r.data),
 };
 
 export const businessIngestApi = {
@@ -115,12 +117,18 @@ export const businessIngestApi = {
       })
       .then((r) => r.data);
   },
-};
-
-export const chatApi = {
-  send: (query: string, topK?: number) =>
+  listDocuments: (
+    payload: {
+      kb_id: string;
+      tenant_id?: string;
+    },
+    apiKey?: string,
+  ) =>
     api
-      .post<ChatResponse>('/chat', { query, top_k: topK })
+      .get<DocumentSummary[]>('/v1/rag/documents', {
+        params: payload,
+        headers: authHeaders(apiKey),
+      })
       .then((r) => r.data),
 };
 

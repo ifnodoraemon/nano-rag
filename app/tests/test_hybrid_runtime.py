@@ -1,8 +1,10 @@
 import json
+from pathlib import Path
 
 import pytest
 
 from app.core.config import AppConfig
+from app.core.exceptions import ModelGatewayError
 from app.core.tracing import TraceStore, TracingManager
 from app.ingestion.pipeline import IngestionPipeline
 from app.retrieval.hybrid_retriever import HybridRetriever
@@ -29,6 +31,18 @@ class FakeEmbeddingClient:
                 ]
             )
         return vectors
+
+
+class FailingEmbeddingClient:
+    async def embed_texts(self, texts: list[str]) -> list[list[float]]:  # noqa: ARG002
+        raise ModelGatewayError("embedding service unavailable")
+
+
+class SelectiveFailingEmbeddingClient:
+    async def embed_texts(self, texts: list[str]) -> list[list[float]]:
+        if any("FAIL_EMBED" in text for text in texts):
+            raise ModelGatewayError("embedding service unavailable")
+        return [[1.0, 0.0] for _ in texts]
 
 
 class FakeRerankClient:
@@ -63,6 +77,21 @@ def _build_config(tmp_path) -> AppConfig:
         },
         prompts={},
     )
+
+
+class FailingUpsertRepository(InMemoryVectorRepository):
+    def __init__(self, fail_on_call: int) -> None:
+        super().__init__()
+        self._fail_on_call = fail_on_call
+        self._upsert_calls = 0
+
+    def upsert(
+        self, document: Document, chunks: list[Chunk], embeddings: list[list[float]]
+    ) -> None:
+        self._upsert_calls += 1
+        if self._upsert_calls == self._fail_on_call:
+            raise RuntimeError("repository upsert failed")
+        super().upsert(document, chunks, embeddings)
 
 
 @pytest.mark.asyncio
@@ -297,6 +326,200 @@ async def test_ingestion_pipeline_updates_hybrid_index(monkeypatch, tmp_path) ->
     assert artifact["document"]["metadata"]["section_count"] == 1
     assert artifact["chunks"][0]["metadata"]["parent_chunk_id"].startswith("doc-")
     assert artifact["chunks"][0]["metadata"]["section_path"] == ["doc"]
+
+
+@pytest.mark.asyncio
+async def test_ingestion_pipeline_does_not_write_parsed_artifact_when_embeddings_fail(
+    monkeypatch, tmp_path
+) -> None:
+    monkeypatch.setenv("RAG_HYBRID_SEARCH_ENABLED", "true")
+    monkeypatch.setenv("PARSED_OUTPUT_DIR", str(tmp_path / "parsed"))
+    monkeypatch.setattr(
+        "app.ingestion.pipeline.discover_files", lambda path: [tmp_path / "doc.txt"]
+    )
+
+    async def fake_parse_document(path, document_parser=None):  # noqa: ANN001, ARG001
+        return "PTO carryover details"
+
+    monkeypatch.setattr("app.ingestion.pipeline.parse_document", fake_parse_document)
+
+    repository = InMemoryVectorRepository()
+    hybrid = HybridRetriever(
+        repository=repository,
+        embedding_client=FailingEmbeddingClient(),
+    )
+    config = AppConfig(
+        config_dir=tmp_path,
+        settings={"chunk": {"size": 200, "overlap": 20}},
+        models={"model_gateway": {"base_url": "", "api_key": ""}},
+        prompts={},
+    )
+    pipeline = IngestionPipeline(
+        config=config,
+        repository=repository,
+        embedding_client=FailingEmbeddingClient(),
+        tracing_manager=TracingManager("test-service", ""),
+        hybrid_retriever=hybrid,
+        wiki_compiler=WikiCompiler(tmp_path / "wiki"),
+    )
+
+    with pytest.raises(ModelGatewayError):
+        await pipeline.run(str(tmp_path), kb_id="default")
+
+    parsed_dir = tmp_path / "parsed"
+    assert not parsed_dir.exists() or not any(parsed_dir.glob("*.json"))
+    assert not hybrid.bm25_index.search("pto", top_k=5)
+
+
+@pytest.mark.asyncio
+async def test_ingestion_pipeline_uses_stable_source_path_overrides(
+    monkeypatch, tmp_path
+) -> None:
+    monkeypatch.setenv("PARSED_OUTPUT_DIR", str(tmp_path / "parsed"))
+    source_file = tmp_path / "upload-a.txt"
+    source_file.write_text("first upload", encoding="utf-8")
+    monkeypatch.setattr("app.ingestion.pipeline.discover_files", lambda path: [source_file])
+
+    async def fake_parse_document(path, document_parser=None):  # noqa: ANN001, ARG001
+        return Path(path).read_text(encoding="utf-8")
+
+    monkeypatch.setattr("app.ingestion.pipeline.parse_document", fake_parse_document)
+
+    repository = InMemoryVectorRepository()
+    config = AppConfig(
+        config_dir=tmp_path,
+        settings={"chunk": {"size": 200, "overlap": 20}},
+        models={"model_gateway": {"base_url": "", "api_key": ""}},
+        prompts={},
+    )
+    pipeline = IngestionPipeline(
+        config=config,
+        repository=repository,
+        embedding_client=FakeEmbeddingClient(),
+        tracing_manager=TracingManager("test-service", ""),
+    )
+
+    stable_source = "uploads/default/__shared__/policy.txt"
+    await pipeline.run(
+        str(tmp_path),
+        kb_id="default",
+        source_path_overrides={str(source_file.resolve()): stable_source},
+    )
+
+    first_doc = next(iter(repository.documents.values()))
+    assert first_doc.source_path == stable_source
+
+    replacement_file = tmp_path / "upload-b.txt"
+    replacement_file.write_text("second upload replacement", encoding="utf-8")
+    monkeypatch.setattr(
+        "app.ingestion.pipeline.discover_files", lambda path: [replacement_file]
+    )
+    await pipeline.run(
+        str(tmp_path),
+        kb_id="default",
+        source_path_overrides={str(replacement_file.resolve()): stable_source},
+    )
+
+    assert len(repository.documents) == 1
+    replacement_doc = next(iter(repository.documents.values()))
+    assert replacement_doc.source_path == stable_source
+    assert replacement_doc.content == "second upload replacement"
+    assert len(repository.entries) == 1
+
+
+@pytest.mark.asyncio
+async def test_ingestion_pipeline_is_atomic_before_apply(
+    monkeypatch, tmp_path
+) -> None:
+    monkeypatch.setenv("RAG_HYBRID_SEARCH_ENABLED", "true")
+    monkeypatch.setenv("PARSED_OUTPUT_DIR", str(tmp_path / "parsed"))
+    files = [tmp_path / "ok.txt", tmp_path / "bad.txt"]
+    for file_path in files:
+        file_path.write_text(file_path.stem, encoding="utf-8")
+    monkeypatch.setattr("app.ingestion.pipeline.discover_files", lambda path: files)
+
+    async def fake_parse_document(path, document_parser=None):  # noqa: ANN001, ARG001
+        if Path(path).name == "bad.txt":
+            return "FAIL_EMBED"
+        return "safe content"
+
+    monkeypatch.setattr("app.ingestion.pipeline.parse_document", fake_parse_document)
+
+    repository = InMemoryVectorRepository()
+    hybrid = HybridRetriever(
+        repository=repository,
+        embedding_client=SelectiveFailingEmbeddingClient(),
+    )
+    config = AppConfig(
+        config_dir=tmp_path,
+        settings={"chunk": {"size": 200, "overlap": 20}},
+        models={"model_gateway": {"base_url": "", "api_key": ""}},
+        prompts={},
+    )
+    pipeline = IngestionPipeline(
+        config=config,
+        repository=repository,
+        embedding_client=SelectiveFailingEmbeddingClient(),
+        tracing_manager=TracingManager("test-service", ""),
+        hybrid_retriever=hybrid,
+        wiki_compiler=WikiCompiler(tmp_path / "wiki"),
+    )
+
+    with pytest.raises(ModelGatewayError):
+        await pipeline.run(str(tmp_path), kb_id="default")
+
+    parsed_dir = tmp_path / "parsed"
+    assert not parsed_dir.exists() or not any(parsed_dir.glob("*.json"))
+    assert not repository.documents
+    assert not repository.entries
+    assert not hybrid.bm25_index.search("safe", top_k=5)
+
+
+@pytest.mark.asyncio
+async def test_ingestion_pipeline_rolls_back_apply_failures(
+    monkeypatch, tmp_path
+) -> None:
+    monkeypatch.setenv("RAG_HYBRID_SEARCH_ENABLED", "true")
+    monkeypatch.setenv("PARSED_OUTPUT_DIR", str(tmp_path / "parsed"))
+    files = [tmp_path / "one.txt", tmp_path / "two.txt"]
+    for file_path in files:
+        file_path.write_text(file_path.stem, encoding="utf-8")
+    monkeypatch.setattr("app.ingestion.pipeline.discover_files", lambda path: files)
+
+    async def fake_parse_document(path, document_parser=None):  # noqa: ANN001, ARG001
+        return f"content for {Path(path).name}"
+
+    monkeypatch.setattr("app.ingestion.pipeline.parse_document", fake_parse_document)
+
+    repository = FailingUpsertRepository(fail_on_call=2)
+    hybrid = HybridRetriever(
+        repository=repository,
+        embedding_client=FakeEmbeddingClient(),
+    )
+    config = AppConfig(
+        config_dir=tmp_path,
+        settings={"chunk": {"size": 200, "overlap": 20}},
+        models={"model_gateway": {"base_url": "", "api_key": ""}},
+        prompts={},
+    )
+    pipeline = IngestionPipeline(
+        config=config,
+        repository=repository,
+        embedding_client=FakeEmbeddingClient(),
+        tracing_manager=TracingManager("test-service", ""),
+        hybrid_retriever=hybrid,
+        wiki_compiler=WikiCompiler(tmp_path / "wiki"),
+    )
+
+    with pytest.raises(RuntimeError, match="repository upsert failed"):
+        await pipeline.run(str(tmp_path), kb_id="default")
+
+    parsed_dir = tmp_path / "parsed"
+    assert not parsed_dir.exists() or not any(parsed_dir.glob("*.json"))
+    assert not repository.documents
+    assert not repository.entries
+    assert not hybrid.bm25_index.search("content", top_k=5)
+    assert not list((tmp_path / "wiki" / "sources").glob("*.md"))
 
 
 @pytest.mark.asyncio
