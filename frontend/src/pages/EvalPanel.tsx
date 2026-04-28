@@ -136,12 +136,15 @@ export function EvalPanel() {
     activeBenchmarkReport && typeof activeBenchmarkReport === 'object'
       ? (activeBenchmarkReport.aggregate as Record<string, number> | undefined)
       : undefined;
-  const benchmarkResults =
-    activeBenchmarkReport &&
-    typeof activeBenchmarkReport === 'object' &&
-    Array.isArray((activeBenchmarkReport as Record<string, unknown>).results)
-      ? ((activeBenchmarkReport as Record<string, unknown>).results as Record<string, unknown>[])
-      : [];
+  const benchmarkResults = useMemo(
+    () =>
+      activeBenchmarkReport &&
+      typeof activeBenchmarkReport === 'object' &&
+      Array.isArray((activeBenchmarkReport as Record<string, unknown>).results)
+        ? ((activeBenchmarkReport as Record<string, unknown>).results as Record<string, unknown>[])
+        : [],
+    [activeBenchmarkReport],
+  );
 
   const failedCases = useMemo(
     () =>

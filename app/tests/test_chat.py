@@ -1,8 +1,10 @@
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import httpx
 import pytest
 
+from app.main import app as fastapi_app
 from app.main import health, health_detail
 
 
@@ -13,7 +15,53 @@ async def test_health_returns_ok() -> None:
 
 
 @pytest.mark.asyncio
-async def test_health_route() -> None:
+async def test_health_reports_auth_status_over_http(monkeypatch) -> None:
+    monkeypatch.delenv("RAG_AUTH_DISABLED", raising=False)
+    previous_container = getattr(fastapi_app.state, "container", None)
+    fastapi_app.state.container = SimpleNamespace(
+        config=SimpleNamespace(business_api_keys=set())
+    )
+    try:
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=fastapi_app),
+            base_url="http://testserver",
+        ) as client:
+            response = await client.get("/health")
+    finally:
+        fastapi_app.state.container = previous_container
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "status": "ok",
+        "auth_enabled": True,
+        "auth_configured": False,
+        "auth_status": "missing_keys",
+    }
+
+
+@pytest.mark.asyncio
+async def test_health_detail_rejects_missing_keys_over_http(monkeypatch) -> None:
+    monkeypatch.delenv("RAG_AUTH_DISABLED", raising=False)
+    previous_container = getattr(fastapi_app.state, "container", None)
+    fastapi_app.state.container = SimpleNamespace(
+        config=SimpleNamespace(business_api_keys=set())
+    )
+    try:
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=fastapi_app),
+            base_url="http://testserver",
+        ) as client:
+            response = await client.get("/health/detail")
+    finally:
+        fastapi_app.state.container = previous_container
+
+    assert response.status_code == 503
+    assert "RAG_API_KEYS not configured" in response.json()["detail"]
+
+
+@pytest.mark.asyncio
+async def test_health_route(monkeypatch) -> None:
+    monkeypatch.delenv("RAG_AUTH_DISABLED", raising=False)
     fake_trace_list = SimpleNamespace(total=0, items=[])
     fake_container = SimpleNamespace(
         config=SimpleNamespace(
@@ -65,7 +113,9 @@ async def test_health_route() -> None:
         payload = await health_detail(request)
     assert payload["service"] == "nano-rag"
     assert payload["status"] == "ok"
-    assert payload["auth_enabled"] is False
+    assert payload["auth_enabled"] is True
+    assert payload["auth_configured"] is False
+    assert payload["auth_status"] == "missing_keys"
     assert payload["vectorstore_backend"] == "memory"
     assert payload["parsed_dir"] == "/tmp/parsed"
     assert payload["gateway"]["reachable"] is True
@@ -79,7 +129,8 @@ async def test_health_route() -> None:
 
 
 @pytest.mark.asyncio
-async def test_health_route_marks_gateway_4xx_as_degraded() -> None:
+async def test_health_route_marks_gateway_4xx_as_degraded(monkeypatch) -> None:
+    monkeypatch.delenv("RAG_AUTH_DISABLED", raising=False)
     fake_trace_list = SimpleNamespace(total=0, items=[])
     fake_container = SimpleNamespace(
         config=SimpleNamespace(
@@ -142,7 +193,8 @@ async def test_health_route_marks_gateway_4xx_as_degraded() -> None:
 
 
 @pytest.mark.asyncio
-async def test_health_route_does_not_degrade_when_phoenix_is_disabled() -> None:
+async def test_health_route_does_not_degrade_when_phoenix_is_disabled(monkeypatch) -> None:
+    monkeypatch.delenv("RAG_AUTH_DISABLED", raising=False)
     fake_trace_list = SimpleNamespace(total=0, items=[])
     fake_container = SimpleNamespace(
         config=SimpleNamespace(
@@ -180,7 +232,6 @@ async def test_health_route_does_not_degrade_when_phoenix_is_disabled() -> None:
 @pytest.mark.asyncio
 async def test_health_route_respects_auth_disabled_override(monkeypatch) -> None:
     monkeypatch.setenv("RAG_AUTH_DISABLED", "true")
-    monkeypatch.setenv("RAG_AUTH_REQUIRED", "true")
     fake_trace_list = SimpleNamespace(total=0, items=[])
     fake_container = SimpleNamespace(
         config=SimpleNamespace(
@@ -211,3 +262,41 @@ async def test_health_route_respects_auth_disabled_override(monkeypatch) -> None
     payload = await health_detail(request)
 
     assert payload["auth_enabled"] is False
+    assert payload["auth_configured"] is True
+    assert payload["auth_status"] == "disabled"
+
+
+@pytest.mark.asyncio
+async def test_health_route_reports_configured_auth(monkeypatch) -> None:
+    monkeypatch.delenv("RAG_AUTH_DISABLED", raising=False)
+    fake_trace_list = SimpleNamespace(total=0, items=[])
+    fake_container = SimpleNamespace(
+        config=SimpleNamespace(
+            gateway_models_probe_paths=("/v1/models", "/models"),
+            gateway_mode="mock",
+            gateway_base_url="",
+            gateway_for=lambda capability: {  # noqa: ARG005
+                "base_url": "",
+                "api_key": "",
+            },
+            phoenix_ui_endpoint="",
+            phoenix_ui_host_header="",
+            phoenix_collector_endpoint="",
+            parsed_dir="/tmp/parsed",
+            rerank_enabled=False,
+            business_api_keys={"secret"},
+        ),
+        repository=SimpleNamespace(
+            stats=lambda: {"backend": "memory", "documents": 0, "chunks": 0}
+        ),
+        trace_store=SimpleNamespace(list=lambda: fake_trace_list),
+    )
+    request = SimpleNamespace(
+        app=SimpleNamespace(state=SimpleNamespace(container=fake_container))
+    )
+
+    payload = await health_detail(request)
+
+    assert payload["auth_enabled"] is True
+    assert payload["auth_configured"] is True
+    assert payload["auth_status"] == "configured"

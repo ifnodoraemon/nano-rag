@@ -12,6 +12,8 @@ export interface HealthResponse {
   status: string;
   service: string;
   auth_enabled: boolean;
+  auth_configured: boolean;
+  auth_status: 'disabled' | 'configured' | 'missing_keys';
   vectorstore_backend: string;
   parsed_dir: string;
   gateway_mode: string;

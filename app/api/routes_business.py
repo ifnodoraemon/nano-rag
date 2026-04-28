@@ -38,6 +38,7 @@ router = APIRouter(prefix="/v1/rag", tags=["rag"])
 
 MAX_UPLOAD_BYTES = int(os.getenv("MAX_UPLOAD_BYTES", str(50 * 1024 * 1024)))
 MAX_FILES_PER_BATCH = int(os.getenv("MAX_FILES_PER_BATCH", "10"))
+UPLOAD_CHUNK_BYTES = 1024 * 1024
 
 
 def _build_upload_source_path(
@@ -261,15 +262,20 @@ async def rag_ingest_upload(
                     status_code=400,
                     detail=f"unsupported file type '{extension or 'unknown'}'. Supported types: {allowed}",
                 )
-            file_obj = getattr(upload, "file", None)
-            data = file_obj.read() if file_obj is not None else await upload.read()
-            if len(data) > MAX_UPLOAD_BYTES:
-                raise HTTPException(
-                    status_code=413,
-                    detail=f"file '{original_name}' exceeds max size ({MAX_UPLOAD_BYTES} bytes)",
-                )
             target = upload_batch_dir / f"{uuid4().hex[:8]}_{original_name}"
-            target.write_bytes(data)
+            total_bytes = 0
+            with target.open("wb") as output:
+                while True:
+                    chunk = await upload.read(UPLOAD_CHUNK_BYTES)
+                    if not chunk:
+                        break
+                    total_bytes += len(chunk)
+                    if total_bytes > MAX_UPLOAD_BYTES:
+                        raise HTTPException(
+                            status_code=413,
+                            detail=f"file '{original_name}' exceeds max size ({MAX_UPLOAD_BYTES} bytes)",
+                        )
+                    output.write(chunk)
             uploaded_files.append(original_name)
             source_path_overrides[str(target.resolve())] = _build_upload_source_path(
                 original_name, kb_id, tenant_id
@@ -292,11 +298,8 @@ async def rag_ingest_upload(
         )
     finally:
         for upload in files:
-            file_obj = getattr(upload, "file", None)
-            if file_obj is None:
-                continue
             try:
-                file_obj.close()
+                await upload.close()
             except Exception:
                 pass
         shutil.rmtree(upload_batch_dir, ignore_errors=True)

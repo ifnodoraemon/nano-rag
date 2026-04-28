@@ -12,6 +12,11 @@ COPY configs ./configs
 COPY scripts ./scripts
 COPY frontend/dist ./frontend/dist
 
+RUN mkdir -p \
+    /workspace/data/parsed \
+    /workspace/data/reports/traces \
+    /workspace/data/reports/feedback \
+    /workspace/data/uploads
 RUN chown -R appuser:appgroup /workspace
 
 USER appuser

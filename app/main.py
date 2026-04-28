@@ -11,7 +11,7 @@ from fastapi.staticfiles import StaticFiles
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.types import ASGIApp
 
-from app.api.auth import require_api_key
+from app.api.auth import is_auth_disabled, require_api_key
 from app.api.routes_business import router as business_router
 from app.api.routes_debug import router as debug_router
 from app.core.config import AppContainer
@@ -124,16 +124,36 @@ async def handle_parsing_error(_: Request, exc: ParsingError) -> JSONResponse:
 
 
 @app.get("/health")
-async def health(_request: Request) -> dict[str, str]:
-    return {"status": "ok"}
+async def health(request: Request) -> dict[str, object]:
+    app_obj = getattr(request, "app", None)
+    app_state = getattr(app_obj, "state", None)
+    container = getattr(app_state, "container", None)
+    if container is None:
+        return {"status": "ok"}
+    return {"status": "ok", **_auth_state(container.config)}
+
+
+def _auth_state(config) -> dict[str, object]:  # noqa: ANN001
+    auth_disabled = is_auth_disabled()
+    auth_configured = bool(config.business_api_keys)
+    if auth_disabled:
+        auth_status = "disabled"
+    elif auth_configured:
+        auth_status = "configured"
+    else:
+        auth_status = "missing_keys"
+    return {
+        "auth_enabled": not auth_disabled,
+        "auth_configured": auth_configured,
+        "auth_status": auth_status,
+    }
 
 
 @app.get("/health/detail", dependencies=[Depends(require_api_key)])
 async def health_detail(request: Request) -> dict[str, object]:
     container = request.app.state.container
     config = container.config
-    auth_disabled = os.getenv("RAG_AUTH_DISABLED", "").lower() in ("true", "1")
-    auth_required = os.getenv("RAG_AUTH_REQUIRED", "").lower() in ("true", "1")
+    auth_state = _auth_state(config)
     capability_gateways: dict[str, dict[str, object]] = {}
     phoenix_ok = False
     phoenix_error: str | None = None
@@ -213,8 +233,7 @@ async def health_detail(request: Request) -> dict[str, object]:
         "status": status,
         "service": "nano-rag",
         "gateway_mode": config.gateway_mode,
-        "auth_enabled": (bool(config.business_api_keys) or auth_required)
-        and not auth_disabled,
+        **auth_state,
         "vectorstore_backend": vectorstore_stats.get("backend", "unknown"),
         "parsed_dir": str(config.parsed_dir),
         "gateway": {

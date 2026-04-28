@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useAppStore } from '../stores/appStore';
 import { Panel, StatusLine, LoadingButton, Card, JsonOutput } from '../components/common';
 import { navigateToPage } from '../navigation';
@@ -89,20 +89,17 @@ export function ChatPanel({ audience = 'expert' }: ChatPanelProps) {
     diagnosis?.target_type === 'trace' && diagnosis.trace_id === currentChatTraceId
       ? diagnosis
       : null;
-  const answerStatus = useMemo(
-    () =>
-      buildAnswerStatus({
-        hasAnswer: Boolean(chatResult?.answer),
-        citationCount: chatResult?.citations?.length ?? 0,
-        conflictingCount: conflictingContexts.length,
-      }),
-    [chatResult?.answer, chatResult?.citations?.length, conflictingContexts.length],
-  );
+  const answerStatus = buildAnswerStatus({
+    hasAnswer: Boolean(chatResult?.answer),
+    citationCount: chatResult?.citations?.length ?? 0,
+    conflictingCount: conflictingContexts.length,
+  });
 
   useEffect(() => {
     if (!chatReplayDraft) {
       return;
     }
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     setQuery(chatReplayDraft.query);
     if (typeof chatReplayDraft.topK === 'number' && chatReplayDraft.topK > 0) {
       setTopK(chatReplayDraft.topK);

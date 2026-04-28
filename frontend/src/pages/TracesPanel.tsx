@@ -109,6 +109,8 @@ export function TracesPanel() {
     if (!selectedTraceId) {
       return;
     }
+    // Keep the manual trace input in sync when another panel selects a trace.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     setInputTraceId(selectedTraceId);
     if (currentTrace?.trace_id === selectedTraceId) {
       return;

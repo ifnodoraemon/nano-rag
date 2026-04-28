@@ -5,6 +5,7 @@ import pytest
 from fastapi import HTTPException
 from starlette.datastructures import UploadFile
 
+from app.api import routes_business
 from app.api.routes_business import (
     BenchmarkRunRequest,
     BusinessChatRequest,
@@ -194,6 +195,27 @@ async def test_business_ingest_upload_rejects_duplicate_filenames(tmp_path) -> N
 
     assert exc_info.value.status_code == 400
     assert "duplicate upload filename" in str(exc_info.value.detail)
+    assert not any(tmp_path.iterdir())
+
+
+@pytest.mark.asyncio
+async def test_business_ingest_upload_rejects_oversized_file_while_streaming(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(routes_business, "MAX_UPLOAD_BYTES", 4)
+    container = SimpleNamespace(
+        ingestion_pipeline=SimpleNamespace(run=None),
+        config=SimpleNamespace(upload_dir=tmp_path),
+    )
+
+    upload = UploadFile(filename="large.md", file=BytesIO(b"12345"))
+    with pytest.raises(HTTPException) as exc_info:
+        await rag_ingest_upload(
+            _request_with_container(container),
+            files=[upload],
+            kb_id="default",
+            tenant_id=None,
+        )
+
+    assert exc_info.value.status_code == 413
     assert not any(tmp_path.iterdir())
 
 

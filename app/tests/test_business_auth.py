@@ -10,19 +10,17 @@ def _request_with_keys(keys: set[str]):
     return SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(container=SimpleNamespace(config=SimpleNamespace(business_api_keys=keys)))))
 
 
-def test_business_auth_allows_missing_key_when_not_configured(monkeypatch) -> None:
+def test_business_auth_rejects_missing_key_when_not_configured(monkeypatch) -> None:
     monkeypatch.delenv("RAG_AUTH_DISABLED", raising=False)
-    monkeypatch.delenv("RAG_AUTH_REQUIRED", raising=False)
-    require_api_key(_request_with_keys(set()), authorization=None, x_api_key=None)
-
-
-def test_business_auth_can_require_keys_explicitly(monkeypatch) -> None:
-    monkeypatch.setenv("RAG_AUTH_REQUIRED", "true")
-
     with pytest.raises(HTTPException) as exc_info:
         require_api_key(_request_with_keys(set()), authorization=None, x_api_key=None)
 
     assert exc_info.value.status_code == 503
+
+
+def test_business_auth_can_be_disabled_explicitly(monkeypatch) -> None:
+    monkeypatch.setenv("RAG_AUTH_DISABLED", "true")
+    require_api_key(_request_with_keys(set()), authorization=None, x_api_key=None)
 
 
 def test_business_auth_accepts_bearer_token() -> None:

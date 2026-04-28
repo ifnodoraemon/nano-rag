@@ -47,6 +47,12 @@ export function HealthPanel() {
         { label: 'Benchmark', status: health.features?.benchmark ? 'ok' : 'neutral' },
       ]
     : [];
+  const authLabel =
+    health?.auth_status === 'disabled'
+      ? '本地禁用'
+      : health?.auth_status === 'configured'
+        ? '已配置'
+        : '缺少 RAG_API_KEYS';
 
   return (
     <Panel
@@ -98,7 +104,7 @@ export function HealthPanel() {
               </div>
               <div className="info-row">
                 <span>业务鉴权</span>
-                <strong>{health.auth_enabled ? '已启用' : '未启用'}</strong>
+                <strong>{authLabel}</strong>
               </div>
               <div className="info-row">
                 <span>Trace 数量</span>
@@ -125,6 +131,12 @@ export function HealthPanel() {
             {!health.features?.diagnosis && (
               <div className="status-line">
                 当前实例只开启了 nano core，未启用 diagnosis / eval workbench。
+              </div>
+            )}
+            {health.auth_status === 'missing_keys' && (
+              <div className="status-line error">
+                API 鉴权已开启但还没有配置 RAG_API_KEYS。请配置业务 key，或仅在本地开发时设置
+                RAG_AUTH_DISABLED=true。
               </div>
             )}
             {health.phoenix?.enabled && !health.phoenix?.reachable && (

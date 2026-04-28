@@ -66,6 +66,9 @@ export function formatApiError(error: unknown): string {
   if (normalized.includes('api key not valid') || normalized.includes('invalid or missing api key')) {
     return '当前模型或业务接口的 API Key 无效，请先检查配置。';
   }
+  if (normalized.includes('rag_api_keys not configured')) {
+    return '后端未配置 RAG_API_KEYS。生产或共享环境请配置业务 key；本地开发可显式设置 RAG_AUTH_DISABLED=true。';
+  }
   if (normalized.includes('unsupported file type')) {
     return parsed.detail || '文件类型不受支持，请上传 PDF、Markdown、TXT、HTML 或常见图片。';
   }
@@ -85,7 +88,12 @@ export function formatApiError(error: unknown): string {
 }
 
 export const healthApi = {
-  get: () => api.get<HealthResponse>('/health').then((r) => r.data),
+  get: (apiKey?: string) =>
+    api
+      .get<HealthResponse>('/health/detail', {
+        headers: authHeaders(apiKey),
+      })
+      .then((r) => r.data),
 };
 
 export const businessIngestApi = {

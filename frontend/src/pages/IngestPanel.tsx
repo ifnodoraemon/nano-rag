@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useMemo, useRef, useState } from 'react';
 import { useAppStore } from '../stores/appStore';
 import { Panel, StatusLine, JsonOutput, LoadingButton, Card } from '../components/common';
 
@@ -23,19 +23,6 @@ export function IngestPanel({ audience = 'expert' }: IngestPanelProps) {
   const [selectionMessage, setSelectionMessage] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
-  useEffect(() => {
-    if (ingestLoading) {
-      return;
-    }
-    if (ingestError) {
-      setSelectionMessage('导入没有成功，请检查提示后重试。');
-      return;
-    }
-    if (ingestResult) {
-      setSelectionMessage('资料已导入完成，可以继续提问了。');
-    }
-  }, [ingestLoading, ingestError, ingestResult]);
-
   const uploadedLabel = useMemo(() => {
     if (!files.length) {
       return '拖入文件，或点击选择文件';
@@ -45,9 +32,19 @@ export function IngestPanel({ audience = 'expert' }: IngestPanelProps) {
     }
     return `已选择 ${files.length} 个文件`;
   }, [files]);
+  const ingestStatusMessage = ingestLoading
+    ? '正在导入资料...'
+    : ingestError
+      ? '导入没有成功，请检查下面的提示后重试。'
+      : selectionMessage
+        ? selectionMessage
+        : ingestResult
+          ? '资料已导入完成，可以继续提问了。'
+          : undefined;
 
   const handlePathSubmit = (e: React.FormEvent) => {
     e.preventDefault();
+    setSelectionMessage(null);
     runIngest(path);
   };
 
@@ -64,7 +61,7 @@ export function IngestPanel({ audience = 'expert' }: IngestPanelProps) {
         tenantId: uploadScopeId,
         sessionId: `${uploadScopeId}-session`,
       });
-      setSelectionMessage(`已选择 ${nextFiles.length} 个文件，正在创建新的测试空间并开始导入...`);
+      setSelectionMessage(null);
       void runIngestUpload(nextFiles);
       return;
     }
@@ -77,7 +74,7 @@ export function IngestPanel({ audience = 'expert' }: IngestPanelProps) {
       setSelectionMessage('请先选择至少一个文件。');
       return;
     }
-    setSelectionMessage(`已选择 ${files.length} 个文件，正在开始导入...`);
+    setSelectionMessage(null);
     void runIngestUpload(files);
   };
 
@@ -114,13 +111,7 @@ export function IngestPanel({ audience = 'expert' }: IngestPanelProps) {
           </label>
 
           <StatusLine
-            message={
-              ingestLoading
-                ? '正在导入资料...'
-                : ingestError
-                  ? '导入没有成功，请检查下面的提示后重试。'
-                  : selectionMessage || undefined
-            }
+            message={ingestStatusMessage}
             isError={!!ingestError}
           />
 

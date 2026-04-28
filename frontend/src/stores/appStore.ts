@@ -242,7 +242,8 @@ export const useAppStore = create<AppState>((set, get) => ({
   loadHealth: async () => {
     set({ healthLoading: true, healthError: null });
     try {
-      const data = await healthApi.get();
+      const { workspace } = get();
+      const data = await healthApi.get(workspace.apiKey);
       set({ health: data, healthLoading: false });
     } catch (e) {
       set({ healthError: formatApiError(e), healthLoading: false });

@@ -38,8 +38,6 @@ services:
         condition: service_healthy
       phoenix:
         condition: service_healthy
-      bifrost:
-        condition: service_started
     restart: unless-stopped
     healthcheck:
       test:
@@ -120,8 +118,11 @@ services:
   bifrost:
     image: maximhq/bifrost:v1.3.9
     container_name: nano-rag-bifrost
+    profiles:
+      - bifrost
     env_file:
-      - ./bifrost/.env
+      - path: ./bifrost/.env
+        required: false
     ports:
       - "127.0.0.1:8080:8080"
     volumes:
