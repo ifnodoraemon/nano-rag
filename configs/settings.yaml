@@ -22,6 +22,11 @@ retrieval:
     enabled: true
     allow_stale_fallback: false
 
+hybrid_search:
+  enabled: ${RAG_HYBRID_SEARCH_ENABLED:-true}
+  dense_weight: 0.7
+  sparse_weight: 0.3
+
 prompt:
   version: v1
 

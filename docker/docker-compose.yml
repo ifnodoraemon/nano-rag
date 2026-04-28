@@ -5,7 +5,8 @@ services:
       dockerfile: docker/app.Dockerfile
     container_name: nano-rag-app
     env_file:
-      - ../.env
+      - path: ../.env
+        required: false
     ports:
       - "8000:8000"
     environment:
@@ -14,10 +15,10 @@ services:
       MILVUS_URI: ${MILVUS_URI:-http://milvus:19530}
       HTTP_PROXY: ${HTTP_PROXY:-}
       HTTPS_PROXY: ${HTTPS_PROXY:-}
-      NO_PROXY: ${NO_PROXY:-localhost,127.0.0.1,::1},app,phoenix,milvus,etcd,minio
+      NO_PROXY: ${NO_PROXY:-localhost,127.0.0.1,::1},app,phoenix,milvus,etcd,minio,bifrost
       http_proxy: ${http_proxy:-}
       https_proxy: ${https_proxy:-}
-      no_proxy: ${no_proxy:-localhost,127.0.0.1,::1},app,phoenix,milvus,etcd,minio
+      no_proxy: ${no_proxy:-localhost,127.0.0.1,::1},app,phoenix,milvus,etcd,minio,bifrost
       ALL_PROXY: ""
       all_proxy: ""
       PARSED_OUTPUT_DIR: /workspace/data/parsed
@@ -27,6 +28,9 @@ services:
       PHOENIX_UI_HOST_HEADER: ${PHOENIX_UI_HOST_HEADER:-localhost}
       RAG_INGEST_ALLOWED_DIRS: /workspace/data/raw
       EVAL_DATASET_DIR: /workspace/data/eval
+      MODEL_GATEWAY_MODE: ${MODEL_GATEWAY_MODE:-live}
+      MODEL_GATEWAY_BASE_URL: ${MODEL_GATEWAY_BASE_URL:-http://bifrost:8080/v1}
+      MODEL_GATEWAY_API_KEY: ${MODEL_GATEWAY_API_KEY:-bifrost-local}
     volumes:
       - ../configs:/workspace/configs:ro
       - ../data/raw:/workspace/data/raw:ro
@@ -38,6 +42,8 @@ services:
         condition: service_healthy
       phoenix:
         condition: service_healthy
+      bifrost:
+        condition: service_started
     restart: unless-stopped
     healthcheck:
       test:
@@ -118,8 +124,6 @@ services:
   bifrost:
     image: maximhq/bifrost:v1.3.9
     container_name: nano-rag-bifrost
-    profiles:
-      - bifrost
     env_file:
       - path: ./bifrost/.env
         required: false

@@ -160,3 +160,77 @@ def test_milvus_repository_refuses_to_drop_collection_on_dimension_mismatch(monk
         MilvusVectorRepository(dimension=3072)
 
     assert "Refusing to drop the collection automatically" in str(exc_info.value)
+
+
+def test_milvus_repository_new_collection_includes_native_hybrid_schema(monkeypatch) -> None:
+    import types
+
+    class FakeDataType:
+        VARCHAR = "VARCHAR"
+        FLOAT_VECTOR = "FLOAT_VECTOR"
+        SPARSE_FLOAT_VECTOR = "SPARSE_FLOAT_VECTOR"
+
+    class FakeFunctionType:
+        BM25 = "BM25"
+
+    class FakeFunction:
+        def __init__(self, **kwargs) -> None:
+            self.kwargs = kwargs
+
+    fake_pymilvus = types.ModuleType("pymilvus")
+    fake_pymilvus.DataType = FakeDataType
+    fake_pymilvus.FunctionType = FakeFunctionType
+    fake_pymilvus.Function = FakeFunction
+    monkeypatch.setitem(__import__("sys").modules, "pymilvus", fake_pymilvus)
+
+    class FakeSchema:
+        def __init__(self) -> None:
+            self.fields = []
+            self.functions = []
+
+        def add_field(self, **kwargs) -> None:
+            self.fields.append(kwargs)
+
+        def add_function(self, function) -> None:  # noqa: ANN001
+            self.functions.append(function)
+
+    class FakeIndexParams:
+        def __init__(self) -> None:
+            self.indexes = []
+
+        def add_index(self, **kwargs) -> None:
+            self.indexes.append(kwargs)
+
+    class FakeMilvusClient:
+        def __init__(self) -> None:
+            self.schema = None
+            self.index_params = None
+
+        def has_collection(self, collection_name):  # noqa: ANN001, ARG002
+            return False
+
+        def create_schema(self, **kwargs):  # noqa: ANN001, ARG002
+            self.schema = FakeSchema()
+            return self.schema
+
+        def prepare_index_params(self):
+            self.index_params = FakeIndexParams()
+            return self.index_params
+
+        def create_collection(self, collection_name, schema, index_params):  # noqa: ANN001, ARG002
+            self.schema = schema
+            self.index_params = index_params
+
+    fake_client = FakeMilvusClient()
+    monkeypatch.setattr("app.vectorstore.repository.create_milvus_client", lambda: fake_client)
+
+    MilvusVectorRepository(dimension=3072)
+
+    fields = {field["field_name"]: field for field in fake_client.schema.fields}
+    assert fields["text"]["enable_analyzer"] is True
+    assert fields["sparse"]["datatype"] == FakeDataType.SPARSE_FLOAT_VECTOR
+    assert fake_client.schema.functions[0].kwargs["function_type"] == FakeFunctionType.BM25
+    sparse_index = next(
+        index for index in fake_client.index_params.indexes if index["field_name"] == "sparse"
+    )
+    assert sparse_index["metric_type"] == "BM25"

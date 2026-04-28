@@ -22,3 +22,20 @@ def test_mock_chat_uses_best_context() -> None:
         ]
     )
     assert "15 个自然日内" in payload["choices"][0]["message"]["content"]
+
+
+def test_mock_chat_understands_prompt_builder_format() -> None:
+    payload = mock_chat(
+        [
+            {
+                "role": "user",
+                "content": (
+                    "Question: 差旅报销多久内提交？\n\n"
+                    "Available context:\n"
+                    "[C1] 员工应在出差结束后 15 个自然日内提交差旅报销申请。\n\n"
+                    "Answer using only the context above."
+                ),
+            }
+        ]
+    )
+    assert "15 个自然日内" in payload["choices"][0]["message"]["content"]

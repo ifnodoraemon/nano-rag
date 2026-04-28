@@ -6,7 +6,9 @@
           "value": "env.GOOGLE_API_KEY",
           "models": [
             "gemini-2.5-flash",
-            "gemini-embedding-2-preview"
+            "gemini-embedding-2-preview",
+            "google/gemini-2.5-flash",
+            "google/gemini-embedding-2-preview"
           ],
           "weight": 1.0
         }
@@ -18,7 +20,9 @@
           "value": "env.OPENAI_API_KEY",
           "models": [
             "gpt-4o",
-            "text-embedding-3-large"
+            "text-embedding-3-large",
+            "openai/gpt-4o",
+            "openai/text-embedding-3-large"
           ],
           "weight": 1.0
         }
@@ -29,7 +33,8 @@
         {
           "value": "env.COHERE_API_KEY",
           "models": [
-            "rerank-v3.5"
+            "rerank-v3.5",
+            "cohere/rerank-v3.5"
           ],
           "weight": 1.0
         }

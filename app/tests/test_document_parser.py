@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 import pytest
@@ -84,3 +85,81 @@ def test_document_parser_base_url_strips_openai_suffix(tmp_path) -> None:
     client = DocumentParserClient(config)
 
     assert client.base_url == "https://generativelanguage.googleapis.com"
+
+
+@pytest.mark.asyncio
+async def test_document_parser_uses_bifrost_multipart_upload(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("MODEL_GATEWAY_MODE", "live")
+    pdf_path = tmp_path / "notice.pdf"
+    pdf_path.write_bytes(b"%PDF-1.4 fake")
+
+    class FakeResponse:
+        def __init__(self, payload: dict) -> None:
+            self._payload = payload
+
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict:
+            return self._payload
+
+    class FakeAsyncClient:
+        def __init__(self) -> None:
+            self.calls = []
+
+        async def post(self, url: str, **kwargs):  # noqa: ANN003
+            self.calls.append({"url": url, **kwargs})
+            if url.endswith("/upload/v1beta/files"):
+                return FakeResponse({"file": {"uri": "files/notice"}})
+            return FakeResponse(
+                {
+                    "candidates": [
+                        {
+                            "content": {
+                                "parts": [
+                                    {
+                                        "text": "# Parsed Notice\n\n员工应在出差结束后 15 个自然日内提交差旅报销申请。"
+                                    }
+                                ]
+                            }
+                        }
+                    ]
+                }
+            )
+
+    config = AppConfig(
+        config_dir=tmp_path,
+        settings={"timeout": {"document_parser_seconds": 30}},
+        models={
+            "model_gateway": {
+                "base_url": "http://bifrost:8080/v1",
+                "api_key": "bifrost-local",
+            },
+            "generation": {"default_alias": "google/gemini-2.5-flash"},
+            "document_parser": {
+                "enabled": True,
+                "default_alias": "gemini-2.5-flash",
+                "base_url": "http://bifrost:8080/genai",
+                "api_key": "bifrost-local",
+            },
+        },
+        prompts={},
+    )
+    client = DocumentParserClient(config)
+    fake_http = FakeAsyncClient()
+    client._client = fake_http  # noqa: SLF001
+
+    text = await client.parse_file(pdf_path)
+
+    assert "差旅报销申请" in text
+    upload_call = fake_http.calls[0]
+    assert upload_call["url"] == "http://bifrost:8080/genai/upload/v1beta/files"
+    assert "files" in upload_call
+    assert "X-Goog-Upload-Protocol" not in upload_call["headers"]
+    metadata = json.loads(upload_call["files"]["metadata"][1])
+    assert metadata == {"file": {"displayName": "notice.pdf"}}
+    assert upload_call["files"]["file"] == (
+        "notice.pdf",
+        b"%PDF-1.4 fake",
+        "application/pdf",
+    )

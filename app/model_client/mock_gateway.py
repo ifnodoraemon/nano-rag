@@ -15,13 +15,14 @@ def mock_embeddings(texts: list[str], dimensions: int = 32) -> dict:
     }
 
 
-def mock_rerank(query: str, documents: list[str], top_n: int) -> dict:
+def mock_rerank(query: str, documents: list[object], top_n: int) -> dict:
     query_terms = _tokenize(query)
     scored = []
     for index, document in enumerate(documents):
-        doc_terms = _tokenize(document)
+        text = _document_text(document)
+        doc_terms = _tokenize(text)
         overlap = len(query_terms & doc_terms)
-        score = overlap + _keyword_bias(query, document)
+        score = overlap + _keyword_bias(query, text)
         scored.append({"index": index, "relevance_score": float(score)})
     scored.sort(key=lambda item: item["relevance_score"], reverse=True)
     return {"results": scored[:top_n]}
@@ -30,8 +31,7 @@ def mock_rerank(query: str, documents: list[str], top_n: int) -> dict:
 def mock_chat(messages: list[dict[str, str]]) -> dict:
     user_message = next((message["content"] for message in reversed(messages) if message["role"] == "user"), "")
     contexts = _extract_contexts(user_message)
-    question_match = re.search(r"问题：(.+?)\n", user_message, re.S)
-    question = question_match.group(1).strip() if question_match else ""
+    question = _extract_question(user_message)
 
     selected_chunk_id = None
     selected_text = None
@@ -117,17 +117,46 @@ def _is_cjk(char: str) -> bool:
 
 
 def _extract_contexts(user_message: str) -> list[tuple[str, str]]:
-    marker = "可用上下文："
-    if marker not in user_message:
+    block = ""
+    for marker in ("可用上下文：", "Available context:"):
+        if marker in user_message:
+            block = user_message.split(marker, 1)[1].strip()
+            break
+    if not block:
         return []
-    block = user_message.split(marker, 1)[1].strip()
+    for end_marker in ("Answer using only", "Return the result", "请仅依据"):
+        if end_marker in block:
+            block = block.split(end_marker, 1)[0].strip()
     matches = list(re.finditer(r"\[([^\]]+)\]\s*", block))
     contexts: list[tuple[str, str]] = []
     for index, match in enumerate(matches):
         chunk_id = match.group(1)
         start = match.end()
         end = matches[index + 1].start() if index + 1 < len(matches) else len(block)
-        text = block[start:end].strip()
+        text = _clean_context_text(block[start:end].strip())
         if text:
             contexts.append((chunk_id, text))
     return contexts
+
+
+def _extract_question(user_message: str) -> str:
+    for pattern in (r"问题：(.+?)\n", r"Question:\s*(.+?)\n"):
+        match = re.search(pattern, user_message, re.S)
+        if match:
+            return match.group(1).strip()
+    return ""
+
+
+def _document_text(document: object) -> str:
+    if isinstance(document, dict):
+        return str(document.get("text", ""))
+    return str(document)
+
+
+def _clean_context_text(text: str) -> str:
+    previous = None
+    cleaned = text.strip()
+    while previous != cleaned:
+        previous = cleaned
+        cleaned = re.sub(r"^\([^)]*\)\s*", "", cleaned).strip()
+    return cleaned

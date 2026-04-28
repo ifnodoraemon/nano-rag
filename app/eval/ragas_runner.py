@@ -2,19 +2,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import os
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
-
-from ragas import evaluate
-from ragas.dataset_schema import EvaluationDataset, SingleTurnSample
-from ragas.metrics.collections import (
-    AnswerRelevancy,
-    ContextPrecision,
-    ContextRecall,
-    Faithfulness,
-)
-from ragas.llms import llm_factory
 
 from app.utils.constants import MIN_CONTEXT_MATCH_LENGTH
 from app.utils.text import normalize_text, normalize_for_comparison
@@ -24,12 +15,28 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-_METRIC_CLASSES = {
-    "faithfulness": Faithfulness,
-    "answer_relevancy": AnswerRelevancy,
-    "context_precision": ContextPrecision,
-    "context_recall": ContextRecall,
+_METRIC_CLASS_NAMES = {
+    "faithfulness": "Faithfulness",
+    "answer_relevancy": "AnswerRelevancy",
+    "context_precision": "ContextPrecision",
+    "context_recall": "ContextRecall",
 }
+
+
+def _load_metric_classes() -> dict[str, type]:
+    from ragas.metrics.collections import (
+        AnswerRelevancy,
+        ContextPrecision,
+        ContextRecall,
+        Faithfulness,
+    )
+
+    return {
+        "AnswerRelevancy": AnswerRelevancy,
+        "ContextPrecision": ContextPrecision,
+        "ContextRecall": ContextRecall,
+        "Faithfulness": Faithfulness,
+    }
 
 
 @dataclass
@@ -64,10 +71,12 @@ class RAGASConfig:
 
 
 def _resolve_metrics(requested: list[str], llm) -> list:
+    metric_classes = _load_metric_classes()
     resolved = []
     for name in requested:
         key = name.lower().strip()
-        cls = _METRIC_CLASSES.get(key)
+        class_name = _METRIC_CLASS_NAMES.get(key)
+        cls = metric_classes.get(class_name or "")
         if cls is None:
             logger.warning("unknown ragas metric: %s, skipping", name)
         else:
@@ -77,6 +86,7 @@ def _resolve_metrics(requested: list[str], llm) -> list:
 
 def _build_llm(config: RAGASConfig, generation_client: GenerationClient | None):
     from openai import AsyncOpenAI
+    from ragas.llms import llm_factory
 
     base_url = config.lib_llm_base_url
     api_key = config.lib_llm_api_key
@@ -134,6 +144,9 @@ class RagasRunner:
         }
 
     async def _run_async(self, records: list[dict]) -> dict:
+        from ragas import evaluate
+        from ragas.dataset_schema import EvaluationDataset, SingleTurnSample
+
         samples: list[SingleTurnSample] = []
         for record in records:
             contexts = record.get("retrieved_contexts", []) or []
@@ -165,14 +178,22 @@ class RagasRunner:
 
     def _format_result(self, records: list[dict], eval_result) -> dict:
         try:
-            scores = eval_result.scores if hasattr(eval_result, "scores") else None
-            if scores is not None and hasattr(scores, "to_pandas"):
-                per_record = scores.to_pandas()
-            elif scores is not None and hasattr(scores, "to_dict"):
-                per_record = scores.to_dict("records")
+            if hasattr(eval_result, "to_pandas"):
+                per_record = eval_result.to_pandas().to_dict("records")
             else:
-                per_record = [{} for _ in records]
+                scores = eval_result.scores if hasattr(eval_result, "scores") else None
+                if isinstance(scores, list):
+                    per_record = scores
+                elif scores is not None and hasattr(scores, "to_pandas"):
+                    per_record = scores.to_pandas().to_dict("records")
+                elif scores is not None and hasattr(scores, "to_dict"):
+                    per_record = scores.to_dict("records")
+                else:
+                    per_record = [{} for _ in records]
         except Exception:
+            per_record = [{} for _ in records]
+
+        if not isinstance(per_record, list):
             per_record = [{} for _ in records]
 
         results: list[dict] = []
@@ -180,9 +201,13 @@ class RagasRunner:
 
         for index, record in enumerate(records):
             row = per_record[index] if index < len(per_record) else {}
+            if not isinstance(row, dict):
+                row = {}
             row_metrics = {}
             for key, value in row.items():
-                score = float(value) if value is not None else 0.0
+                score = self._coerce_metric_score(value)
+                if score is None:
+                    continue
                 row_metrics[key] = round(score, 4)
                 lib_sums[key] = lib_sums.get(key, 0.0) + score
 
@@ -202,6 +227,17 @@ class RagasRunner:
             "aggregate": aggregate,
             "results": results,
         }
+
+    def _coerce_metric_score(self, value) -> float | None:  # noqa: ANN001
+        if value is None or isinstance(value, bool):
+            return None
+        try:
+            score = float(value)
+        except (TypeError, ValueError):
+            return None
+        if not math.isfinite(score):
+            return None
+        return score
 
     def _builtin_fields(self, record: dict) -> dict:
         answer = normalize_text(record.get("answer", ""))

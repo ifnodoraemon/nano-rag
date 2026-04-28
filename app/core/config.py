@@ -179,7 +179,10 @@ class AppConfig:
 
     @property
     def hybrid_search_enabled(self) -> bool:
-        return parse_bool_env(os.getenv("RAG_HYBRID_SEARCH_ENABLED"))
+        raw = os.getenv("RAG_HYBRID_SEARCH_ENABLED")
+        if raw is not None:
+            return parse_bool_env(raw)
+        return bool(self.settings.get("hybrid_search", {}).get("enabled", False))
 
     @property
     def semantic_chunker_enabled(self) -> bool:
@@ -290,7 +293,7 @@ class AppContainer:
         if config.eval_enabled:
             from app.eval.ragas_runner import RagasRunner
 
-            ragas_runner = RagasRunner()
+            ragas_runner = RagasRunner(generation_client=generation_client)
         diagnosis_service = None
         if config.diagnosis_enabled:
             from app.diagnostics.service import DiagnosisService

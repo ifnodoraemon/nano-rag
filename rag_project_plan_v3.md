@@ -6,8 +6,8 @@
 
 与方案 B 的关键差异：
 
-- 模型网关从 **LiteLLM** 切换为 **Bifrost 优先**（项目已集成，性能更优），LiteLLM 作为可选 profile
-- Hybrid 检索从自建 BM25 迁移到 **Milvus v2.5 原生 full-text search + hybrid search**
+- 模型网关从 **LiteLLM** 切换为 **Bifrost 默认主线**（LiteLLM 保留为可选 profile）
+- Hybrid 检索已落到 **Milvus v2.5 原生 full-text search + hybrid search**，memory 后端保留 BM25 fallback
 - 编排框架**去掉 LangChain**，沿用自研 pipeline（已验证更轻量可控）
 - 评测从自研指标升级为 **RAGAS 库.x 标准库 + 自研指标补充**
 - Rerank 从 disabled 改为 **默认启用**
@@ -30,7 +30,7 @@
 | Mock 模式 | ✅ |
 | Citation 返回 | ✅ |
 | Semantic Chunker（按章节/句子切块） | ✅ 超出原计划 |
-| Hybrid 检索（BM25 + Vector + RRF） | ✅ 自建 BM25，超出原计划 |
+| Hybrid 检索 | ✅ Milvus 原生 hybrid + memory BM25 fallback |
 | Query Rewrite / Multi-query / HyDE | ✅ 超出原计划 |
 | 多租户（kb_id / tenant_id） | ✅ 超出原计划 |
 | Freshness Filter | ✅ 超出原计划 |
@@ -42,18 +42,14 @@
 | React 前端 SPA | ✅ 超出原计划 |
 | API Key Auth | ✅ 超出原计划 |
 | 31 个测试模块 | ✅ |
-| Bifrost 可选 profile | ✅ 已在 docker-compose 中 |
+| Bifrost 默认服务 | ✅ 已在 docker-compose 中 |
 
-### 2.2 需补全或改进
+### 2.2 剩余重点
 
 | 项目 | 现状 | 目标 |
 |------|------|------|
-| 模型网关 | Bifrost 可选 profile，主路径直连 API | Bifrost 作为默认 profile，配置 fallback/路由 |
-| Hybrid 检索 | 自建 BM25（内存，不持久化） | 迁移到 Milvus v2.5 原生 full-text + hybrid search |
-| Rerank | 默认 disabled | 默认启用，经 Bifrost 转发 |
-| RAGAS 评测 | 自研指标（exact_match, context_recall 等） | 接入 RAGAS 库.x 库，保留自研指标作为补充 |
-| eval/replay.py | stub（not_implemented） | 实现基于 Phoenix trace 的 replay |
-| Fallback/路由策略 | 无 | 利用 Bifrost 的 automatic fallback + load balancing |
+| Fallback/路由策略 | Bifrost 配置已存在 | 端到端验证 provider fallback 与日志可观测性 |
+| 中文 analyzer 效果 | 原生 hybrid 已接入 | 用真实中文业务语料做效果校准 |
 
 ---
 
@@ -101,9 +97,9 @@
 - LangChain 当前重心在 Agent/LangGraph，纯 RAG 场景收益小
 - 自研 pipeline 在测试覆盖和可维护性上更优
 
-### 3.4 为什么迁移到 Milvus 原生 Hybrid
+### 3.4 为什么使用 Milvus 原生 Hybrid
 
-当前自建 BM25 的问题：
+Milvus 后端不再维护应用内 BM25 索引，原因是：
 - 内存索引，不持久化，重启后需重建
 - 不支持增量更新同步
 - 分词对中文支持有限
@@ -114,10 +110,10 @@ Milvus v2.5 原生能力：
 - 数据持久化，与向量数据同生命周期
 - 支持 Milvus 的元数据过滤与多租户
 
-迁移收益：
-- 去掉 `retrieval/bm25.py`、`retrieval/hybrid_retriever.py` 中的自建索引逻辑
-- 利用 `pymilvus` 的 `AnnSearchRequest` 实现多路召回 + RRF
+当前收益：
+- Milvus 后端直接使用 `AnnSearchRequest` 实现 dense + sparse 多路召回
 - 减少 app 内存占用
+- memory 后端保留 BM25 fallback，服务本地 mock、smoke 和单测
 
 ---
 
@@ -224,12 +220,12 @@ configs/
   models.yaml                # 更新：rerank default_alias 改为实际模型
 ```
 
-### 6.2 需移除的文件（迁移完成后）
+### 6.2 保留的本地 fallback
 
 ```text
-app/retrieval/bm25.py                 # -> Milvus 原生 full-text
-app/retrieval/hybrid_retriever.py     # -> milvus_hybrid.py
-app/retrieval/hybrid_fusion.py        # -> Milvus 内置 RRF
+app/retrieval/bm25.py                 # memory 后端 fallback
+app/retrieval/hybrid_retriever.py     # 统一 native Milvus 与 memory fallback 的入口
+app/retrieval/hybrid_fusion.py        # memory 后端融合逻辑
 ```
 
 ---
@@ -243,7 +239,7 @@ app/retrieval/hybrid_fusion.py        # -> Milvus 内置 RRF
 
 ```yaml
 model_gateway:
-  base_url: ${MODEL_GATEWAY_BASE_URL:-http://bifrost:8080/openai}
+  base_url: ${MODEL_GATEWAY_BASE_URL:-http://bifrost:8080/v1}
   api_key: ${MODEL_GATEWAY_API_KEY:-change-me}
 ```
 
@@ -253,27 +249,25 @@ Bifrost 配置中设定 fallback：
 {
   "providers": {
     "primary": {
-      "provider": "openai",
-      "apiKey": "${GEN_PROVIDER_API_KEY}",
-      "baseURL": "${GEN_PROVIDER_BASE_URL}"
+      "provider": "google",
+      "apiKey": "env.GOOGLE_API_KEY"
     },
     "fallback": {
-      "provider": "anthropic",
-      "apiKey": "${FALLBACK_PROVIDER_API_KEY}",
-      "baseURL": "${FALLBACK_PROVIDER_BASE_URL}"
+      "provider": "openai",
+      "apiKey": "env.OPENAI_API_KEY"
     }
   }
 }
 ```
 
-## 7.2 retrieval 模块（重大变更）
+## 7.2 retrieval 模块（已落地）
 
-迁移到 Milvus 原生 hybrid search：
+Milvus 后端使用原生 hybrid search：
 
-1. Collection 新增 `text` 字段（启用 Milvus full-text index）
+1. Collection 新增 analyzer `text` 字段和 BM25 `sparse` 字段
 2. 检索时用 `AnnSearchRequest` 发起 dense + sparse 双路召回
-3. Milvus 内置 RRF 融合，无需自建 `hybrid_fusion.py`
-4. 保留 `retriever.py` 作为纯向量检索后备
+3. Milvus `WeightedRanker` 融合 dense / sparse 结果
+4. memory 后端保留 BM25 fallback
 
 关键 API：
 
@@ -366,24 +360,30 @@ services:
 
 ```yaml
 model_gateway:
-  base_url: ${MODEL_GATEWAY_BASE_URL:-http://bifrost:8080/openai}
+  base_url: ${MODEL_GATEWAY_BASE_URL:-http://bifrost:8080/v1}
   api_key: ${MODEL_GATEWAY_API_KEY:-change-me}
 
 embedding:
-  default_alias: gemini-embedding-2-preview
+  default_alias: ${EMBEDDING_MODEL_ALIAS:-google/gemini-embedding-2-preview}
   dimension: 3072
   base_url: ${EMBEDDING_API_BASE_URL:-}
   api_key: ${EMBEDDING_API_KEY:-}
 
 rerank:
-  default_alias: ${RERANK_MODEL_ALIAS:-cohere-rerank-v3}   # 从 disabled 改为实际模型
+  default_alias: ${RERANK_MODEL_ALIAS:-cohere/rerank-v3.5}
   base_url: ${RERANK_API_BASE_URL:-}
   api_key: ${RERANK_API_KEY:-}
 
 generation:
-  default_alias: gemini-2.5-flash
+  default_alias: ${GENERATION_MODEL_ALIAS:-google/gemini-2.5-flash}
   base_url: ${GENERATION_API_BASE_URL:-}
   api_key: ${GENERATION_API_KEY:-}
+
+document_parser:
+  enabled: ${DOCUMENT_PARSER_ENABLED:-true}
+  default_alias: ${DOCUMENT_PARSER_MODEL:-gemini-2.5-flash}
+  base_url: ${DOCUMENT_PARSER_API_BASE_URL:-http://bifrost:8080/genai}
+  api_key: ${DOCUMENT_PARSER_API_KEY:-}
 ```
 
 ### 9.2 settings.yaml
@@ -411,7 +411,7 @@ hybrid_search:
 - Phoenix 接入
 - 每次 chat 可看 trace
 
-### Milestone 3：RAGAS 库 评测 + Replay
+### Milestone 3：RAGAS 库 评测 + Replay ✅ 已完成
 
 目标：
 - 接入 RAGAS 库.x 标准库
@@ -423,19 +423,19 @@ hybrid_search:
 - 自研指标仍可用
 - 能基于 Phoenix trace replay 一次完整调用并输出 diff
 
-**进度：replay 已实现，RAGAS 库.x 库集成待做**
+**进度：replay 已实现，RAGAS 库.x 已接入 `run_async` / API `use_ragas_lib` / CLI `--ragas-lib` 路径**
 
-### Milestone 4：Milvus 原生 Hybrid
+### Milestone 4：Milvus 原生 Hybrid ✅ 已完成
 
 目标：
-- 迁移到 Milvus v2.5 原生 full-text search + hybrid search
-- 移除自建 BM25 索引
+- Milvus 后端使用 v2.5 原生 full-text search + hybrid search
+- memory 后端保留本地 BM25 fallback，Milvus 后端不维护应用内 BM25 索引
 
 完成标准：
-- Collection 包含 text 字段 + full-text index
-- hybrid_search 通过 `AnnSearchRequest` + `WeightedRanker` 实现
-- 自建 BM25 代码标记 deprecated
-- 检索效果不低于当前自建 BM25 + RRF
+- Collection 包含 analyzer text 字段、BM25 sparse 字段和 sparse index
+- hybrid search 通过 `AnnSearchRequest` + `WeightedRanker` 实现
+- Milvus 原生路径不再 bootstrap / update 应用内 BM25 index
+- memory 后端继续支持本地 smoke / 单测
 
 ### Milestone 5：Bifrost 默认启用 + Rerank 启用 ✅ 已完成
 
@@ -447,7 +447,7 @@ hybrid_search:
 完成标准：
 - `docker-compose up` 默认启动 Bifrost ✅
 - 所有模型调用默认经 Bifrost 转发 ✅
-- Rerank 在 chat 流程中默认执行 ✅（需设 RERANK_MODEL_ALIAS）
+- Rerank 在 chat 流程中默认执行 ✅
 - Bifrost 配置中包含 primary + fallback provider ✅
 
 ### Milestone 6：模型路由策略验证
@@ -468,8 +468,8 @@ hybrid_search:
 
 1. Milestone 3：RAGAS 库 接入 + replay 实现（独立于基础设施变更）
 2. Milestone 5：Bifrost 默认启用 + Rerank 启用（配置变更，风险低）
-3. Milestone 4：Milvus 原生 Hybrid（需修改 collection schema，需谨慎迁移）
-4. Milestone 6：Fallback 验证（依赖 M5 完成后的 Bifrost 配置）
+3. Milestone 4：Milvus 原生 Hybrid（已落地）
+4. Milestone 6：Fallback 验证（剩余端到端验证项）
 
 ---
 
@@ -531,9 +531,9 @@ RAGAS 库.x 标准指标 + 自研业务指标并存，互为补充。
 5. ~~Milvus collection 初始化~~ ✅ 已有
 6. **Bifrost 作为默认模型网关** ✅ 已完成
 7. **Rerank 默认启用** ✅ 已完成（环境变量控制）
-8. **RAGAS 库.x 集成** 待做
+8. **RAGAS 库.x 集成** ✅ 已完成
 9. **eval/replay.py 实际实现** ✅ 已完成
-10. **Milvus 原生 hybrid search 迁移** 待做
+10. **Milvus 原生 hybrid search** ✅ 新 collection schema 与 `native_hybrid_search` 路径已实现
 11. **Fallback 策略验证** 待做
 12. README 更新（启动、索引、问答、评测步骤）
 
@@ -543,7 +543,7 @@ RAGAS 库.x 标准指标 + 自研业务指标并存，互为补充。
 - 代码中不得直接硬编码 provider-specific SDK 调用
 - 所有模型切换必须通过配置完成
 - 所有关键流程必须可独立调试
-- Hybrid 检索利用 Milvus 原生能力，不自建 BM25
+- Hybrid 检索在 Milvus 后端利用原生能力；memory 后端保留自建 BM25 作为本地 fallback
 - 评测双轨：RAGAS 标准 + 自研业务指标
 
 ---
@@ -554,7 +554,7 @@ RAGAS 库.x 标准指标 + 自研业务指标并存，互为补充。
 |------|--------|----------------|
 | 模型网关 | LiteLLM（必需） | **Bifrost（默认）**，LiteLLM 可选 |
 | 编排框架 | LangChain | **自研 pipeline**（已验证） |
-| Hybrid 检索 | 第一阶段不做 | **已实现自建 BM25，计划迁移到 Milvus 原生** |
+| Hybrid 检索 | 第一阶段不做 | **Milvus 原生 hybrid + memory BM25 fallback** |
 | Query Rewrite | 第一阶段不做 | **已实现** |
 | Rerank | Qwen3-Reranker（外部 API） | **默认启用，经 Bifrost 转发** |
 | 评测 | RAGAS 库 | **RAGAS 库.x + 自研指标双轨** |
@@ -571,7 +571,7 @@ RAGAS 库.x 标准指标 + 自研业务指标并存，互为补充。
 ### 16.1 代码规模
 
 - 应用代码：~12,100 行 Python（不含 `__pycache__`）
-- 测试模块：30 个文件，137 个用例全部通过
+- 测试模块：`app/tests` 全量通过
 - 前端：React 19 + TypeScript SPA
 
 ### 16.2 API 端点对标
@@ -602,10 +602,10 @@ RAGAS 库.x 标准指标 + 自研业务指标并存，互为补充。
 |------|---------|------|------|
 | Ingestion | Docling + normalizer + chunker + embed + upsert | ✅ 完整 + semantic_chunker + rollback + artifact 持久化 | 超计划 |
 | Model Client | GatewayClient + 3 客户端 | ✅ + DocumentParserClient + mock_gateway + per-capability routing | 超计划 |
-| Vector Store | Milvus collection + CRUD | ✅ + InMemory 后备 + dynamic field + metadata filter | **缺 full-text / sparse 字段** |
-| Retrieval | Vector search + rerank + context builder | ✅ + hybrid BM25 + query rewrite + freshness + metadata rerank + wiki + filters | 自建 BM25 需迁移 |
+| Vector Store | Milvus collection + CRUD | ✅ + InMemory 后备 + dynamic field + metadata filter + native hybrid schema | 当前 schema 已落地 |
+| Retrieval | Vector search + rerank + context builder | ✅ + Milvus native hybrid / memory BM25 fallback + query rewrite + freshness + metadata rerank + wiki + filters | 需实测中文 analyzer 效果 |
 | Generation | Prompt builder + LLM + formatter | ✅ + conflict notice + evidence summary + supporting claims | 完整 |
-| Eval | RAGAS + 自研指标 | ⚠️ 仅自研指标，缺 RAGAS 库集成 | **待补** |
+| Eval | RAGAS + 自研指标 | ✅ 自研指标默认 + RAGAS 库显式路径 | 真实 RAGAS 依赖可用评测 LLM |
 | Replay | trace replay | ✅ 本次实现 | 完成 |
 | Tracing | Phoenix OTEL | ✅ + local TraceStore + FeedbackStore | 完整 |
 | Diagnostics | 未规划 | ✅ 392 行规则引擎 + AI 诊断 | 超计划 |
@@ -624,6 +624,6 @@ RAGAS 库.x 标准指标 + 自研业务指标并存，互为补充。
 
 | 项 | 优先级 | 风险 | 状态 |
 |----|--------|------|------|
-| RAGAS 库.x 库集成 | P1 | 低 | 待做 |
-| Milvus 原生 hybrid search | P2 | 高（schema 变更 + 中文分词验证） | 待做 |
+| RAGAS 库.x 库集成 | P1 | 低 | 已接入 |
+| Milvus 原生 hybrid search | P2 | 中（中文 analyzer 效果需真实语料验证） | 已接入 |
 | Fallback 端到端验证 | P3 | 低 | 待做 |

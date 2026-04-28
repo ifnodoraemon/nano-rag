@@ -47,11 +47,15 @@ class HybridRetriever:
         ).lower() in ("true", "1", "yes")
 
     @property
+    def _native_hybrid_available(self) -> bool:
+        return callable(getattr(self.repository, "native_hybrid_search", None))
+
+    @property
     def enabled(self) -> bool:
         return self._bm25_enabled
 
     def index_chunk(self, chunk: Chunk) -> None:
-        if not self._bm25_enabled:
+        if not self._bm25_enabled or self._native_hybrid_available:
             return
         with self._lock:
             self._chunk_cache[chunk.chunk_id] = chunk
@@ -62,7 +66,7 @@ class HybridRetriever:
             self.index_chunk(chunk)
 
     def remove_chunk(self, chunk_id: str) -> None:
-        if not self._bm25_enabled:
+        if not self._bm25_enabled or self._native_hybrid_available:
             return
         with self._lock:
             self._chunk_cache.pop(chunk_id, None)
@@ -71,7 +75,7 @@ class HybridRetriever:
     def remove_by_source(
         self, source_path: str, kb_id: str, tenant_id: str | None = None
     ) -> None:
-        if not self._bm25_enabled:
+        if not self._bm25_enabled or self._native_hybrid_available:
             return
         with self._lock:
             removable_ids = [
@@ -86,7 +90,11 @@ class HybridRetriever:
                 self.bm25_index.remove_document(chunk_id)
 
     def bootstrap_from_parsed_dir(self, parsed_dir: Path) -> int:
-        if not self._bm25_enabled or not parsed_dir.exists():
+        if (
+            not self._bm25_enabled
+            or self._native_hybrid_available
+            or not parsed_dir.exists()
+        ):
             return 0
         count = 0
         for artifact in parsed_dir.glob("*.json"):
@@ -133,6 +141,19 @@ class HybridRetriever:
         vectors = await self.embedding_client.embed_texts([query])
         if not vectors:
             return []
+        native_hybrid_search = getattr(self.repository, "native_hybrid_search", None)
+        if callable(native_hybrid_search):
+            return await asyncio.to_thread(
+                native_hybrid_search,
+                vectors[0],
+                query,
+                top_k,
+                kb_id=kb_id,
+                tenant_id=tenant_id,
+                metadata_filters=metadata_filters,
+                dense_weight=self.hybrid_config.vector_weight,
+                sparse_weight=self.hybrid_config.bm25_weight,
+            )
         vector_hits = await asyncio.to_thread(
             self.repository.search,
             vectors[0],

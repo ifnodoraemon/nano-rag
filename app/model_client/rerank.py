@@ -22,7 +22,7 @@ class RerankClient(GatewayClient):
         payload = {
             "model": self.alias,
             "query": query,
-            "documents": documents,
+            "documents": [{"text": document} for document in documents],
             "top_n": top_k,
         }
         data = await self.post("/rerank", payload)

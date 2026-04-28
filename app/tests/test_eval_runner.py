@@ -75,6 +75,48 @@ def test_ragas_runner_ignores_markdown_and_trailing_punctuation_noise() -> None:
     assert report["aggregate"]["answer_exact_match"] == 1.0
 
 
+def test_ragas_runner_formats_numeric_ragas_scores_only() -> None:
+    class FakeFrame:
+        def to_dict(self, orient: str) -> list[dict]:
+            assert orient == "records"
+            return [
+                {
+                    "user_input": "q1",
+                    "response": "a1",
+                    "faithfulness": 0.8751,
+                    "answer_relevancy": "0.5",
+                    "context_precision": None,
+                }
+            ]
+
+    class FakeResult:
+        def to_pandas(self) -> FakeFrame:
+            return FakeFrame()
+
+    runner = RagasRunner()
+    report = runner._format_result(  # noqa: SLF001
+        [
+            {
+                "sample_id": "sample-1",
+                "query": "q1",
+                "answer": "a1",
+                "reference_answer": "a1",
+                "reference_contexts": ["ctx"],
+                "retrieved_contexts": ["ctx"],
+            }
+        ],
+        FakeResult(),
+    )
+
+    row = report["results"][0]
+    assert row["faithfulness"] == 0.8751
+    assert row["answer_relevancy"] == 0.5
+    assert "context_precision" not in row
+    assert "user_input" not in row
+    assert report["aggregate"]["faithfulness"] == 0.8751
+    assert report["aggregate"]["answer_relevancy"] == 0.5
+
+
 @pytest.mark.asyncio
 async def test_materialize_eval_records_passes_business_context() -> None:
     trace_store = TraceStore()

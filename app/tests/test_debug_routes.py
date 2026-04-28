@@ -59,6 +59,36 @@ async def test_run_eval_rejects_dataset_outside_eval_dir() -> None:
 
 
 @pytest.mark.asyncio
+async def test_run_eval_uses_ragas_lib_when_requested(monkeypatch, tmp_path) -> None:
+    dataset_dir = tmp_path / "eval"
+    dataset_dir.mkdir()
+    dataset_path = dataset_dir / "sample.jsonl"
+    dataset_path.write_text(
+        '{"query":"q","answer":"a","retrieved_contexts":["ctx"]}\n',
+        encoding="utf-8",
+    )
+    output_dir = tmp_path / "reports"
+    monkeypatch.setenv("EVAL_DATASET_DIR", str(dataset_dir))
+    monkeypatch.setenv("EVAL_REPORT_DIR", str(output_dir))
+
+    class FakeRunner:
+        def run(self, records):  # noqa: ANN001
+            return {"mode": "sync", "records": len(records)}
+
+        async def run_async(self, records):  # noqa: ANN001
+            return {"mode": "ragas", "records": len(records)}
+
+    container = SimpleNamespace(ragas_runner=FakeRunner())
+
+    response = await run_eval(
+        EvalRunRequest(dataset_path=str(dataset_path), use_ragas_lib=True),
+        _request_with_container(container),
+    )
+
+    assert response.report["mode"] == "ragas"
+
+
+@pytest.mark.asyncio
 async def test_run_eval_returns_503_when_eval_disabled() -> None:
     container = SimpleNamespace(ragas_runner=None)
 

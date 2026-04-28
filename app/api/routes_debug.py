@@ -56,6 +56,20 @@ def _require_diagnosis_service(container) -> object:
     return service
 
 
+async def _run_eval_report(
+    ragas_runner: object, records: list[dict], use_ragas_lib: bool
+) -> dict:
+    if use_ragas_lib:
+        run_async = getattr(ragas_runner, "run_async", None)
+        if run_async is None:
+            raise HTTPException(
+                status_code=503,
+                detail="RAGAS library evaluation is not available in this runner.",
+            )
+        return await run_async(records)
+    return ragas_runner.run(records)
+
+
 @router.post(
     "/retrieve/debug",
     response_model=RetrievalDebugResponse,
@@ -165,7 +179,9 @@ async def run_eval(payload: EvalRunRequest, request: Request) -> EvalRunResponse
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     dataset = load_jsonl_dataset(str(dataset_path))
     evaluated_records = await materialize_eval_records(container, dataset)
-    report = ragas_runner.run(evaluated_records)
+    report = await _run_eval_report(
+        ragas_runner, evaluated_records, payload.use_ragas_lib
+    )
     output_path = payload.output_path
     if output_path:
         try:

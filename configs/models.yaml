@@ -1,25 +1,25 @@
 model_gateway:
-  base_url: ${MODEL_GATEWAY_BASE_URL:-https://generativelanguage.googleapis.com/v1beta/openai}
+  base_url: ${MODEL_GATEWAY_BASE_URL:-http://bifrost:8080/v1}
   api_key: ${MODEL_GATEWAY_API_KEY:-change-me}
 
 embedding:
-  default_alias: gemini-embedding-2-preview
+  default_alias: ${EMBEDDING_MODEL_ALIAS:-google/gemini-embedding-2-preview}
   dimension: 3072
   base_url: ${EMBEDDING_API_BASE_URL:-}
   api_key: ${EMBEDDING_API_KEY:-}
 
 rerank:
-  default_alias: ${RERANK_MODEL_ALIAS:-disabled}
+  default_alias: ${RERANK_MODEL_ALIAS:-cohere/rerank-v3.5}
   base_url: ${RERANK_API_BASE_URL:-}
   api_key: ${RERANK_API_KEY:-}
 
 generation:
-  default_alias: gemini-2.5-flash
+  default_alias: ${GENERATION_MODEL_ALIAS:-google/gemini-2.5-flash}
   base_url: ${GENERATION_API_BASE_URL:-}
   api_key: ${GENERATION_API_KEY:-}
 
 document_parser:
   enabled: ${DOCUMENT_PARSER_ENABLED:-true}
   default_alias: ${DOCUMENT_PARSER_MODEL:-gemini-2.5-flash}
-  base_url: ${DOCUMENT_PARSER_API_BASE_URL:-}
+  base_url: ${DOCUMENT_PARSER_API_BASE_URL:-http://bifrost:8080/genai}
   api_key: ${DOCUMENT_PARSER_API_KEY:-}

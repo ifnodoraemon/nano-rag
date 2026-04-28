@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import mimetypes
 import os
 from pathlib import Path
@@ -141,6 +142,46 @@ class DocumentParserClient:
         return text.strip()
 
     async def _upload_file(self, path: Path, mime_type: str) -> str:
+        if self._uses_multipart_upload():
+            return await self._upload_file_multipart(path, mime_type)
+        return await self._upload_file_resumable(path, mime_type)
+
+    def _uses_multipart_upload(self) -> bool:
+        raw = os.getenv("DOCUMENT_PARSER_UPLOAD_MODE")
+        if raw:
+            return raw.strip().lower() in {"bifrost", "multipart"}
+        return "/genai" in self.base_url
+
+    async def _upload_file_multipart(self, path: Path, mime_type: str) -> str:
+        client = self._get_client()
+        metadata = {"file": {"displayName": path.name}}
+        files = {
+            "metadata": (
+                None,
+                json.dumps(metadata, ensure_ascii=False),
+                "application/json",
+            ),
+            "file": (path.name, path.read_bytes(), mime_type),
+        }
+        headers = {"x-goog-api-key": self.api_key} if self.api_key else {}
+        try:
+            response = await client.post(
+                f"{self.base_url}/upload/v1beta/files",
+                headers=headers,
+                files=files,
+            )
+            response.raise_for_status()
+        except httpx.TimeoutException as exc:
+            raise ModelGatewayError("document parser timeout while uploading file") from exc
+        except httpx.HTTPStatusError as exc:
+            raise ModelGatewayError(
+                f"document parser upload failed: {exc.response.status_code} {exc.response.text.strip()}"
+            ) from exc
+        except httpx.HTTPError as exc:
+            raise ModelGatewayError(f"document parser upload connection failed: {exc}") from exc
+        return self._extract_file_uri(response.json(), path)
+
+    async def _upload_file_resumable(self, path: Path, mime_type: str) -> str:
         client = self._get_client()
         file_bytes = path.read_bytes()
         file_size = len(file_bytes)
@@ -187,7 +228,10 @@ class DocumentParserClient:
             ) from exc
         except httpx.HTTPError as exc:
             raise ModelGatewayError(f"document parser upload connection failed: {exc}") from exc
-        file_payload = finalize_response.json().get("file") or {}
+        return self._extract_file_uri(finalize_response.json(), path)
+
+    def _extract_file_uri(self, payload: dict, path: Path) -> str:
+        file_payload = payload.get("file") or {}
         file_uri = file_payload.get("uri")
         if not file_uri:
             raise ParsingError(f"document parser did not return a file URI for {path.name}")

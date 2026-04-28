@@ -30,6 +30,11 @@ def main() -> int:
     parser.add_argument(
         "--output", required=False, help="Path to output benchmark JSON."
     )
+    parser.add_argument(
+        "--ragas-lib",
+        action="store_true",
+        help="Use the RAGAS library metrics in addition to built-in deterministic metrics.",
+    )
     args = parser.parse_args()
 
     dataset_path = resolve_project_path(args.dataset)
@@ -43,7 +48,16 @@ def main() -> int:
     container = AppContainer.from_env()
     dataset = load_jsonl_dataset(str(dataset_path))
     evaluated_records = asyncio.run(materialize_eval_records(container, dataset))
-    eval_report = container.ragas_runner.run(evaluated_records)
+    runner = container.ragas_runner
+    if runner is None:
+        from app.eval.ragas_runner import RagasRunner
+
+        runner = RagasRunner(generation_client=container.generation_client)
+    eval_report = (
+        asyncio.run(runner.run_async(evaluated_records))
+        if args.ragas_lib
+        else runner.run(evaluated_records)
+    )
     benchmark_report = build_benchmark_report(
         dataset_path=str(dataset_path.relative_to(ROOT)),
         eval_report=eval_report,
