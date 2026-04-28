@@ -23,11 +23,13 @@ def test_business_auth_can_be_disabled_explicitly(monkeypatch) -> None:
     require_api_key(_request_with_keys(set()), authorization=None, x_api_key=None)
 
 
-def test_business_auth_accepts_bearer_token() -> None:
+def test_business_auth_accepts_bearer_token(monkeypatch) -> None:
+    monkeypatch.delenv("RAG_AUTH_DISABLED", raising=False)
     require_api_key(_request_with_keys({"secret-token"}), authorization="Bearer secret-token", x_api_key=None)
 
 
-def test_business_auth_rejects_invalid_token() -> None:
+def test_business_auth_rejects_invalid_token(monkeypatch) -> None:
+    monkeypatch.delenv("RAG_AUTH_DISABLED", raising=False)
     with pytest.raises(HTTPException) as exc_info:
         require_api_key(_request_with_keys({"secret-token"}), authorization="Bearer nope", x_api_key=None)
 
