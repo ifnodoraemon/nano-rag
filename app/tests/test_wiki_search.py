@@ -48,6 +48,61 @@ def _config(tmp_path) -> AppConfig:
     )
 
 
+def test_wiki_search_shared_scope_does_not_return_tenant_pages(tmp_path) -> None:
+    wiki_compiler = WikiCompiler(tmp_path / "wiki")
+    wiki_compiler.upsert_document(
+        Document(
+            doc_id="shared",
+            source_path="uploads/default/__shared__/policy.md",
+            title="Shared Policy",
+            content="# Policy\n\nShared vacation rules.",
+            metadata={"kb_id": "default", "tenant_id": None},
+        ),
+        [
+            Chunk(
+                chunk_id="shared:0",
+                doc_id="shared",
+                chunk_index=0,
+                text="Shared vacation rules.",
+                source_path="uploads/default/__shared__/policy.md",
+                metadata={"kb_id": "default", "tenant_id": None},
+            )
+        ],
+    )
+    wiki_compiler.upsert_document(
+        Document(
+            doc_id="tenant",
+            source_path="uploads/default/tenant-a/policy.md",
+            title="Tenant Policy",
+            content="# Policy\n\nTenant vacation rules.",
+            metadata={"kb_id": "default", "tenant_id": "tenant-a"},
+        ),
+        [
+            Chunk(
+                chunk_id="tenant:0",
+                doc_id="tenant",
+                chunk_index=0,
+                text="Tenant vacation rules.",
+                source_path="uploads/default/tenant-a/policy.md",
+                metadata={"kb_id": "default", "tenant_id": "tenant-a"},
+            )
+        ],
+    )
+    wiki_searcher = WikiSearcher(tmp_path / "wiki")
+
+    shared_hits = wiki_searcher.search("vacation", top_k=10, kb_id="default")
+    tenant_hits = wiki_searcher.search(
+        "vacation", top_k=10, kb_id="default", tenant_id="tenant-a"
+    )
+
+    assert shared_hits
+    assert tenant_hits
+    assert all(hit.chunk.metadata.get("tenant_id") is None for hit in shared_hits)
+    assert all(
+        hit.chunk.metadata.get("tenant_id") == "tenant-a" for hit in tenant_hits
+    )
+
+
 @pytest.mark.asyncio
 async def test_retrieval_pipeline_prefers_wiki_hits_before_raw_hits(tmp_path) -> None:
     wiki_compiler = WikiCompiler(tmp_path / "wiki")

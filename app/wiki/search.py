@@ -6,7 +6,7 @@ from pathlib import Path
 from app.retrieval.bm25 import BM25Index
 from app.retrieval.filters import match_metadata_filters
 from app.schemas.chunk import Chunk
-from app.vectorstore.repository import SearchHit
+from app.vectorstore.repository import SearchHit, _tenant_matches
 from app.wiki.compiler import WikiCompiler
 
 MAX_WIKI_CONTEXT_CHARS = 2200
@@ -61,7 +61,7 @@ class WikiSearcher:
             doc_id
             for doc_id, document in self.documents.items()
             if document.kb_id == kb_id
-            and (tenant_id is None or document.tenant_id == tenant_id)
+            and _tenant_matches(document.tenant_id, tenant_id)
             and match_metadata_filters(document.metadata, metadata_filters)
             and (
                 document.kind in {"topic", "source"}

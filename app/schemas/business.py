@@ -3,6 +3,7 @@ from typing import Literal
 from pydantic import BaseModel, Field, field_validator
 
 from app.schemas.chat import Citation
+from app.schemas.chat import normalize_optional_scope
 
 
 class BusinessChatRequest(BaseModel):
@@ -12,6 +13,11 @@ class BusinessChatRequest(BaseModel):
     session_id: str | None = Field(default=None, max_length=256)
     top_k: int | None = Field(default=None, ge=1, le=100)
     metadata_filters: dict[str, object] | None = None
+
+    @field_validator("tenant_id", "session_id", mode="before")
+    @classmethod
+    def blank_scope_values_are_none(cls, value: object) -> str | None:
+        return normalize_optional_scope(value)
 
 
 class BusinessChatResponse(BaseModel):
@@ -36,6 +42,11 @@ class BusinessIngestRequest(BaseModel):
         if not v:
             raise ValueError("path must not be empty")
         return v
+
+    @field_validator("tenant_id", mode="before")
+    @classmethod
+    def blank_tenant_is_none(cls, value: object) -> str | None:
+        return normalize_optional_scope(value)
 
 
 class BusinessIngestResponse(BaseModel):
@@ -87,6 +98,11 @@ class FeedbackRequest(BaseModel):
     session_id: str | None = Field(default=None, max_length=256)
     comment: str | None = Field(default=None, max_length=2000)
     tags: list[str] = Field(default_factory=list, max_length=20)
+
+    @field_validator("tenant_id", "session_id", mode="before")
+    @classmethod
+    def blank_scope_values_are_none(cls, value: object) -> str | None:
+        return normalize_optional_scope(value)
 
 
 class FeedbackResponse(BaseModel):

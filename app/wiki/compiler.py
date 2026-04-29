@@ -243,7 +243,10 @@ class WikiCompiler:
             existing.unlink(missing_ok=True)
 
         written_topics: list[dict[str, str]] = []
-        for (kb_id, tenant_id, topic_name), entries in sorted(grouped_topics.items()):
+        for (kb_id, tenant_id, topic_name), entries in sorted(
+            grouped_topics.items(),
+            key=lambda item: (item[0][0], item[0][1] or "", item[0][2]),
+        ):
             slug = self._topic_slug(kb_id, tenant_id, topic_name)
             summary = self._preview(
                 " ".join(entry["summary"] for entry in entries if entry["summary"]),

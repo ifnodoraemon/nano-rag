@@ -26,6 +26,12 @@ def _escape_milvus_string(value: str) -> str:
     return escaped
 
 
+def _tenant_matches(actual: object, wanted: str | None) -> bool:
+    actual_normalized = actual if actual not in ("", "null") else None
+    wanted_normalized = wanted if wanted not in ("", "null") else None
+    return actual_normalized == wanted_normalized
+
+
 @dataclass
 class SearchHit:
     chunk: Chunk
@@ -83,9 +89,7 @@ class InMemoryVectorRepository(VectorRepository):
                 for doc_id, document in self.documents.items()
                 if document.source_path == source_path
                 and document.metadata.get("kb_id", "default") == kb_id
-                and (
-                    tenant_id is None or document.metadata.get("tenant_id") == tenant_id
-                )
+                and _tenant_matches(document.metadata.get("tenant_id"), tenant_id)
             }
             if removed_doc_ids:
                 self.documents = {
@@ -99,10 +103,7 @@ class InMemoryVectorRepository(VectorRepository):
                 if not (
                     chunk.source_path == source_path
                     and chunk.metadata.get("kb_id", "default") == kb_id
-                    and (
-                        tenant_id is None
-                        or chunk.metadata.get("tenant_id") == tenant_id
-                    )
+                    and _tenant_matches(chunk.metadata.get("tenant_id"), tenant_id)
                 )
             ]
 
@@ -120,7 +121,7 @@ class InMemoryVectorRepository(VectorRepository):
             SearchHit(chunk=chunk, score=_cosine_similarity(vector, embedding))
             for chunk, embedding in entries_snapshot
             if chunk.metadata.get("kb_id", "default") == kb_id
-            and (tenant_id is None or chunk.metadata.get("tenant_id") == tenant_id)
+            and _tenant_matches(chunk.metadata.get("tenant_id"), tenant_id)
             and match_metadata_filters(chunk.metadata, metadata_filters)
         ]
         return sorted(scored, key=lambda item: item.score, reverse=True)[:top_k]
@@ -257,9 +258,8 @@ class MilvusVectorRepository(VectorRepository):
         escaped = _escape_milvus_string(source_path)
         escaped_kb_id = _escape_milvus_string(kb_id)
         base_filter = f'source == "{escaped}" and kb_id == "{escaped_kb_id}"'
-        if tenant_id is not None:
-            tenant = _escape_milvus_string(tenant_id)
-            base_filter += f' and tenant_id == "{tenant}"'
+        tenant = _escape_milvus_string(tenant_id or "")
+        base_filter += f' and tenant_id == "{tenant}"'
         self.client.delete(
             collection_name=CHUNKS_COLLECTION,
             filter=base_filter,
@@ -275,9 +275,8 @@ class MilvusVectorRepository(VectorRepository):
     ) -> list[SearchHit]:
         escaped_kb_id = _escape_milvus_string(kb_id)
         base_filter = f'kb_id == "{escaped_kb_id}"'
-        if tenant_id is not None:
-            tenant = _escape_milvus_string(tenant_id)
-            base_filter += f' and tenant_id == "{tenant}"'
+        tenant = _escape_milvus_string(tenant_id or "")
+        base_filter += f' and tenant_id == "{tenant}"'
         results = self.client.search(
             collection_name=CHUNKS_COLLECTION,
             data=[vector],
@@ -344,9 +343,8 @@ class MilvusVectorRepository(VectorRepository):
 
         escaped_kb_id = _escape_milvus_string(kb_id)
         base_filter = f'kb_id == "{escaped_kb_id}"'
-        if tenant_id is not None:
-            tenant = _escape_milvus_string(tenant_id)
-            base_filter += f' and tenant_id == "{tenant}"'
+        tenant = _escape_milvus_string(tenant_id or "")
+        base_filter += f' and tenant_id == "{tenant}"'
         request_limit = max(top_k * 4, 20)
         dense_req = AnnSearchRequest(
             data=[vector],

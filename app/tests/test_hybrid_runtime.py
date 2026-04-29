@@ -387,6 +387,44 @@ async def test_ingestion_pipeline_routes_image_audio_video_modalities(
 
 
 @pytest.mark.asyncio
+async def test_uploaded_media_chunks_point_to_persistent_upload_uri(
+    monkeypatch, tmp_path
+) -> None:
+    monkeypatch.setenv("PARSED_OUTPUT_DIR", str(tmp_path / "parsed"))
+    upload_dir = tmp_path / "uploads"
+    image_path = tmp_path / "batch" / "logo.png"
+    image_path.parent.mkdir()
+    image_path.write_bytes(b"\x89PNGfake")
+    monkeypatch.setattr("app.ingestion.pipeline.discover_files", lambda path: [image_path])
+
+    repository = InMemoryVectorRepository()
+    config = AppConfig(
+        config_dir=tmp_path,
+        settings={"chunk": {"size": 200, "overlap": 20}},
+        models={"model_gateway": {"base_url": "", "api_key": ""}},
+        prompts={},
+    )
+    monkeypatch.setenv("UPLOAD_OUTPUT_DIR", str(upload_dir))
+    pipeline = IngestionPipeline(
+        config=config,
+        repository=repository,
+        embedding_client=FakeEmbeddingClient(),
+        tracing_manager=TracingManager("test-service", ""),
+    )
+    stable_source = "uploads/default/__shared__/logo.png"
+
+    await pipeline.run(
+        str(image_path.parent),
+        kb_id="default",
+        source_path_overrides={str(image_path.resolve()): stable_source},
+    )
+
+    chunk = repository.entries[0][0]
+    assert chunk.source_path == stable_source
+    assert chunk.media_uri == str(upload_dir / "default" / "__shared__" / "logo.png")
+
+
+@pytest.mark.asyncio
 async def test_ingestion_pipeline_does_not_write_parsed_artifact_when_embeddings_fail(
     monkeypatch, tmp_path
 ) -> None:

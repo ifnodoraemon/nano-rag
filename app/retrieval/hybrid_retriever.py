@@ -15,7 +15,7 @@ from app.retrieval.hybrid_fusion import (
     reciprocal_rank_fusion,
 )
 from app.schemas.chunk import Chunk
-from app.vectorstore.repository import SearchHit, VectorRepository
+from app.vectorstore.repository import SearchHit, VectorRepository, _tenant_matches
 
 if TYPE_CHECKING:
     from app.model_client.embeddings import EmbeddingClient
@@ -87,7 +87,7 @@ class HybridRetriever:
                 for chunk_id, chunk in self._chunk_cache.items()
                 if chunk.source_path == source_path
                 and chunk.metadata.get("kb_id", "default") == kb_id
-                and (tenant_id is None or chunk.metadata.get("tenant_id") == tenant_id)
+                and _tenant_matches(chunk.metadata.get("tenant_id"), tenant_id)
             ]
             for chunk_id in removable_ids:
                 self._chunk_cache.pop(chunk_id, None)
@@ -173,7 +173,7 @@ class HybridRetriever:
             chunk_id
             for chunk_id, chunk in chunk_cache_snapshot.items()
             if chunk.metadata.get("kb_id", "default") == kb_id
-            and (tenant_id is None or chunk.metadata.get("tenant_id") == tenant_id)
+            and _tenant_matches(chunk.metadata.get("tenant_id"), tenant_id)
             and match_metadata_filters(chunk.metadata, metadata_filters)
         }
         bm25_results = self.bm25_index.search(

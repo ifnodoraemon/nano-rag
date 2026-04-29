@@ -58,6 +58,7 @@ services:
       - ../data/eval:/workspace/data/eval:ro
       - app-parsed-data:/workspace/data/parsed
       - app-report-data:/workspace/data/reports
+      - app-upload-data:/workspace/data/uploads
     depends_on:
       milvus:
         condition: service_healthy
@@ -287,6 +288,7 @@ services:
 volumes:
   app-parsed-data:
   app-report-data:
+  app-upload-data:
   etcd-data:
   minio-data:
   milvus-data:

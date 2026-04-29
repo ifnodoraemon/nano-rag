@@ -10,6 +10,7 @@ from app.api.routes_business import (
     BenchmarkRunRequest,
     BusinessChatRequest,
     BusinessIngestRequest,
+    _build_upload_source_path,
     rag_documents,
     FeedbackRequest,
     rag_benchmark,
@@ -89,6 +90,18 @@ async def test_business_chat_passes_metadata_filters() -> None:
     assert response.trace_id == "trace-1"
 
 
+def test_business_requests_normalize_blank_shared_scope() -> None:
+    chat = BusinessChatRequest(query="q1", tenant_id="", session_id="null")
+    ingest = BusinessIngestRequest(path="./data/raw", tenant_id="__shared__")
+    feedback = FeedbackRequest(trace_id="t1", rating="up", tenant_id="", session_id="")
+
+    assert chat.tenant_id is None
+    assert chat.session_id is None
+    assert ingest.tenant_id is None
+    assert feedback.tenant_id is None
+    assert feedback.session_id is None
+
+
 @pytest.mark.asyncio
 async def test_business_ingest_wraps_ingest_response() -> None:
     async def fake_ingest_run(  # noqa: ANN001
@@ -152,7 +165,41 @@ async def test_business_ingest_upload_wraps_ingest_response(tmp_path) -> None:
     assert next(iter(source_path_overrides.values())) == (
         "uploads/default/tenant-a/policy.md"
     )
-    assert not any(tmp_path.iterdir())
+    durable_upload = tmp_path / "default" / "tenant-a" / "policy.md"
+    assert durable_upload.read_bytes() == b"# Policy\nBody"
+    assert sorted(path.name for path in tmp_path.iterdir()) == ["default"]
+
+
+@pytest.mark.asyncio
+async def test_business_ingest_upload_treats_blank_tenant_as_shared(tmp_path) -> None:
+    captured: dict[str, object] = {}
+
+    async def fake_ingest_run(  # noqa: ANN001
+        path, kb_id="default", tenant_id=None, source_path_overrides=None
+    ):
+        captured["tenant_id"] = tenant_id
+        captured["source_path_overrides"] = source_path_overrides
+        return SimpleNamespace(documents=1, chunks=1)
+
+    container = SimpleNamespace(
+        ingestion_pipeline=SimpleNamespace(run=fake_ingest_run),
+        config=SimpleNamespace(upload_dir=tmp_path),
+    )
+    upload = UploadFile(filename="policy.md", file=BytesIO(b"body"))
+
+    await rag_ingest_upload(
+        _request_with_container(container),
+        files=[upload],
+        kb_id="default",
+        tenant_id="",
+    )
+
+    assert captured["tenant_id"] is None
+    source_path_overrides = captured["source_path_overrides"]
+    assert isinstance(source_path_overrides, dict)
+    assert next(iter(source_path_overrides.values())) == (
+        "uploads/default/__shared__/policy.md"
+    )
 
 
 @pytest.mark.asyncio
@@ -173,6 +220,12 @@ async def test_business_ingest_upload_rejects_unsupported_extension(tmp_path) ->
 
     assert exc_info.value.status_code == 400
     assert not any(tmp_path.iterdir())
+
+
+def test_upload_source_path_sanitizes_scope_components() -> None:
+    assert _build_upload_source_path("政策 文档.pdf", "default", "../tenant/a") == (
+        "uploads/default/tenant_a/政策_文档.pdf"
+    )
 
 
 @pytest.mark.asyncio

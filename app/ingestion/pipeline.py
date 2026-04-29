@@ -322,6 +322,7 @@ class IngestionPipeline:
             "doc_type": modality,
             "modality": modality,
             "mime_type": mime_type,
+            "media_uri": self._media_uri_for_source(file_path, source_path),
             "source_key": title.lower(),
             "headings": [],
             "section_count": 0,
@@ -345,10 +346,10 @@ class IngestionPipeline:
                 "tenant_id": tenant_id,
                 "modality": modality,
                 "mime_type": mime_type,
-                "media_uri": source_path,
+                "media_uri": document_metadata["media_uri"],
             },
             modality=modality,
-            media_uri=source_path,
+            media_uri=str(document_metadata["media_uri"]),
             mime_type=mime_type,
         )
         try:
@@ -475,6 +476,12 @@ class IngestionPipeline:
             return str(resolved.relative_to(project_root))
         except ValueError:
             return str(resolved)
+
+    def _media_uri_for_source(self, file_path: Path, source_path: str) -> str:
+        source = Path(source_path)
+        if source.parts and source.parts[0] == "uploads":
+            return str(self.config.upload_dir.joinpath(*source.parts[1:]))
+        return str(file_path.resolve())
 
     def _stable_doc_id(
         self, source_path: str, kb_id: str, tenant_id: str | None = None

@@ -89,6 +89,48 @@ def test_in_memory_repository_search_is_scoped_by_kb_and_tenant() -> None:
     assert hits[0].chunk.chunk_id == "doc-1:0"
 
 
+def test_in_memory_repository_shared_scope_does_not_return_tenant_chunks() -> None:
+    repository = InMemoryVectorRepository()
+    repository.upsert(
+        Document(doc_id="shared", source_path="uploads/default/__shared__/a.md", title="A", content="shared", metadata={"kb_id": "default", "tenant_id": None}),
+        [
+            Chunk(
+                chunk_id="shared:0",
+                doc_id="shared",
+                chunk_index=0,
+                text="shared policy",
+                source_path="uploads/default/__shared__/a.md",
+                title="A",
+                metadata={"kb_id": "default", "tenant_id": None},
+            )
+        ],
+        [[1.0, 0.0]],
+    )
+    repository.upsert(
+        Document(doc_id="tenant", source_path="uploads/default/tenant-a/a.md", title="A", content="tenant", metadata={"kb_id": "default", "tenant_id": "tenant-a"}),
+        [
+            Chunk(
+                chunk_id="tenant:0",
+                doc_id="tenant",
+                chunk_index=0,
+                text="tenant policy",
+                source_path="uploads/default/tenant-a/a.md",
+                title="A",
+                metadata={"kb_id": "default", "tenant_id": "tenant-a"},
+            )
+        ],
+        [[1.0, 0.0]],
+    )
+
+    shared_hits = repository.search([1.0, 0.0], top_k=5, kb_id="default")
+    tenant_hits = repository.search(
+        [1.0, 0.0], top_k=5, kb_id="default", tenant_id="tenant-a"
+    )
+
+    assert [hit.chunk.chunk_id for hit in shared_hits] == ["shared:0"]
+    assert [hit.chunk.chunk_id for hit in tenant_hits] == ["tenant:0"]
+
+
 def test_in_memory_repository_search_supports_metadata_filters() -> None:
     repository = InMemoryVectorRepository()
     source_path = "data/raw/employee_handbook.md"
@@ -295,3 +337,4 @@ def test_milvus_repository_search_specifies_dense_vector_field(monkeypatch) -> N
 
     assert hits[0].chunk.chunk_id == "doc-1:0"
     assert fake_client.search_kwargs["anns_field"] == "vector"
+    assert 'tenant_id == ""' in fake_client.search_kwargs["filter"]

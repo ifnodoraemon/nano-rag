@@ -1,6 +1,15 @@
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
+
+
+def normalize_optional_scope(value: object) -> str | None:
+    if value is None:
+        return None
+    normalized = str(value).strip()
+    if not normalized or normalized.lower() in {"null", "none", "__shared__"}:
+        return None
+    return normalized
 
 
 class ChatRequest(BaseModel):
@@ -11,6 +20,11 @@ class ChatRequest(BaseModel):
     session_id: str | None = None
     sample_id: str | None = None
     metadata_filters: dict[str, object] | None = None
+
+    @field_validator("tenant_id", "session_id", mode="before")
+    @classmethod
+    def blank_scope_values_are_none(cls, value: object) -> str | None:
+        return normalize_optional_scope(value)
 
 
 class Citation(BaseModel):

@@ -5,6 +5,8 @@ import pytest
 from app.retrieval.hybrid_retriever import HybridRetriever
 from app.retrieval.bm25 import BM25Index
 from app.schemas.chunk import Chunk
+from app.schemas.document import Document
+from app.vectorstore.repository import InMemoryVectorRepository
 from app.vectorstore.repository import SearchHit
 
 
@@ -138,3 +140,50 @@ async def test_hybrid_retriever_uses_native_repository_hybrid(monkeypatch) -> No
     assert repository.called_with["query"] == "policy query"
     assert repository.called_with["kb_id"] == "kb-a"
     assert repository.called_with["tenant_id"] == "tenant-a"
+
+
+@pytest.mark.asyncio
+async def test_hybrid_retriever_shared_scope_does_not_return_tenant_bm25_hits(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("RAG_HYBRID_SEARCH_ENABLED", "true")
+    repository = InMemoryVectorRepository()
+    shared_chunk = Chunk(
+        chunk_id="shared:0",
+        doc_id="shared",
+        chunk_index=0,
+        text="policy alpha",
+        source_path="uploads/default/__shared__/a.md",
+        metadata={"kb_id": "default", "tenant_id": None},
+    )
+    tenant_chunk = Chunk(
+        chunk_id="tenant:0",
+        doc_id="tenant",
+        chunk_index=0,
+        text="policy alpha",
+        source_path="uploads/default/tenant-a/a.md",
+        metadata={"kb_id": "default", "tenant_id": "tenant-a"},
+    )
+    repository.upsert(
+        Document(doc_id="shared", source_path=shared_chunk.source_path, title="A", content="", metadata={"kb_id": "default", "tenant_id": None}),
+        [shared_chunk],
+        [[1.0, 0.0]],
+    )
+    repository.upsert(
+        Document(doc_id="tenant", source_path=tenant_chunk.source_path, title="A", content="", metadata={"kb_id": "default", "tenant_id": "tenant-a"}),
+        [tenant_chunk],
+        [[1.0, 0.0]],
+    )
+    retriever = HybridRetriever(
+        repository=repository,
+        embedding_client=FakeEmbeddingClient(),
+    )
+    retriever.index_chunks([shared_chunk, tenant_chunk])
+
+    shared_hits = await retriever.retrieve("policy", top_k=5, kb_id="default")
+    tenant_hits = await retriever.retrieve(
+        "policy", top_k=5, kb_id="default", tenant_id="tenant-a"
+    )
+
+    assert [hit.chunk.chunk_id for hit in shared_hits] == ["shared:0"]
+    assert [hit.chunk.chunk_id for hit in tenant_hits] == ["tenant:0"]

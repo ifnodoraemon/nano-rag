@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 from pathlib import Path
 from time import time
@@ -25,6 +26,7 @@ from app.schemas.business import (
     WorkspaceSummary,
 )
 from app.schemas.chat import ChatRequest
+from app.schemas.chat import normalize_optional_scope
 from app.schemas.trace import TraceRecord
 from app.eval.dataset import (
     get_benchmark_report_dir,
@@ -41,13 +43,43 @@ router = APIRouter(prefix="/v1/rag", tags=["rag"])
 MAX_UPLOAD_BYTES = int(os.getenv("MAX_UPLOAD_BYTES", str(50 * 1024 * 1024)))
 MAX_FILES_PER_BATCH = int(os.getenv("MAX_FILES_PER_BATCH", "10"))
 UPLOAD_CHUNK_BYTES = 1024 * 1024
+SAFE_PATH_COMPONENT_RE = re.compile(r"[^\w.-]+", re.UNICODE)
+
+
+def _safe_path_component(value: str | None, default: str) -> str:
+    raw = str(value or "").strip()
+    safe = SAFE_PATH_COMPONENT_RE.sub("_", raw).strip("._-")
+    if not safe or safe in {".", ".."}:
+        return default
+    return safe[:160]
+
+
+def _safe_upload_filename(original_name: str) -> str:
+    return _safe_path_component(Path(original_name or "upload.txt").name, "upload.txt")
+
+
+def _upload_tenant_scope(tenant_id: str | None = None) -> str:
+    if tenant_id is None:
+        return "__shared__"
+    return _safe_path_component(tenant_id, "__shared__")
 
 
 def _build_upload_source_path(
     original_name: str, kb_id: str, tenant_id: str | None = None
 ) -> str:
-    tenant_scope = tenant_id or "__shared__"
-    return (Path("uploads") / kb_id / tenant_scope / original_name).as_posix()
+    return (
+        Path("uploads")
+        / _safe_path_component(kb_id, "default")
+        / _upload_tenant_scope(tenant_id)
+        / _safe_upload_filename(original_name)
+    ).as_posix()
+
+
+def _upload_storage_path(upload_dir: Path, source_path: str) -> Path:
+    path = Path(source_path)
+    if not path.parts or path.parts[0] != "uploads":
+        raise ValueError(f"upload source path must start with uploads/: {source_path}")
+    return upload_dir.joinpath(*path.parts[1:])
 
 
 def _get_supported_kb_ids() -> set[str]:
@@ -334,6 +366,7 @@ async def rag_ingest_upload(
     kb_id: str = Form(default="default"),
     tenant_id: str | None = Form(default=None),
 ) -> BusinessIngestResponse:
+    tenant_id = normalize_optional_scope(tenant_id)
     _ensure_supported_kb_id(kb_id)
     if not files:
         raise HTTPException(status_code=400, detail="at least one file is required")
@@ -349,7 +382,9 @@ async def rag_ingest_upload(
 
     uploaded_files: list[str] = []
     source_path_overrides: dict[str, str] = {}
+    durable_uploads: list[tuple[Path, Path]] = []
     seen_upload_names: set[str] = set()
+    seen_source_paths: set[str] = set()
     try:
         for upload in files:
             original_name = Path(upload.filename or "upload.txt").name
@@ -367,6 +402,13 @@ async def rag_ingest_upload(
                     detail=f"unsupported file type '{extension or 'unknown'}'. Supported types: {allowed}",
                 )
             target = upload_batch_dir / f"{uuid4().hex[:8]}_{original_name}"
+            source_path = _build_upload_source_path(original_name, kb_id, tenant_id)
+            if source_path in seen_source_paths:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"duplicate upload source path '{source_path}' in the same request",
+                )
+            seen_source_paths.add(source_path)
             total_bytes = 0
             with target.open("wb") as output:
                 while True:
@@ -381,8 +423,9 @@ async def rag_ingest_upload(
                         )
                     output.write(chunk)
             uploaded_files.append(original_name)
-            source_path_overrides[str(target.resolve())] = _build_upload_source_path(
-                original_name, kb_id, tenant_id
+            source_path_overrides[str(target.resolve())] = source_path
+            durable_uploads.append(
+                (target, _upload_storage_path(container.config.upload_dir, source_path))
             )
 
         response = await container.ingestion_pipeline.run(
@@ -391,6 +434,13 @@ async def rag_ingest_upload(
             tenant_id=tenant_id,
             source_path_overrides=source_path_overrides,
         )
+        for temporary_path, durable_path in durable_uploads:
+            durable_path.parent.mkdir(parents=True, exist_ok=True)
+            pending_path = durable_path.with_name(
+                f".{durable_path.name}.{uuid4().hex[:8]}.tmp"
+            )
+            shutil.copy2(temporary_path, pending_path)
+            pending_path.replace(durable_path)
         return BusinessIngestResponse(
             status="ok",
             kb_id=kb_id,
