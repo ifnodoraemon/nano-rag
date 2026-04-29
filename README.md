@@ -2,6 +2,31 @@
 
 Nano RAG 是一个真实数据优先的企业 RAG 工作台。后端负责文档注入、解析、分块、向量索引、检索、生成、追踪、评测和诊断；前端只展示后端已经支持的能力，不保存业务密钥，不内置 mock 数据，也不通过写死选项伪造状态。
 
+![Nano RAG 运营台](./nanorag.png)
+
+## 快速开始
+
+```bash
+docker compose -f docker/docker-compose.yml up -d --build
+```
+
+访问地址：
+
+- 前端：`http://127.0.0.1:3000`
+- Langfuse：`http://127.0.0.1:3001`
+- 后端：`http://127.0.0.1:8000`
+- Milvus：`http://127.0.0.1:19530`
+
+浏览器端不需要配置 API key。前端 nginx 会为代理到后端的请求注入本地业务 key：`X-API-Key: nano-rag-local`。
+
+启动后优先检查真实运行状态：
+
+```bash
+curl -sS http://127.0.0.1:3000/health/detail
+curl -sS http://127.0.0.1:3000/v1/rag/workspaces
+curl -sS http://127.0.0.1:3000/v1/rag/ingest/sources
+```
+
 ## 项目理念
 
 Nano RAG 的核心原则是：**真实输入、真实索引、真实模型、真实错误**。
@@ -36,20 +61,7 @@ nano-rag/
 └─ scripts/          # eval/benchmark 等脚本
 ```
 
-## Docker 启动
-
-本项目当前以 Docker Compose 作为标准启动方式：
-
-```bash
-docker compose -f docker/docker-compose.yml up -d --build
-```
-
-访问地址：
-
-- 前端：`http://127.0.0.1:3000`
-- Langfuse：`http://127.0.0.1:3001`
-- 后端：`http://127.0.0.1:8000`
-- Milvus：`http://127.0.0.1:19530`
+## Docker 配置
 
 本地 Langfuse 初始化账号：
 
@@ -75,8 +87,6 @@ DOCUMENT_PARSER_ENABLED=true
 LANGFUSE_UI_ENDPOINT=http://langfuse-web:3000
 LANGFUSE_OTEL_ENDPOINT=http://langfuse-web:3000/api/public/otel/v1/traces
 ```
-
-前端 nginx 会为代理到后端的请求注入 `X-API-Key: nano-rag-local`。浏览器端不需要，也不应该配置 API key。
 
 后端启动时会检查 generation、embedding、document parser、Langfuse OTEL 等关键配置。缺少 `DOCUMENT_PARSER_API_KEY` 这类真实 provider 配置时，容器日志会输出 `Startup readiness` 警告，`/health/detail` 会继续显示对应能力不可用；前端只消费这些后端状态，不负责提示 Docker 配置方式。
 
@@ -221,9 +231,9 @@ curl -sS -X POST http://127.0.0.1:3000/retrieve/debug \
 
 ## 关键配置
 
-- [configs/settings.yaml](/home/ifnodoraemon/myagent/nano-rag/configs/settings.yaml)：chunk、retrieval、hybrid search、timeout
-- [configs/models.yaml](/home/ifnodoraemon/myagent/nano-rag/configs/models.yaml)：各能力的 base_url、api_key 和模型 alias
-- [configs/prompts.yaml](/home/ifnodoraemon/myagent/nano-rag/configs/prompts.yaml)：生成提示词
+- [configs/settings.yaml](./configs/settings.yaml)：chunk、retrieval、hybrid search、timeout
+- [configs/models.yaml](./configs/models.yaml)：各能力的 base_url、api_key 和模型 alias
+- [configs/prompts.yaml](./configs/prompts.yaml)：生成提示词
 
 注意：
 
