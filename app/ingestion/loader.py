@@ -64,6 +64,37 @@ class IngestPathError(RuntimeError):
     pass
 
 
+def list_allowed_ingest_sources() -> list[dict[str, object]]:
+    sources: list[dict[str, object]] = []
+    seen: set[str] = set()
+    for allowed_dir in _get_allowed_dirs():
+        if not allowed_dir.exists():
+            continue
+        candidates = [allowed_dir] if allowed_dir.is_file() else sorted(allowed_dir.rglob("*"))
+        for path in candidates:
+            if (
+                not path.is_file()
+                or path.suffix.lower() not in SUPPORTED_EXTENSIONS
+                or not _is_path_allowed(path)
+            ):
+                continue
+            resolved = str(path.resolve())
+            if resolved in seen:
+                continue
+            seen.add(resolved)
+            stat = path.stat()
+            sources.append(
+                {
+                    "path": resolved,
+                    "name": path.name,
+                    "extension": path.suffix.lower(),
+                    "size_bytes": stat.st_size,
+                    "updated_at": stat.st_mtime,
+                }
+            )
+    return sources
+
+
 def discover_files(root: str) -> list[Path]:
     base = Path(root).resolve()
     if not _is_path_allowed(base):

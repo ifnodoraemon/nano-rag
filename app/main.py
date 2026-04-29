@@ -1,5 +1,6 @@
 from contextlib import asynccontextmanager
 
+import logging
 import os
 from pathlib import Path
 
@@ -17,6 +18,8 @@ from app.api.routes_debug import router as debug_router
 from app.core.config import AppContainer
 from app.core.exceptions import ConfigurationError, ModelGatewayError, ParsingError
 from app.core.logging import configure_logging
+
+logger = logging.getLogger(__name__)
 
 
 class SecurityHeadersMiddleware(BaseHTTPMiddleware):
@@ -42,6 +45,7 @@ FRONTEND_DIST = Path(
 async def lifespan(app: FastAPI):
     configure_logging()
     app.state.container = AppContainer.from_env()
+    _log_startup_readiness(app.state.container.config)
     yield
     await app.state.container.close()
 
@@ -61,6 +65,35 @@ app.add_middleware(SecurityHeadersMiddleware)
 
 app.include_router(debug_router)
 app.include_router(business_router)
+
+
+def _log_startup_readiness(config) -> None:  # noqa: ANN001
+    document_parser = config.document_parser_configured
+    if document_parser["enabled"] and not document_parser["configured"]:
+        logger.warning(
+            "Startup readiness: document parser is not configured. provider=%s model=%s missing=%s",
+            document_parser.get("provider"),
+            document_parser.get("model"),
+            ", ".join(document_parser.get("missing", [])),
+        )
+
+    capabilities = ["generation", "embedding"]
+    if config.rerank_enabled:
+        capabilities.append("rerank")
+    for capability in capabilities:
+        try:
+            config.gateway_for(capability)
+        except ConfigurationError as exc:
+            logger.warning(
+                "Startup readiness: %s provider is not configured. %s",
+                capability,
+                exc,
+            )
+
+    if config.langfuse_otel_endpoint and not config.langfuse_otel_headers:
+        logger.warning(
+            "Startup readiness: Langfuse OTEL endpoint is configured but credentials are missing."
+        )
 
 if FRONTEND_DIST.exists():
     app.mount("/assets", StaticFiles(directory=FRONTEND_DIST / "assets"), name="assets")
@@ -111,6 +144,87 @@ async def _probe_gateway(
         return False, detail
 
 
+async def _probe_embedding_gateway(config, gateway: dict[str, str]) -> tuple[bool, str | None]:  # noqa: ANN001
+    provider = (
+        os.getenv("EMBEDDING_PROVIDER")
+        or getattr(config, "models", {}).get("embedding", {}).get("provider")
+        or "gemini"
+    ).lower()
+    if provider != "gemini":
+        return await _probe_gateway(
+            gateway["base_url"],
+            gateway["api_key"],
+            config.gateway_models_probe_paths,
+        )
+
+    alias = (
+        os.getenv("EMBEDDING_MODEL_ALIAS")
+        or getattr(config, "models", {}).get("embedding", {}).get("default_alias")
+        or "gemini-embedding-2-preview"
+    )
+    base_url = gateway["base_url"].rstrip("/")
+    for suffix in ("/v1beta/openai", "/v1/openai", "/openai", "/v1beta", "/v1"):
+        if base_url.endswith(suffix):
+            base_url = base_url[: -len(suffix)]
+            break
+    url = f"{base_url}/v1beta/models/{alias}"
+    try:
+        async with httpx.AsyncClient(timeout=5) as client:
+            response = await client.get(url, headers={"x-goog-api-key": gateway["api_key"]})
+            if 200 <= response.status_code < 400:
+                return True, None
+            return False, f"{response.status_code} {response.text.strip()}"
+    except httpx.HTTPError as exc:
+        detail = str(exc).strip() or exc.__class__.__name__
+        return False, detail
+
+
+def _append_path(base_url: str, path: str) -> str:
+    return f"{base_url.rstrip('/')}/{path.lstrip('/')}"
+
+
+async def _probe_langfuse(
+    ui_endpoint: str,
+    otel_endpoint: str,
+    otel_headers: dict[str, str],
+) -> dict[str, object]:
+    ui_ok = False
+    ui_error: str | None = None
+    otel_ok = False
+    otel_error: str | None = None
+
+    try:
+        async with httpx.AsyncClient(timeout=5) as client:
+            if ui_endpoint:
+                response = await client.get(_append_path(ui_endpoint, "/api/public/health"))
+                ui_ok = response.status_code < 500
+                if not ui_ok:
+                    ui_error = f"HTTP {response.status_code} {response.text.strip()}"
+            if otel_endpoint:
+                response = await client.post(
+                    otel_endpoint,
+                    headers=otel_headers,
+                    json={},
+                )
+                otel_ok = 200 <= response.status_code < 400
+                if not otel_ok:
+                    otel_error = f"HTTP {response.status_code} {response.text.strip()}"
+    except httpx.HTTPError as exc:
+        detail = str(exc).strip() or exc.__class__.__name__
+        if ui_endpoint and not ui_ok:
+            ui_error = detail
+        if otel_endpoint and not otel_ok:
+            otel_error = detail
+
+    errors = "; ".join(error for error in (ui_error, otel_error) if error)
+    return {
+        "ui_reachable": ui_ok,
+        "otel_reachable": otel_ok,
+        "reachable": (not ui_endpoint or ui_ok) and (not otel_endpoint or otel_ok),
+        "error": errors or None,
+    }
+
+
 @app.exception_handler(ModelGatewayError)
 async def handle_model_gateway_error(
     _: Request, exc: ModelGatewayError
@@ -155,58 +269,55 @@ async def health_detail(request: Request) -> dict[str, object]:
     config = container.config
     auth_state = _auth_state(config)
     capability_gateways: dict[str, dict[str, object]] = {}
-    phoenix_ok = False
-    phoenix_error: str | None = None
-    phoenix_enabled = bool(config.phoenix_ui_endpoint)
+    langfuse_enabled = bool(config.langfuse_ui_endpoint or config.langfuse_otel_endpoint)
+    langfuse_status: dict[str, object] = {
+        "ui_reachable": False,
+        "otel_reachable": False,
+        "reachable": False,
+        "error": None,
+    }
+    document_parser = config.document_parser_configured
 
     required_capabilities = ["generation", "embedding"]
     if config.rerank_enabled:
         required_capabilities.append("rerank")
 
     gateway_ok = True
-    if config.gateway_mode == "mock":
-        for capability in required_capabilities:
+    for capability in required_capabilities:
+        try:
+            gateway = config.gateway_for(capability)
+        except ConfigurationError as exc:
             capability_gateways[capability] = {
-                "base_url": config.gateway_base_url,
-                "reachable": True,
-                "error": None,
+                "base_url": None,
+                "reachable": False,
+                "error": str(exc),
             }
-    else:
-        for capability in required_capabilities:
-            try:
-                gateway = config.gateway_for(capability)
-            except ConfigurationError as exc:
-                capability_gateways[capability] = {
-                    "base_url": None,
-                    "reachable": False,
-                    "error": str(exc),
-                }
-                gateway_ok = False
-                continue
+            gateway_ok = False
+            continue
+        if capability == "embedding":
+            reachable, error = await _probe_embedding_gateway(config, gateway)
+        else:
             reachable, error = await _probe_gateway(
                 gateway["base_url"],
                 gateway["api_key"],
                 config.gateway_models_probe_paths,
             )
-            capability_gateways[capability] = {
-                "base_url": gateway["base_url"],
-                "reachable": reachable,
-                "error": error,
-            }
-            gateway_ok = gateway_ok and reachable
+        capability_gateways[capability] = {
+            "base_url": gateway["base_url"],
+            "reachable": reachable,
+            "error": error,
+        }
+        gateway_ok = gateway_ok and reachable
 
-    if phoenix_enabled:
-        try:
-            async with httpx.AsyncClient(timeout=5) as client:
-                headers = {}
-                if config.phoenix_ui_host_header:
-                    headers["Host"] = config.phoenix_ui_host_header
-                response = await client.get(
-                    config.phoenix_ui_endpoint, headers=headers
-                )
-                phoenix_ok = response.status_code < 500
-        except httpx.HTTPError as exc:
-            phoenix_error = str(exc)
+    if document_parser["enabled"] and not document_parser["configured"]:
+        gateway_ok = False
+
+    if langfuse_enabled:
+        langfuse_status = await _probe_langfuse(
+            config.langfuse_ui_endpoint,
+            config.langfuse_otel_endpoint,
+            getattr(config, "langfuse_otel_headers", {}),
+        )
 
     vectorstore_status = "ok"
     vectorstore_error: str | None = None
@@ -249,12 +360,14 @@ async def health_detail(request: Request) -> dict[str, object]:
             ),
             "capabilities": capability_gateways,
         },
-        "phoenix": {
-            "enabled": phoenix_enabled,
-            "collector_endpoint": config.phoenix_collector_endpoint or None,
-            "ui_endpoint": config.phoenix_ui_endpoint or None,
-            "reachable": phoenix_ok,
-            "error": phoenix_error,
+        "providers": {
+            "document_parser": document_parser,
+        },
+        "langfuse": {
+            "enabled": langfuse_enabled,
+            "otel_endpoint": config.langfuse_otel_endpoint or None,
+            "ui_endpoint": config.langfuse_ui_endpoint or None,
+            **langfuse_status,
         },
         "vectorstore": {
             "status": vectorstore_status,

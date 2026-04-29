@@ -234,3 +234,64 @@ def test_milvus_repository_new_collection_includes_native_hybrid_schema(monkeypa
         index for index in fake_client.index_params.indexes if index["field_name"] == "sparse"
     )
     assert sparse_index["metric_type"] == "BM25"
+
+
+def test_milvus_repository_search_specifies_dense_vector_field(monkeypatch) -> None:
+    import types
+
+    fake_pymilvus = types.ModuleType("pymilvus")
+    fake_pymilvus.DataType = type(
+        "DataType",
+        (),
+        {
+            "VARCHAR": "VARCHAR",
+            "FLOAT_VECTOR": "FLOAT_VECTOR",
+            "SPARSE_FLOAT_VECTOR": "SPARSE_FLOAT_VECTOR",
+        },
+    )
+    monkeypatch.setitem(__import__("sys").modules, "pymilvus", fake_pymilvus)
+
+    class FakeMilvusClient:
+        def __init__(self) -> None:
+            self.search_kwargs = None
+
+        def has_collection(self, collection_name):  # noqa: ANN001, ARG002
+            return True
+
+        def describe_collection(self, collection_name):  # noqa: ANN001, ARG002
+            return {
+                "fields": [
+                    {"name": "vector", "params": {"dim": 1536}},
+                    {"name": "text"},
+                    {"name": "sparse"},
+                ]
+            }
+
+        def search(self, **kwargs):  # noqa: ANN001
+            self.search_kwargs = kwargs
+            return [[
+                {
+                    "distance": 0.99,
+                    "entity": {
+                        "chunk_id": "doc-1:0",
+                        "doc_id": "doc-1",
+                        "source": "data/raw/a.md",
+                        "title": "A",
+                        "chunk_index": 0,
+                        "text": "hello",
+                        "metadata_json": {"kb_id": "default"},
+                        "modality": "text",
+                        "media_uri": "",
+                        "mime_type": "",
+                    },
+                }
+            ]]
+
+    fake_client = FakeMilvusClient()
+    monkeypatch.setattr("app.vectorstore.repository.create_milvus_client", lambda: fake_client)
+
+    repository = MilvusVectorRepository(dimension=1536)
+    hits = repository.search([0.1] * 1536, top_k=1)
+
+    assert hits[0].chunk.chunk_id == "doc-1:0"
+    assert fake_client.search_kwargs["anns_field"] == "vector"

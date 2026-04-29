@@ -60,6 +60,25 @@ class BusinessDocumentSummary(BaseModel):
     source_key: str | None = None
 
 
+class WorkspaceSummary(BaseModel):
+    workspace_id: str
+    name: str
+    kb_id: str
+    tenant_id: str | None = None
+    document_count: int = 0
+    chunk_count: int = 0
+    trace_count: int = 0
+    updated_at: float | None = None
+
+
+class IngestSourceSummary(BaseModel):
+    path: str
+    name: str
+    extension: str
+    size_bytes: int
+    updated_at: float
+
+
 class FeedbackRequest(BaseModel):
     trace_id: str = Field(..., max_length=256)
     rating: Literal["up", "down"]

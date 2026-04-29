@@ -12,7 +12,6 @@ from typing import TYPE_CHECKING, Protocol, Sequence, Union
 import httpx
 
 from app.core.exceptions import ModelGatewayError
-from app.model_client.mock_gateway import mock_embeddings
 
 if TYPE_CHECKING:
     from app.core.config import AppConfig
@@ -112,31 +111,10 @@ class _BaseProvider:
     async def embed_one(self, items: Sequence[EmbedItem]) -> list[float]:
         raise NotImplementedError
 
-    def _mock_vector(self, items: Sequence[EmbedItem]) -> list[float]:
-        text_parts: list[str] = []
-        for item in items:
-            if isinstance(item, TextItem):
-                text_parts.append(item.text)
-            elif isinstance(item, ImageItem):
-                text_parts.append(f"<image:{item.mime_type}:{len(item.data)}>")
-            elif isinstance(item, AudioItem):
-                text_parts.append(f"<audio:{item.mime_type}:{len(item.data)}>")
-            elif isinstance(item, VideoItem):
-                text_parts.append(f"<video:{item.mime_type}:{len(item.data)}>")
-            elif isinstance(item, FileItem):
-                text_parts.append(
-                    f"<file:{item.path.name}:{item.resolve_mime()}>"
-                )
-        joined = "\n".join(text_parts) or "<empty>"
-        body = mock_embeddings([joined], dimensions=self.dimension)
-        return body["data"][0]["embedding"]
-
-
 class GeminiMultimodalEmbedding(_BaseProvider):
     """Direct adapter for Gemini Embedding 2 (gemini-embedding-2-preview).
 
-    Bypasses Bifrost — Gemini's :embedContent shape is not OpenAI-compatible
-    and cannot be transparently routed.
+    Gemini's :embedContent shape is provider-native, so it is called directly.
     """
 
     def __init__(self, config: "AppConfig") -> None:
@@ -169,8 +147,6 @@ class GeminiMultimodalEmbedding(_BaseProvider):
         return (
             os.getenv("EMBEDDING_API_KEY")
             or section.get("api_key")
-            or os.getenv("GEMINI_API_KEY")
-            or os.getenv("MODEL_GATEWAY_API_KEY")
             or ""
         )
 
@@ -217,12 +193,9 @@ class GeminiMultimodalEmbedding(_BaseProvider):
     async def embed_one(self, items: Sequence[EmbedItem]) -> list[float]:
         if not items:
             raise ValueError("embed_one requires at least one item")
-        if self.config.gateway_mode == "mock":
-            return self._mock_vector(items)
         if not self.api_key:
             raise ModelGatewayError(
-                "EMBEDDING_API_KEY (or GEMINI_API_KEY) is not configured for "
-                "the multimodal embedding client."
+                "EMBEDDING_API_KEY is not configured for the Gemini multimodal embedding client."
             )
         url = f"{self.base_url}/v1beta/models/{self.alias}:embedContent"
         try:
@@ -287,7 +260,6 @@ class DashScopeMultimodalEmbedding(_BaseProvider):
         self.api_key = (
             os.getenv("EMBEDDING_API_KEY")
             or section.get("api_key")
-            or os.getenv("DASHSCOPE_API_KEY")
             or ""
         )
         self.dimension = int(section.get("dimension", 1536))
@@ -349,12 +321,9 @@ class DashScopeMultimodalEmbedding(_BaseProvider):
     async def embed_one(self, items: Sequence[EmbedItem]) -> list[float]:
         if not items:
             raise ValueError("embed_one requires at least one item")
-        if self.config.gateway_mode == "mock":
-            return self._mock_vector(items)
         if not self.api_key:
             raise ModelGatewayError(
-                "EMBEDDING_API_KEY (or DASHSCOPE_API_KEY) is not configured "
-                "for the DashScope multimodal embedding client."
+                "EMBEDDING_API_KEY is not configured for the DashScope multimodal embedding client."
             )
         url = f"{self.base_url}{self.DEFAULT_PATH}"
         try:
@@ -468,8 +437,6 @@ class VLLMMultimodalEmbedding(_BaseProvider):
     async def embed_one(self, items: Sequence[EmbedItem]) -> list[float]:
         if not items:
             raise ValueError("embed_one requires at least one item")
-        if self.config.gateway_mode == "mock":
-            return self._mock_vector(items)
         url = f"{self.base_url}/embeddings"
         headers = {"Content-Type": "application/json"}
         if self.api_key and self.api_key != "EMPTY":

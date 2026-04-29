@@ -168,6 +168,6 @@ def test_prompt_builder_preserves_text_only_string_content() -> None:
     )
 
     # Pure-text contexts must keep the historical string-content shape so
-    # all existing generation client paths (Bifrost, mock, OpenAI) keep
+    # all existing generation client paths keep
     # working.
     assert isinstance(messages[1]["content"], str)

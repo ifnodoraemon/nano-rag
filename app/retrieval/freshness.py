@@ -2,21 +2,13 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from pathlib import Path
 
 from app.retrieval.filters import parse_date
 from app.vectorstore.repository import SearchHit
 
-SOURCE_KEY_SUFFIX_RE = re.compile(
-    r"(\b(?:v(?:ersion)?\s*\d+(?:\.\d+)*)\b|\b(?:19|20)\d{2}\b|\b(?:final|latest|draft)\b)",
-    re.IGNORECASE,
-)
-
-
 @dataclass(frozen=True)
 class FreshnessPolicy:
     enabled: bool = True
-    allow_stale_fallback: bool = False
 
 
 def prioritize_fresh_hits(
@@ -60,11 +52,7 @@ def prioritize_fresh_hits(
             )
 
     primary.sort(key=lambda item: item[0])
-    stale.sort(key=lambda item: item[0])
-    ordered = [hit for _, hit in primary]
-    if policy.allow_stale_fallback:
-        ordered.extend(hit for _, hit in stale)
-    return ordered
+    return [hit for _, hit in primary]
 
 
 def _group_key(hit: SearchHit) -> str | None:
@@ -72,11 +60,9 @@ def _group_key(hit: SearchHit) -> str | None:
     if metadata.get("wiki_kind") == "topic":
         return None
     source_key_value = metadata.get("source_key")
-    if source_key_value is None and not (
-        metadata.get("effective_date") or metadata.get("version")
-    ):
+    if source_key_value is None:
         return None
-    source_key = str(source_key_value or _fallback_source_key(hit)).strip()
+    source_key = str(source_key_value).strip()
     if not source_key:
         return None
     section = metadata.get("section_path_text")
@@ -87,15 +73,6 @@ def _group_key(hit: SearchHit) -> str | None:
         else:
             section = hit.chunk.title or ""
     return f"{metadata.get('wiki_kind') or 'raw'}|{source_key}|{section.strip().lower()}"
-
-
-def _fallback_source_key(hit: SearchHit) -> str:
-    candidate = hit.chunk.title or Path(hit.chunk.source_path).stem
-    candidate = SOURCE_KEY_SUFFIX_RE.sub(" ", candidate)
-    candidate = re.sub(r"[_\-/]+", " ", candidate)
-    candidate = re.sub(r"\s+", " ", candidate).strip().lower()
-    return candidate
-
 
 def _freshness_sort_key(hit: SearchHit) -> tuple[int, object, tuple[int, ...], float]:
     metadata = hit.chunk.metadata or {}

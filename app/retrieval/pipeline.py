@@ -75,9 +75,6 @@ class RetrievalPipeline:
         freshness_settings = self.config.settings["retrieval"].get("freshness_policy", {})
         freshness_policy = FreshnessPolicy(
             enabled=bool(freshness_settings.get("enabled", True)),
-            allow_stale_fallback=bool(
-                freshness_settings.get("allow_stale_fallback", False)
-            ),
         )
         inferred_metadata_filters = infer_metadata_filters(query)
         effective_metadata_filters = merge_metadata_filters(

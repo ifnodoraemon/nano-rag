@@ -4,6 +4,7 @@ import math
 import re
 import threading
 from abc import ABC, abstractmethod
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -150,7 +151,7 @@ class MilvusVectorRepository(VectorRepository):
         except ImportError as exc:
             raise RuntimeError(
                 "pymilvus is required when VECTORSTORE_BACKEND=milvus. "
-                "Install pymilvus or switch VECTORSTORE_BACKEND=memory."
+                "Install pymilvus before starting the service."
             ) from exc
         if self.client.has_collection(CHUNKS_COLLECTION):
             collection = self.client.describe_collection(
@@ -280,6 +281,7 @@ class MilvusVectorRepository(VectorRepository):
         results = self.client.search(
             collection_name=CHUNKS_COLLECTION,
             data=[vector],
+            anns_field="vector",
             filter=base_filter,
             limit=max(top_k * 4, 20),
             output_fields=[
@@ -424,7 +426,7 @@ class MilvusVectorRepository(VectorRepository):
             "backend": "milvus",
             "collection_name": CHUNKS_COLLECTION,
             "dimension": self.dimension,
-            "collection": collection,
+            "collection": _json_safe(collection),
         }
 
     def close(self) -> None:
@@ -441,5 +443,24 @@ def _cosine_similarity(lhs: list[float], rhs: list[float]) -> float:
     if lhs_norm == 0 or rhs_norm == 0:
         return 0.0
     return numerator / (lhs_norm * rhs_norm)
+
+
+def _json_safe(value: object) -> object:
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, Mapping):
+        return {str(key): _json_safe(item) for key, item in value.items()}
+    if isinstance(value, (bytes, bytearray)):
+        return value.decode("utf-8", errors="replace")
+    if isinstance(value, (list, tuple, set)):
+        return [_json_safe(item) for item in value]
+    if hasattr(value, "__iter__"):
+        try:
+            return [_json_safe(item) for item in value]  # type: ignore[operator]
+        except TypeError:
+            pass
+    return str(value)
+
+
 TEXT_FIELD = "text"
 SPARSE_FIELD = "sparse"

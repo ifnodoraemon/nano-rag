@@ -20,7 +20,6 @@ retrieval:
     effective_date_recency: 0.12
   freshness_policy:
     enabled: true
-    allow_stale_fallback: false
 
 hybrid_search:
   enabled: ${RAG_HYBRID_SEARCH_ENABLED:-true}

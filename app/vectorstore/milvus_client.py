@@ -16,7 +16,7 @@ def _import_milvus() -> tuple[type[Any], type[Exception]]:
     except ImportError as exc:
         raise RuntimeError(
             "pymilvus is required when VECTORSTORE_BACKEND=milvus. "
-            "Install pymilvus or switch VECTORSTORE_BACKEND=memory."
+            "Install pymilvus before starting the service."
         ) from exc
     return MilvusClient, MilvusException
 

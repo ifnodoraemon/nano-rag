@@ -32,9 +32,18 @@ class FakeEmbeddingClient:
             )
         return vectors
 
+    async def embed_items(self, items):  # noqa: ANN001
+        return await self.embed_texts([
+            "\n".join(getattr(item, "text", "") for item in batch)
+            for batch in items
+        ])
+
 
 class FailingEmbeddingClient:
     async def embed_texts(self, texts: list[str]) -> list[list[float]]:  # noqa: ARG002
+        raise ModelGatewayError("embedding service unavailable")
+
+    async def embed_items(self, items):  # noqa: ANN001, ARG002
         raise ModelGatewayError("embedding service unavailable")
 
 
@@ -43,6 +52,12 @@ class SelectiveFailingEmbeddingClient:
         if any("FAIL_EMBED" in text for text in texts):
             raise ModelGatewayError("embedding service unavailable")
         return [[1.0, 0.0] for _ in texts]
+
+    async def embed_items(self, items):  # noqa: ANN001
+        return await self.embed_texts([
+            "\n".join(getattr(item, "text", "") for item in batch)
+            for batch in items
+        ])
 
 
 class FakeRerankClient:

@@ -1,415 +1,242 @@
 # Nano RAG
 
-根据 `rag_project_plan_v2.md` 初始化的企业级 RAG 项目骨架，当前定位为
-**以 LLM Wiki 为知识底座的轻量企业 RAG 系统**。
+Nano RAG 是一个真实数据优先的企业 RAG 工作台。后端负责文档注入、解析、分块、向量索引、检索、生成、追踪、评测和诊断；前端只展示后端已经支持的能力，不保存业务密钥，不内置 mock 数据，也不通过写死选项伪造状态。
 
 ## 项目理念
 
-Nano RAG 是最小可用的问答运行时，LLM Wiki 是长期知识记忆和治理层。
-本项目不追求把所有能力都默认打开，而是把能力分成三层：
+Nano RAG 的核心原则是：**真实输入、真实索引、真实模型、真实错误**。
 
-- **Nano Core**：`ingest -> retrieve -> answer -> cite -> trace`，默认路径要轻、清楚、可本地验证
-- **LLM Wiki Layer**：把来源文档、主题、事实、规则、冲突、版本和适用条件沉淀成可追溯知识资产
-- **Workbench**：用 eval、benchmark、diagnosis、feedback 找坏例，并把修复反哺到文档和 wiki
+- **不 mock**：运行时不使用 mock 网关，不把假数据展示成可用能力。
+- **不回退**：模型、解析器、向量库和多模态 embedding 都必须显式配置；缺少配置或上游失败时直接暴露错误。
+- **后端是事实来源**：工作区、可注入文件、文档列表、追踪、评测数据集、报告和诊断对象都来自后端接口。
+- **前端不配置密钥**：浏览器通过账号系统或 Docker 代理与后端连接；本地 Docker 代理会注入默认业务 API key。
+- **工作区优先**：所有业务操作都挂在 `kb_id + tenant_id` 表示的 workspace 下，前端必须先选择后端返回的工作区。
+- **证据优先**：回答必须带引用、上下文和 trace，问题排查必须能回到原始文档、分块和模型请求链路。
 
-设计取舍：
+这意味着系统更愿意失败得明确，也不做静默降级。错误的 API key、不可用的解析器、缺失的 Milvus、空的 provider key，都应该被看见和修复。
 
-- 回答必须证据优先：每次回答都要能追到来源、上下文和 trace
-- 本地体验要低摩擦：可以显式关闭业务鉴权，用 mock 网关先跑通核心链路
-- 生产默认要严肃：共享或生产环境默认要求业务 API key，不把未配置 key 当作开放访问
-- 可选能力不压主流程：Milvus、Phoenix、wiki、eval、diagnosis 都是增强层，不阻塞 nano core
+## 当前能力
 
-当前版本提供：
-
-- `FastAPI` 服务，核心公开入口为 `/health`
-- 调试/评测 API：`/retrieve/debug`、`/traces`、`/eval/*`、`/benchmark/*`、`/diagnose/*`
-- 业务接入 API：`/v1/rag/chat`、`/v1/rag/ingest`、`/v1/rag/ingest/upload`、`/v1/rag/feedback`、`/v1/rag/traces/{trace_id}`、`/v1/rag/benchmark/run`
-- `ingestion / retrieval / generation` 主链路模块拆分
-- 统一 `model_client`，所有模型调用都走 OpenAI-compatible Gateway
-- 默认本地走 `memory` 向量仓储，可切换到 `Milvus`
-- `Phoenix`、`Milvus`、`Bifrost`、`benchmark/eval/diagnosis` 都保留；本地最小启动可用 mock，Docker 默认走生产形态
-- Docker 默认启动 Bifrost，模型 alias 通过网关路由；rerank 在配置 provider key 后启用
-- Milvus 新 collection 默认包含 analyzer text 字段、BM25 sparse 字段和原生 hybrid search 路径
-- `Docker Compose` 骨架，包含 `app / milvus / phoenix / frontend (nginx)`；前端镜像在构建时从上游 [`ifnodoraemon/nano-rag-ui`](https://github.com/ifnodoraemon/nano-rag-ui) 拉取并打包，本仓库不再保存前端源码
-- 基础测试、trace 存储、配置模板、离线评测和 benchmark 脚手架
+- 业务 API：`/v1/rag/chat`、`/v1/rag/ingest`、`/v1/rag/ingest/upload`、`/v1/rag/documents`、`/v1/rag/workspaces`、`/v1/rag/ingest/sources`、`/v1/rag/feedback`、`/v1/rag/traces/{trace_id}`、`/v1/rag/benchmark/run`
+- 运维 API：`/health/detail`、`/debug/storage`、`/debug/parsed/{doc_id}`、`/retrieve/debug`、`/traces`、`/replay/{trace_id}`
+- 评测和诊断：`/eval/datasets`、`/eval/reports`、`/eval/run`、`/benchmark/reports`、`/diagnose/*`
+- 向量库：Docker 默认使用 Milvus，collection 包含 dense vector、analyzer text、BM25 sparse 字段和原生 hybrid search
+- 模型路径：生成、embedding、文档解析都直连显式配置的真实 provider；默认示例只覆盖 Gemini 和 Qwen
+- 前端：React + Vite 源码位于 `frontend/` 子模块，Docker 构建为 nginx 静态站点并代理后端
 
 ## 目录
 
 ```text
 nano-rag/
-├─ docker/         # Compose 与 Dockerfile（含前端构建时 clone 上游 UI 仓库）
-├─ configs/
-├─ data/
-└─ app/            # FastAPI 后端
+├─ app/              # FastAPI 后端
+├─ configs/          # settings/models/prompts
+├─ data/             # raw/eval/wiki 样例数据
+├─ docker/           # Dockerfile、Compose、nginx 配置
+├─ frontend/         # React + Vite 前端子模块
+└─ scripts/          # eval/benchmark 等脚本
 ```
 
-前端 React + Vite 源码在独立仓库 [`ifnodoraemon/nano-rag-ui`](https://github.com/ifnodoraemon/nano-rag-ui) 维护。
+## Docker 启动
 
-## 快速开始
-
-### 1. 本地运行
+本项目当前以 Docker Compose 作为标准启动方式：
 
 ```bash
-cd nano-rag
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-export MODEL_GATEWAY_MODE=mock
-export RAG_AUTH_DISABLED=true
-export RAG_INGEST_ALLOWED_DIRS=$PWD/data/raw
-uvicorn app.main:app --reload --app-dir .
-```
-
-说明：
-
-- 本地最小启动默认推荐 `MODEL_GATEWAY_MODE=mock`，并显式设置 `RAG_AUTH_DISABLED=true` 先把 ingest / retrieve / trace 跑通
-- 如果要直连真实模型，把 `MODEL_GATEWAY_MODE` 改成 `live`，并配置 `MODEL_GATEWAY_BASE_URL / MODEL_GATEWAY_API_KEY`
-- ingest 默认要求显式配置白名单目录；仓库内置 `data/raw/employee_handbook.md`，上面的 `RAG_INGEST_ALLOWED_DIRS=$PWD/data/raw` 可直接跑通 README 示例
-- 共享或生产环境不要设置 `RAG_AUTH_DISABLED=true`，请改用 `RAG_API_KEYS=<key1,key2>`
-- 本地 mock 模式用于验证 nano core；下面这些治理和诊断能力需要显式打开：
-
-```bash
-export RAG_WIKI_ENABLED=true
-export RAG_DIAGNOSIS_ENABLED=true
-export RAG_EVAL_ENABLED=true
-```
-
-- Docker 生产形态默认启用 Milvus 原生 hybrid search；本地可用 `RAG_HYBRID_SEARCH_ENABLED=false` 显式关闭
-- `RAG_SEMANTIC_CHUNKER_ENABLED`、`RAG_QUERY_REWRITE_ENABLED` / `RAG_MULTI_QUERY_ENABLED` / `RAG_HYDE_ENABLED` 属于可选增强，不阻塞 nano core
-
-### 2. 启动前端（独立仓库）
-
-前端 UI 源码在 [`ifnodoraemon/nano-rag-ui`](https://github.com/ifnodoraemon/nano-rag-ui)。本地开发时单独 clone 并启动：
-
-```bash
-git clone https://github.com/ifnodoraemon/nano-rag-ui.git
-cd nano-rag-ui
-npm install
-npm run dev
-```
-
-前端通过 Vite dev server 代理到后端（默认 `http://localhost:8000`），调用 `/v1/rag/**` 业务 API。
-鉴权：`RAG_API_KEYS` 配置后在前端工作区填入其中一枚 key；本地可设置 `RAG_AUTH_DISABLED=true` 跳过。
-
-### 3. Docker Compose
-
-```bash
-cd nano-rag
 docker compose -f docker/docker-compose.yml up -d --build
 ```
 
-前端镜像默认从 `ifnodoraemon/nano-rag-ui` 的 `main` 分支构建。要锁定版本或换源：
+访问地址：
+
+- 前端：`http://127.0.0.1:3000`
+- Langfuse：`http://127.0.0.1:3001`
+- 后端：`http://127.0.0.1:8000`
+- Milvus：`http://127.0.0.1:19530`
+
+本地 Langfuse 初始化账号：
 
 ```bash
-UI_REF=<commit-or-tag> UI_REPO_URL=https://github.com/<your-fork>/nano-rag-ui.git \
-  docker compose -f docker/docker-compose.yml build frontend
+LANGFUSE_INIT_USER_EMAIL=admin@nano-rag.local
+LANGFUSE_INIT_USER_PASSWORD=nano-rag-local-admin
+LANGFUSE_PUBLIC_KEY=pk-lf-local
+LANGFUSE_SECRET_KEY=sk-lf-local
 ```
 
-Docker 模式下：
+这些 Langfuse 默认账号、项目 key、`NEXTAUTH_SECRET` 和 `ENCRYPTION_KEY` 只用于本地 Docker 环境。共享环境或生产环境必须显式覆盖，不能复用 compose 默认值。
 
-- React 前端: `http://127.0.0.1:3000`（构建时从 `nano-rag-ui` 上游 clone，可用 `UI_REF=<commit>` 锁定版本）
-- FastAPI 后端: `http://127.0.0.1:8000`
-- Phoenix: `http://127.0.0.1:6006`
-- Milvus: `http://127.0.0.1:19530`
-
-Compose 默认启用真实向量库、Phoenix 和 Bifrost：
+Docker 默认值：
 
 ```bash
 VECTORSTORE_BACKEND=milvus
-MILVUS_URI=http://milvus:19530
 MODEL_GATEWAY_MODE=live
-MODEL_GATEWAY_BASE_URL=http://bifrost:8080/v1
-GENERATION_MODEL_ALIAS=gemini/gemini-3.1-pro-preview
-EMBEDDING_MODEL_ALIAS=gemini-embedding-2-preview
-EMBEDDING_API_BASE_URL=https://generativelanguage.googleapis.com
+GENERATION_API_BASE_URL=https://generativelanguage.googleapis.com/v1beta/openai
+RAG_API_KEYS=nano-rag-local
+DOCUMENT_PARSER_ENABLED=true
+LANGFUSE_UI_ENDPOINT=http://langfuse-web:3000
+LANGFUSE_OTEL_ENDPOINT=http://langfuse-web:3000/api/public/otel/v1/traces
 ```
 
-鉴权策略与本地运行一致：共享或生产环境在 `.env` 里配置 `RAG_API_KEYS`；
-只做本机开发验证时，可以在 `.env` 里显式设置 `RAG_AUTH_DISABLED=true`。
-真实模型调用需要在 `docker/bifrost/.env` 中配置 provider key，例如 `GEMINI_API_KEY`、`COHERE_API_KEY` 或 `OPENAI_API_KEY`。`app` 服务也会读取 `docker/bifrost/.env`，多模态 embedding 客户端通过其中的 `GEMINI_API_KEY` 直连 Gemini API（不经过 Bifrost）。
-Docker Compose 的模型网关变量使用 `COMPOSE_*` 前缀覆盖，因此根目录 `.env` 直连 Gemini 时不会影响 Docker 默认走 Bifrost。
-未配置 rerank provider key 时，Compose 默认把 `RERANK_MODEL_ALIAS` 置为 `disabled`；要启用 rerank，请设置 `COMPOSE_RERANK_MODEL_ALIAS=cohere/rerank-v3.5` 并在 `docker/bifrost/.env` 配置 `COHERE_API_KEY`。
-PDF 解析仍走 Bifrost GenAI 的 multipart file upload + `generateContent`；图片 / 音频 / 视频不再走"媒体→Markdown"路径，而是直接生成对应 modality 的 chunk 并由多模态 embedding 索引到同一向量空间。生成阶段对 image 命中的 chunk 自动以 `image_url` 部件回传给视觉 LLM，实现图像增强问答（OpenAI vision-style 格式，Bifrost 透传至 Gemini 或其他视觉模型）。
+前端 nginx 会为代理到后端的请求注入 `X-API-Key: nano-rag-local`。浏览器端不需要，也不应该配置 API key。
 
-### 4. 直连外部模型接口
+后端启动时会检查 generation、embedding、document parser、Langfuse OTEL 等关键配置。缺少 `DOCUMENT_PARSER_API_KEY` 这类真实 provider 配置时，容器日志会输出 `Startup readiness` 警告，`/health/detail` 会继续显示对应能力不可用；前端只消费这些后端状态，不负责提示 Docker 配置方式。
 
-外部 provider 提供 OpenAI-compatible 接口，直接配置根目录 `.env`：
+## Provider 配置
+
+真实模型调用需要配置 provider key。默认工程不再启动 Bifrost 或 LiteLLM，也不读取它们的密钥文件。只保留两套推荐配置：Gemini 或 Qwen。
+
+模型 provider 抽象按能力拆分：
+
+- `generation`：OpenAI-compatible chat completions，支持 Gemini、Qwen DashScope、Qwen vLLM。
+- `embedding`：显式 provider adapter，支持 `gemini`、`dashscope`、`vllm`。
+- `document_parser`：`gemini` 使用 Gemini Files API；`qwen` 使用 OpenAI-compatible chat completions，可指向 DashScope 或 vLLM。
+- `rerank`：默认关闭；需要时显式配置 Qwen rerank endpoint 和 path。
+- `trace`：只接 Langfuse；后端通过 OTLP/HTTP 写入 `LANGFUSE_OTEL_ENDPOINT`，不再保留 Phoenix。
+
+Gemini 示例：
 
 ```bash
-export MODEL_GATEWAY_MODE=live
-export MODEL_GATEWAY_BASE_URL=https://generativelanguage.googleapis.com/v1beta/openai
-export MODEL_GATEWAY_API_KEY=<your-gemini-api-key>
-export GENERATION_MODEL_ALIAS=gemini-3.1-pro-preview
-# 多模态 embedding 默认走 Gemini Embedding 2，绕开 Bifrost / OpenAI-compat
-export EMBEDDING_PROVIDER=gemini    # 可选 gemini / dashscope / vllm
-export EMBEDDING_MODEL_ALIAS=gemini-embedding-2-preview
-export EMBEDDING_API_BASE_URL=https://generativelanguage.googleapis.com
-export EMBEDDING_API_KEY=<your-gemini-api-key>
-export DISABLE_RERANK=1
+COMPOSE_GENERATION_API_KEY=<your-gemini-key>
+COMPOSE_GENERATION_API_BASE_URL=https://generativelanguage.googleapis.com/v1beta/openai
+COMPOSE_GENERATION_MODEL_ALIAS=gemini-3.1-pro-preview
+
+COMPOSE_EMBEDDING_PROVIDER=gemini
+COMPOSE_EMBEDDING_API_KEY=<your-embedding-key>
+COMPOSE_EMBEDDING_API_BASE_URL=https://generativelanguage.googleapis.com
+COMPOSE_EMBEDDING_MODEL_ALIAS=gemini-embedding-2-preview
+
+COMPOSE_DOCUMENT_PARSER_API_KEY=<your-parser-key>
+COMPOSE_DOCUMENT_PARSER_API_BASE_URL=https://generativelanguage.googleapis.com
+COMPOSE_DOCUMENT_PARSER_MODEL=gemini-3.1-pro-preview
 ```
 
-**多模态 Embedding Provider 选项**
-
-| `EMBEDDING_PROVIDER` | 路径 | 适用场景 | 鉴权 |
-|---|---|---|---|
-| `gemini` (默认) | `:embedContent` direct | 复用现有 Gemini API key，云端、零运维 | `EMBEDDING_API_KEY` 或 `GEMINI_API_KEY` |
-| `dashscope` | DashScope `/api/v1/services/embeddings/multimodal-embedding/...` | 阿里 Qwen3-VL-Embedding / multimodal-embedding-v1，国内访问 | `EMBEDDING_API_KEY` 或 `DASHSCOPE_API_KEY` |
-| `vllm` | 自托管 vLLM `/v1/embeddings`，OpenAI 兼容 messages-style | 自部署 Qwen3-VL-Embedding-2B/4B/8B，控成本与隐私 | 可选 `EMBEDDING_API_KEY`（vLLM 默认 EMPTY） |
-
-vLLM 启动示例（需要 vLLM ≥ 0.14 + 多模态 pooling 支持）：
+Qwen 示例：
 
 ```bash
-vllm serve Qwen/Qwen3-VL-Embedding-8B --runner pooling --port 8001
-# 然后在 nano-rag .env 中：
-EMBEDDING_PROVIDER=vllm
-EMBEDDING_API_BASE_URL=http://localhost:8001/v1
-EMBEDDING_MODEL_ALIAS=Qwen/Qwen3-VL-Embedding-8B
+COMPOSE_GENERATION_API_KEY=<your-dashscope-key>
+COMPOSE_GENERATION_API_BASE_URL=https://dashscope-intl.aliyuncs.com/compatible-mode/v1
+COMPOSE_GENERATION_MODEL_ALIAS=qwen-plus
+
+COMPOSE_EMBEDDING_PROVIDER=dashscope
+COMPOSE_EMBEDDING_API_KEY=<your-dashscope-key>
+COMPOSE_EMBEDDING_API_BASE_URL=https://dashscope.aliyuncs.com
+COMPOSE_EMBEDDING_MODEL_ALIAS=multimodal-embedding-v1
+
+COMPOSE_DOCUMENT_PARSER_PROVIDER=qwen
+COMPOSE_DOCUMENT_PARSER_API_KEY=<your-dashscope-key>
+COMPOSE_DOCUMENT_PARSER_API_BASE_URL=https://dashscope-intl.aliyuncs.com/compatible-mode/v1
+COMPOSE_DOCUMENT_PARSER_MODEL=qwen-vl-plus
 ```
 
-不同 provider 的输出维度不一致，切换 provider 时 **必须 drop & recreate** Milvus collection（`docker compose down -v`）。
-
-推荐同时把 [models.yaml](/home/ifnodoraemon/myagent/nano-rag/configs/models.yaml) 改成：
-
-```yaml
-embedding:
-  provider: gemini
-  multimodal: true
-  default_alias: gemini-embedding-2-preview
-  dimension: 1536        # Matryoshka 截断；可选 768 / 1536 / 3072
-  base_url: https://generativelanguage.googleapis.com
-
-rerank:
-  default_alias: disabled
-
-generation:
-  default_alias: gemini-3.1-pro-preview
-```
-
-说明：
-
-- Embedding 走 **Gemini Embedding 2-preview**，原生跨模态（text / image / document / audio / video 共享一个向量空间）。客户端使用 `:embedContent` REST 路径，绕过 Bifrost 与 OpenAI `/embeddings`。
-- Gemini API 当前 `/chat/completions` 走 Bifrost 或 `/v1beta/openai/chat/completions`；rerank 需要独立 provider，若走 Gemini API 请关闭。
-- 升级提示：Gemini Embedding 1 与 2 的向量空间**不兼容**。从旧 collection 切到 1536 维 multimodal collection 必须 `docker compose down -v` 清空 milvus volume 后重新 ingest。
-- 业务 API 中的 `kb_id` 已预留，但当前部署仅支持 `default`
-
-### 5. 按能力拆分模型网关
-
-如果 generation / embedding / rerank 需要走不同 provider，现在可以分别配置不同的 `base_url + key`。
-未单独配置时，会自动回退到全局 `MODEL_GATEWAY_BASE_URL / MODEL_GATEWAY_API_KEY`。
+Qwen vLLM 自托管示例：
 
 ```bash
-export MODEL_GATEWAY_BASE_URL=https://generativelanguage.googleapis.com/v1beta/openai
-export MODEL_GATEWAY_API_KEY=<gemini-api-key>
+COMPOSE_GENERATION_API_KEY=EMPTY
+COMPOSE_GENERATION_API_BASE_URL=http://vllm:8000/v1
+COMPOSE_GENERATION_MODEL_ALIAS=Qwen/Qwen2.5-VL-7B-Instruct
 
-export EMBEDDING_API_BASE_URL=https://generativelanguage.googleapis.com/v1beta/openai
-export EMBEDDING_API_KEY=<gemini-api-key>
+COMPOSE_EMBEDDING_PROVIDER=vllm
+COMPOSE_EMBEDDING_API_KEY=EMPTY
+COMPOSE_EMBEDDING_API_BASE_URL=http://vllm-embedding:8000/v1
+COMPOSE_EMBEDDING_MODEL_ALIAS=Qwen/Qwen3-VL-Embedding-8B
 
-export RERANK_API_BASE_URL=https://your-rerank-provider.example.com/v1
-export RERANK_API_KEY=<your-rerank-api-key>
+COMPOSE_DOCUMENT_PARSER_PROVIDER=qwen
+COMPOSE_DOCUMENT_PARSER_API_KEY=EMPTY
+COMPOSE_DOCUMENT_PARSER_API_BASE_URL=http://vllm:8000/v1
+COMPOSE_DOCUMENT_PARSER_MODEL=Qwen/Qwen2.5-VL-7B-Instruct
 ```
 
-例如：
-
-- `generation` 走 Gemini API
-- `embedding` 走 Gemini API
-- `rerank` 走独立 rerank provider
-
-对应 [models.yaml](/home/ifnodoraemon/myagent/nano-rag/configs/models.yaml) 里的 alias 也可以分开维护。
-
-### 6. 可选：通过 Bifrost 统一多家 provider
-
-Bifrost 是 Docker Compose 默认模型网关；只有本地 mock 或直连单一 OpenAI-compatible provider 时才需要绕过它。
-
-Bifrost 支持 OpenAI Chat Completions、OpenAI Responses API、Anthropic Messages 三种格式，可透明路由到 15+ provider。
+可选 Qwen rerank：
 
 ```bash
-cp docker/bifrost/.env.example docker/bifrost/.env
-# 编辑 docker/bifrost/.env 填入 provider API key
-# 按需编辑 docker/bifrost/config.json 配置 provider 和模型列表
-docker compose -f docker/docker-compose.yml up -d bifrost
+COMPOSE_RERANK_MODEL_ALIAS=qwen3-rerank
+COMPOSE_DISABLE_RERANK=false
+COMPOSE_RERANK_API_BASE_URL=https://dashscope-intl.aliyuncs.com/compatible-api/v1
+COMPOSE_RERANK_API_KEY=<your-dashscope-key>
+COMPOSE_RERANK_API_PATH=/reranks
 ```
 
-然后把 `.env` 里的 `MODEL_GATEWAY_BASE_URL` 保持为默认的 `http://bifrost:8080/v1`。
+如果没有有效 provider key，系统不会切到 mock；`/health/detail` 会显示 degraded，并在具体能力下返回上游错误。
 
-Bifrost 还自带 Web UI（`http://127.0.0.1:8080`），可可视化管理 provider 配置。
+PDF 和图片上传需要 `DOCUMENT_PARSER_API_KEY`。未配置时后端启动日志会输出 `Startup readiness` 警告，`/health/detail` 会返回明确缺失项，上传接口也会直接拒绝；这不是回退或 mock，而是要求补齐真实 Gemini、Qwen DashScope 或 Qwen vLLM document parser 配置。
 
-## 示例
+## 工作区与数据来源
 
-### health
+工作区由后端 `/v1/rag/workspaces` 生成，来源包括：
+
+- `RAG_SUPPORTED_KB_IDS` 配置的知识库
+- 已解析文档产物里的 `kb_id / tenant_id`
+- trace store 里的历史请求范围
+
+前端不会写死工作区。注入来源由 `/v1/rag/ingest/sources` 返回，默认来自 Docker 内的 `/workspace/data/raw` 白名单目录。
+
+## 常用验证
+
+所有命令都通过 Docker 暴露的服务验证真实后端：
 
 ```bash
-curl http://127.0.0.1:8000/health
+curl -sS http://127.0.0.1:3000/health/detail
+curl -sS http://127.0.0.1:3000/v1/rag/workspaces
+curl -sS http://127.0.0.1:3000/v1/rag/ingest/sources
+curl -sS http://127.0.0.1:3000/debug/storage
+docker logs --tail 120 nano-rag-app
+docker logs --tail 120 nano-rag-frontend
 ```
 
-详细健康信息走受保护接口：
+业务接口直连后端时需要业务 API key：
 
 ```bash
-curl http://127.0.0.1:8000/health/detail \
-  -H 'X-API-Key: <your-business-api-key>'
+curl -sS http://127.0.0.1:8000/health/detail \
+  -H 'X-API-Key: nano-rag-local'
 ```
 
-如果本地设置了 `RAG_AUTH_DISABLED=true`，可省略 `X-API-Key`。
+## API 示例
 
-### business ingest
+路径注入：
 
 ```bash
-curl -X POST http://127.0.0.1:8000/v1/rag/ingest \
+curl -sS -X POST http://127.0.0.1:3000/v1/rag/ingest \
   -H 'Content-Type: application/json' \
-  -d '{"path":"./data/raw","kb_id":"default","tenant_id":"demo-tenant"}'
+  -d '{"path":"/workspace/data/raw/employee_handbook.md","kb_id":"default","tenant_id":null}'
 ```
 
-### business chat
+问答：
 
 ```bash
-curl -X POST http://127.0.0.1:8000/v1/rag/chat \
+curl -sS -X POST http://127.0.0.1:3000/v1/rag/chat \
   -H 'Content-Type: application/json' \
-  -d '{"query":"差旅报销多久内提交？","kb_id":"default","tenant_id":"demo-tenant","session_id":"session-001"}'
+  -d '{"query":"请输入你的真实业务问题","kb_id":"default","tenant_id":null,"session_id":"manual-session","top_k":4}'
 ```
 
-共享或生产环境需要在受保护 API 上加：
+检索调试：
 
 ```bash
--H 'X-API-Key: <your-business-api-key>'
-```
-
-### business feedback
-
-```bash
-curl -X POST http://127.0.0.1:8000/v1/rag/feedback \
+curl -sS -X POST http://127.0.0.1:3000/retrieve/debug \
   -H 'Content-Type: application/json' \
-  -d '{"trace_id":"<trace_id>","rating":"up","kb_id":"default","tenant_id":"demo-tenant","comment":"answer is helpful"}'
+  -d '{"query":"请输入你的真实检索问题","kb_id":"default","tenant_id":null,"top_k":10}'
 ```
 
-### debug retrieval
+## 关键配置
 
-```bash
-curl -X POST http://127.0.0.1:8000/retrieve/debug \
-  -H 'Content-Type: application/json' \
-  -d '{"query":"差旅报销多久内提交？","top_k":10}'
-```
+- [configs/settings.yaml](/home/ifnodoraemon/myagent/nano-rag/configs/settings.yaml)：chunk、retrieval、hybrid search、timeout
+- [configs/models.yaml](/home/ifnodoraemon/myagent/nano-rag/configs/models.yaml)：各能力的 base_url、api_key 和模型 alias
+- [configs/prompts.yaml](/home/ifnodoraemon/myagent/nano-rag/configs/prompts.yaml)：生成提示词
 
-### run eval by API
+注意：
 
-先确认已经设置 `RAG_EVAL_ENABLED=true`。
-
-```bash
-curl -X POST http://127.0.0.1:8000/eval/run \
-  -H 'Content-Type: application/json' \
-  -d '{"dataset_path":"data/eval/employee_handbook_eval.jsonl","output_path":"data/samples/eval_report_api.json"}'
-```
-
-如需调用 RAGAS 库标准指标（faithfulness / answer_relevancy / context_precision），把 `use_ragas_lib` 设为 `true`，并确保评测 LLM 可通过模型网关访问：
-
-```bash
-curl -X POST http://127.0.0.1:8000/eval/run \
-  -H 'Content-Type: application/json' \
-  -d '{"dataset_path":"data/eval/employee_handbook_eval.jsonl","use_ragas_lib":true}'
-```
-
-### traces
-
-```bash
-curl http://127.0.0.1:8000/traces
-curl http://127.0.0.1:8000/traces/<trace_id>
-```
-
-### storage debug
-
-```bash
-curl http://127.0.0.1:8000/debug/storage
-curl http://127.0.0.1:8000/debug/parsed/<doc_id>
-```
-
-### offline eval
-
-```bash
-python3 scripts/run_eval.py \
-  --dataset data/eval/employee_handbook_eval.jsonl \
-  --output data/samples/eval_report.json
-```
-
-真实 RAGAS 库指标：
-
-```bash
-python3 scripts/run_eval.py \
-  --dataset data/eval/employee_handbook_eval.jsonl \
-  --ragas-lib
-```
-
-### benchmark
-
-先确认已经同时设置 `RAG_EVAL_ENABLED=true` 和 `RAG_DIAGNOSIS_ENABLED=true`。
-
-```bash
-curl -X POST http://127.0.0.1:8000/v1/rag/benchmark/run \
-  -H 'Content-Type: application/json' \
-  -d '{"dataset_path":"data/eval/employee_handbook_eval.jsonl"}'
-```
-
-```bash
-python3 scripts/run_benchmark.py \
-  --dataset data/eval/employee_handbook_eval.jsonl \
-  --output data/samples/benchmark_report.json
-```
-
-### benchmark reports
-
-```bash
-curl http://127.0.0.1:8000/benchmark/reports
-curl 'http://127.0.0.1:8000/benchmark/reports/detail?path=data/reports/eval/benchmarks/<report>.json'
-```
-
-离线评测数据集至少应包含：
-
-- `query`
-- `reference_answer`
-- `reference_contexts`
-
-如果未提供 `answer` 或 `retrieved_contexts`，当前 `/eval/run` API 和 `scripts/run_eval.py` 会自动走现有 RAG 链路生成候选答案与召回上下文，再计算指标。
-
-## 配置说明
-
-- [settings.yaml](/home/ifnodoraemon/myagent/nano-rag/configs/settings.yaml): chunk、retrieval、timeout 等运行参数
-- [models.yaml](/home/ifnodoraemon/myagent/nano-rag/configs/models.yaml): gateway 地址和模型 alias
-- [prompts.yaml](/home/ifnodoraemon/myagent/nano-rag/configs/prompts.yaml): 生成提示词模板
-
-## 现阶段说明
-
-- 本地默认向量仓储使用 `memory`
-- Docker Compose 默认把 `VECTORSTORE_BACKEND` 设成 `milvus`
-- PDF 优先走 `Docling`，未安装时回退 `pypdf`
-- `Phoenix` 现在是可选项；未配置 endpoint 时不会影响主流程健康状态
-- `RAGAS` 相关脚本已接入离线评测入口；默认使用确定性聚合指标，设置 `use_ragas_lib=true` 或 `--ragas-lib` 后调用真实 RAGAS 库指标
-- 当前已补充 benchmark 服务和脚本，用于聚合离线质量、延迟和坏例诊断统计
-- 前端主流程默认走业务 API；共享或生产环境需要在前端工作区中填写 `RAG_API_KEYS` 中的一枚 key（前端 UI 由独立仓库 `ifnodoraemon/nano-rag-ui` 维护）
-- 默认建议本地使用 `MODEL_GATEWAY_MODE=mock`；接真实 provider 时再切到 `live`
-- 直连外部 OpenAI-compatible provider
-- 如果直连 Gemini API，请设置 `MODEL_GATEWAY_API_KEY`，覆盖 `GENERATION_MODEL_ALIAS / EMBEDDING_MODEL_ALIAS`，并通过 `DISABLE_RERANK=1` 跳过 rerank 阶段
-- Docker Compose 默认启用 Bifrost；`docker compose -f docker/docker-compose.yml config --services` 应包含 `bifrost`
+- `MODEL_GATEWAY_MODE=mock` 不再是受支持的运行模式。
+- `VECTORSTORE_BACKEND` 默认是 `milvus`；`memory` 仅保留给单元测试和显式实验。
+- 默认 Docker 不启动模型网关中间层；生成、embedding、文档解析分别按显式 provider 配置直连。
+- 文档解析不会回退到本地 PDF 解析器；PDF/图片解析需要启用并配置 document parser。
+- embedding 不会把多模态输入降级成文本；embedding client 必须支持 `embed_items`。
+- freshness 过滤不会追加旧版本内容作为兜底上下文；需要通过显式 `source_key` 管理版本组。
 
 ## 测试
 
-```bash
-cd nano-rag
-pytest app/tests
-```
-
-前端验证在 [`ifnodoraemon/nano-rag-ui`](https://github.com/ifnodoraemon/nano-rag-ui) 仓库内完成（`npm run lint && npm run build`）。本仓库只在 Docker 构建时拉取上游打包，可通过：
+代码检查可以直接运行测试命令；服务启动和联调只使用 Docker：
 
 ```bash
-docker build -f docker/frontend.Dockerfile \
-  --build-arg UI_REF=<branch-or-commit> \
-  -t nano-rag-frontend:test .
-```
-
-Docker 运行也属于交付要求。涉及后端、配置、依赖或部署行为的改动，提交前需要至少完成一次 Docker Compose 运行验证，或在交付说明里明确说明为什么本轮无法运行：
-
-```bash
-cd nano-rag
+python -m pytest app/tests
+npm --prefix frontend run lint
+npm --prefix frontend run build
 docker compose -f docker/docker-compose.yml up -d --build
-curl http://127.0.0.1:8000/health
-docker compose -f docker/docker-compose.yml down
 ```
 
-GitHub Actions 会执行后端测试、Compose 配置校验，以及 app/frontend Docker image build；前端 lint/build 由上游 `nano-rag-ui` 仓库自身的 CI 负责。
-如果要在 GitHub 上跑真实 Gemini smoke test，请在仓库 Secrets 配置 `GEMINI_API_KEY`，然后手动触发 `Live Smoke` workflow。
+当前真实运行状态以 Docker 为准。没有有效 provider key 时，构建和服务健康可以通过，但注入/问答会在模型调用阶段返回真实上游错误。

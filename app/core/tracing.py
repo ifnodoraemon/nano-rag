@@ -31,6 +31,8 @@ OTLP_TLS_ENABLED = os.getenv("OTLP_TLS_ENABLED", "false").lower() in (
     "1",
     "yes",
 )
+_OTEL_LOCK = threading.Lock()
+_OTEL_CONFIGURED_KEY: tuple[str, str, tuple[tuple[str, str], ...]] | None = None
 
 
 def _current_otel_trace_id() -> str | None:
@@ -255,9 +257,15 @@ class FeedbackStore(_PersistedStore[FeedbackRecord]):
 
 
 class TracingManager:
-    def __init__(self, service_name: str, collector_endpoint: str) -> None:
+    def __init__(
+        self,
+        service_name: str,
+        collector_endpoint: str,
+        headers: dict[str, str] | None = None,
+    ) -> None:
         self.service_name = service_name
         self.collector_endpoint = collector_endpoint
+        self.headers = headers or {}
         self.tracer: Any | None = None
 
         if not collector_endpoint:
@@ -265,7 +273,7 @@ class TracingManager:
 
         try:
             from opentelemetry import trace as otel_trace
-            from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import (
+            from opentelemetry.exporter.otlp.proto.http.trace_exporter import (
                 OTLPSpanExporter,
             )
             from opentelemetry.sdk.resources import Resource
@@ -278,17 +286,32 @@ class TracingManager:
             )
             return
 
-        provider = TracerProvider(
-            resource=Resource.create({"service.name": service_name})
+        global _OTEL_CONFIGURED_KEY
+        provider_key = (
+            service_name,
+            collector_endpoint,
+            tuple(sorted((str(key), str(value)) for key, value in self.headers.items())),
         )
-        provider.add_span_processor(
-            BatchSpanProcessor(
-                OTLPSpanExporter(
-                    endpoint=collector_endpoint, insecure=not OTLP_TLS_ENABLED
+        with _OTEL_LOCK:
+            if _OTEL_CONFIGURED_KEY is None:
+                provider = TracerProvider(
+                    resource=Resource.create({"service.name": service_name})
                 )
-            )
-        )
-        otel_trace.set_tracer_provider(provider)
+                provider.add_span_processor(
+                    BatchSpanProcessor(
+                        OTLPSpanExporter(
+                            endpoint=collector_endpoint,
+                            headers=self.headers,
+                        )
+                    )
+                )
+                otel_trace.set_tracer_provider(provider)
+                _OTEL_CONFIGURED_KEY = provider_key
+            elif _OTEL_CONFIGURED_KEY != provider_key:
+                logger.warning(
+                    "OTLP tracer provider is already configured; keeping the first "
+                    "provider for this process."
+                )
         self.tracer = otel_trace.get_tracer(service_name)
 
     @contextmanager

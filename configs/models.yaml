@@ -1,14 +1,13 @@
 model_gateway:
-  base_url: ${MODEL_GATEWAY_BASE_URL:-http://bifrost:8080/v1}
-  api_key: ${MODEL_GATEWAY_API_KEY:-change-me}
+  base_url: ${MODEL_GATEWAY_BASE_URL:-https://generativelanguage.googleapis.com/v1beta/openai}
+  api_key: ${MODEL_GATEWAY_API_KEY:-}
 
 embedding:
   # Gemini Embedding 2 is natively multimodal (text + image + document + audio
   # + video into one vector space). Default dimension uses Matryoshka
   # truncation (3072 -> 1536) for storage / latency savings without measurable
-  # quality loss. Calls go directly to Gemini and bypass Bifrost — set
-  # EMBEDDING_API_BASE_URL / EMBEDDING_API_KEY (or fall back to
-  # GEMINI_API_KEY) accordingly.
+  # quality loss. Calls go directly to the configured provider; configure
+  # EMBEDDING_API_BASE_URL / EMBEDDING_API_KEY explicitly.
   provider: gemini
   multimodal: true
   default_alias: ${EMBEDDING_MODEL_ALIAS:-gemini-embedding-2-preview}
@@ -17,17 +16,19 @@ embedding:
   api_key: ${EMBEDDING_API_KEY:-}
 
 rerank:
-  default_alias: ${RERANK_MODEL_ALIAS:-cohere/rerank-v3.5}
+  default_alias: ${RERANK_MODEL_ALIAS:-disabled}
   base_url: ${RERANK_API_BASE_URL:-}
   api_key: ${RERANK_API_KEY:-}
+  path: ${RERANK_API_PATH:-}
 
 generation:
-  default_alias: ${GENERATION_MODEL_ALIAS:-gemini/gemini-3.1-pro-preview}
-  base_url: ${GENERATION_API_BASE_URL:-}
+  default_alias: ${GENERATION_MODEL_ALIAS:-gemini-3.1-pro-preview}
+  base_url: ${GENERATION_API_BASE_URL:-https://generativelanguage.googleapis.com/v1beta/openai}
   api_key: ${GENERATION_API_KEY:-}
 
 document_parser:
   enabled: ${DOCUMENT_PARSER_ENABLED:-true}
+  provider: ${DOCUMENT_PARSER_PROVIDER:-gemini}
   default_alias: ${DOCUMENT_PARSER_MODEL:-gemini-3.1-pro-preview}
-  base_url: ${DOCUMENT_PARSER_API_BASE_URL:-http://bifrost:8080/genai}
+  base_url: ${DOCUMENT_PARSER_API_BASE_URL:-https://generativelanguage.googleapis.com}
   api_key: ${DOCUMENT_PARSER_API_KEY:-}

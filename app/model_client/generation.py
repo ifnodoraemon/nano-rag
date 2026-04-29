@@ -21,8 +21,7 @@ class GenerationClient(GatewayClient):
     async def generate(
         self, messages: list[dict[str, Any]], model_alias: str | None = None
     ) -> dict[str, Any]:
-        payload = {"model": model_alias or self.alias, "messages": messages}
-        data = await self.post("/chat/completions", payload)
+        data = await self.provider_client.chat_completions(messages, model_alias or self.alias)
         choices = data.get("choices", [])
         if not choices:
             return {

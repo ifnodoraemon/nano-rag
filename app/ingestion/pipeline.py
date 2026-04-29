@@ -8,8 +8,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-import mimetypes
-
 from app.ingestion.chunker import build_chunks
 from app.ingestion.loader import discover_files
 from app.ingestion.metadata import extract_document_metadata
@@ -35,7 +33,7 @@ AUDIO_SUFFIXES = {".mp3", ".wav", ".m4a", ".aac", ".ogg", ".flac"}
 VIDEO_SUFFIXES = {".mp4", ".mov", ".webm", ".mkv", ".avi", ".mpeg", ".mpg"}
 MEDIA_SUFFIXES = IMAGE_SUFFIXES | AUDIO_SUFFIXES | VIDEO_SUFFIXES
 
-MEDIA_MIME_FALLBACK = {
+MEDIA_MIME_TYPES = {
     ".png": "image/png",
     ".jpg": "image/jpeg",
     ".jpeg": "image/jpeg",
@@ -54,10 +52,6 @@ MEDIA_MIME_FALLBACK = {
     ".mpeg": "video/mpeg",
     ".mpg": "video/mpeg",
 }
-# Backward-compat alias retained so older imports still work.
-IMAGE_MIME_FALLBACK = MEDIA_MIME_FALLBACK
-
-
 def _modality_for_suffix(suffix: str) -> str:
     if suffix in IMAGE_SUFFIXES:
         return "image"
@@ -66,6 +60,13 @@ def _modality_for_suffix(suffix: str) -> str:
     if suffix in VIDEO_SUFFIXES:
         return "video"
     return "text"
+
+
+def _mime_type_for_suffix(suffix: str) -> str:
+    mime_type = MEDIA_MIME_TYPES.get(suffix)
+    if not mime_type:
+        raise ParsingError(f"mime type is not configured for media suffix {suffix}")
+    return mime_type
 
 logger = logging.getLogger(__name__)
 from app.vectorstore.repository import VectorRepository
@@ -297,26 +298,11 @@ class IngestionPipeline:
         self, items: list[list[EmbedItem]]
     ) -> list[list[float]]:
         embed_items_fn = getattr(self.embedding_client, "embed_items", None)
-        if embed_items_fn is not None:
-            return await embed_items_fn(items)
-        # Backward-compat fallback for legacy / test fake clients without
-        # multimodal support: degrade to text-only by stringifying items.
-        flat_texts: list[str] = []
-        for batch in items:
-            parts: list[str] = []
-            for item in batch:
-                if isinstance(item, TextItem):
-                    parts.append(item.text)
-                elif isinstance(item, ImageItem):
-                    parts.append(f"<image:{item.mime_type}:{len(item.data)} bytes>")
-                elif isinstance(item, AudioItem):
-                    parts.append(f"<audio:{item.mime_type}:{len(item.data)} bytes>")
-                elif isinstance(item, VideoItem):
-                    parts.append(f"<video:{item.mime_type}:{len(item.data)} bytes>")
-                else:
-                    parts.append(str(item))
-            flat_texts.append("\n".join(parts))
-        return await self.embedding_client.embed_texts(flat_texts)
+        if embed_items_fn is None:
+            raise ModelGatewayError(
+                "embedding client must implement embed_items; text-only compatibility path is disabled"
+            )
+        return await embed_items_fn(items)
 
     async def _prepare_media_document(
         self,
@@ -328,9 +314,7 @@ class IngestionPipeline:
     ) -> PreparedDocument:
         suffix = file_path.suffix.lower()
         modality = _modality_for_suffix(suffix)
-        mime_type = MEDIA_MIME_FALLBACK.get(suffix) or (
-            mimetypes.guess_type(file_path.name)[0] or "application/octet-stream"
-        )
+        mime_type = _mime_type_for_suffix(suffix)
         title = file_path.stem
         document_metadata = {
             "kb_id": kb_id,
@@ -416,9 +400,7 @@ class IngestionPipeline:
                         "bytes not available; the upload directory may have been "
                         "pruned. Re-ingest the original file."
                     )
-                mime = chunk.mime_type or MEDIA_MIME_FALLBACK.get(
-                    source.suffix.lower(), "application/octet-stream"
-                )
+                mime = chunk.mime_type or _mime_type_for_suffix(source.suffix.lower())
                 payload = source.read_bytes()
                 if chunk.modality == "image":
                     inputs.append([ImageItem(data=payload, mime_type=mime)])

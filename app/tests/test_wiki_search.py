@@ -49,7 +49,7 @@ def _config(tmp_path) -> AppConfig:
 
 
 @pytest.mark.asyncio
-async def test_retrieval_pipeline_prefers_wiki_hits_before_raw_fallback(tmp_path) -> None:
+async def test_retrieval_pipeline_prefers_wiki_hits_before_raw_hits(tmp_path) -> None:
     wiki_compiler = WikiCompiler(tmp_path / "wiki")
     wiki_compiler.upsert_document(
         Document(
@@ -120,7 +120,7 @@ async def test_retrieval_pipeline_prefers_wiki_hits_before_raw_fallback(tmp_path
 
 
 @pytest.mark.asyncio
-async def test_retrieval_pipeline_falls_back_to_raw_when_wiki_insufficient(tmp_path) -> None:
+async def test_retrieval_pipeline_includes_raw_hits_when_wiki_is_insufficient(tmp_path) -> None:
     wiki_compiler = WikiCompiler(tmp_path / "wiki")
     wiki_compiler.upsert_document(
         Document(

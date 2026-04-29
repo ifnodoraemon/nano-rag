@@ -1,5 +1,9 @@
+import pytest
+
 from app.core.config import AppConfig
+from app.core.exceptions import ConfigurationError
 from app.model_client.base import GatewayClient
+from app.model_client.rerank import RerankClient
 
 
 def test_gateway_client_headers_include_bearer_token() -> None:
@@ -8,7 +12,7 @@ def test_gateway_client_headers_include_bearer_token() -> None:
         settings={},
         models={
             "model_gateway": {"base_url": "http://localhost:4000", "api_key": "secret"},
-            "generation": {},
+            "generation": {"base_url": "http://localhost:4000", "api_key": "secret"},
         },
         prompts={},
     )
@@ -16,14 +20,14 @@ def test_gateway_client_headers_include_bearer_token() -> None:
     assert client.headers["Authorization"] == "Bearer secret"
 
 
-def test_gateway_api_key_prefers_explicit_env(monkeypatch) -> None:
-    monkeypatch.setenv("MODEL_GATEWAY_API_KEY", "gemini-secret")
+def test_gateway_api_key_prefers_capability_specific_env(monkeypatch) -> None:
+    monkeypatch.setenv("GENERATION_API_KEY", "gemini-secret")
     config = AppConfig(
         config_dir=None,  # type: ignore[arg-type]
         settings={},
         models={
             "model_gateway": {"base_url": "http://localhost:4000", "api_key": "secret"},
-            "generation": {},
+            "generation": {"base_url": "http://localhost:4000", "api_key": "secret"},
         },
         prompts={},
     )
@@ -31,19 +35,19 @@ def test_gateway_api_key_prefers_explicit_env(monkeypatch) -> None:
     assert client.headers["Authorization"] == "Bearer gemini-secret"
 
 
-def test_phoenix_endpoints_are_disabled_by_default() -> None:
+def test_langfuse_endpoints_are_disabled_by_default() -> None:
     config = AppConfig(
         config_dir=None,  # type: ignore[arg-type]
         settings={},
         models={
             "model_gateway": {"base_url": "http://localhost:4000", "api_key": "secret"},
-            "generation": {},
+            "generation": {"base_url": "http://localhost:4000", "api_key": "secret"},
         },
         prompts={},
     )
-    assert config.phoenix_collector_endpoint == ""
-    assert config.phoenix_ui_endpoint == ""
-    assert config.phoenix_ui_host_header == ""
+    assert config.langfuse_otel_endpoint == ""
+    assert config.langfuse_ui_endpoint == ""
+    assert config.langfuse_otel_headers == {}
 
 
 def test_capability_gateway_prefers_capability_specific_env(monkeypatch) -> None:
@@ -64,7 +68,7 @@ def test_capability_gateway_prefers_capability_specific_env(monkeypatch) -> None
     }
 
 
-def test_capability_gateway_falls_back_to_global_gateway() -> None:
+def test_capability_gateway_requires_explicit_capability_config() -> None:
     config = AppConfig(
         config_dir=None,  # type: ignore[arg-type]
         settings={},
@@ -74,7 +78,61 @@ def test_capability_gateway_falls_back_to_global_gateway() -> None:
         },
         prompts={},
     )
-    assert config.gateway_for("embedding") == {
-        "base_url": "http://localhost:4000",
-        "api_key": "secret",
+    with pytest.raises(ConfigurationError, match="EMBEDDING_API_BASE_URL"):
+        config.gateway_for("embedding")
+
+
+@pytest.mark.asyncio
+async def test_rerank_client_uses_configured_qwen_endpoint(monkeypatch) -> None:
+    monkeypatch.delenv("DISABLE_RERANK", raising=False)
+    config = AppConfig(
+        config_dir=None,  # type: ignore[arg-type]
+        settings={"timeout": {"rerank_seconds": 5}},
+        models={
+            "model_gateway": {"base_url": "", "api_key": ""},
+            "rerank": {
+                "default_alias": "qwen3-rerank",
+                "base_url": "https://dashscope-intl.aliyuncs.com/compatible-api/v1",
+                "api_key": "dashscope-secret",
+                "path": "/reranks",
+            },
+        },
+        prompts={},
+    )
+
+    class FakeResponse:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict:
+            return {
+                "results": [
+                    {"index": 1, "relevance_score": 0.9},
+                    {"index": 0, "relevance_score": 0.5},
+                ]
+            }
+
+    class FakeAsyncClient:
+        def __init__(self) -> None:
+            self.calls = []
+
+        async def post(self, url: str, **kwargs):  # noqa: ANN003
+            self.calls.append({"url": url, **kwargs})
+            return FakeResponse()
+
+    client = RerankClient(config)
+    fake_http = FakeAsyncClient()
+    client.provider_client._client = fake_http  # noqa: SLF001
+
+    results = await client.rerank("报销", ["规则 A", "规则 B"], top_k=2)
+
+    assert [result.index for result in results] == [1, 0]
+    assert fake_http.calls[0]["url"] == (
+        "https://dashscope-intl.aliyuncs.com/compatible-api/v1/reranks"
+    )
+    assert fake_http.calls[0]["json"] == {
+        "model": "qwen3-rerank",
+        "query": "报销",
+        "documents": ["规则 A", "规则 B"],
+        "top_n": 2,
     }

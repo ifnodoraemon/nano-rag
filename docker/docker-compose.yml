@@ -4,13 +4,6 @@ services:
       context: ..
       dockerfile: docker/app.Dockerfile
     container_name: nano-rag-app
-    env_file:
-      - path: ../.env
-        required: false
-      # bifrost/.env carries GEMINI_API_KEY etc; the multimodal embedding
-      # client needs direct access to this provider key (it bypasses Bifrost).
-      - path: ./bifrost/.env
-        required: false
     ports:
       - "8000:8000"
     environment:
@@ -19,31 +12,43 @@ services:
       MILVUS_URI: ${MILVUS_URI:-http://milvus:19530}
       HTTP_PROXY: ${HTTP_PROXY:-}
       HTTPS_PROXY: ${HTTPS_PROXY:-}
-      NO_PROXY: ${NO_PROXY:-localhost,127.0.0.1,::1},app,phoenix,milvus,etcd,minio,bifrost
+      NO_PROXY: ${NO_PROXY:-localhost,127.0.0.1,::1},app,langfuse-web,langfuse-worker,langfuse-postgres,langfuse-clickhouse,langfuse-redis,milvus,etcd,minio
       http_proxy: ${http_proxy:-}
       https_proxy: ${https_proxy:-}
-      no_proxy: ${no_proxy:-localhost,127.0.0.1,::1},app,phoenix,milvus,etcd,minio,bifrost
+      no_proxy: ${no_proxy:-localhost,127.0.0.1,::1},app,langfuse-web,langfuse-worker,langfuse-postgres,langfuse-clickhouse,langfuse-redis,milvus,etcd,minio
       ALL_PROXY: ""
       all_proxy: ""
       PARSED_OUTPUT_DIR: /workspace/data/parsed
       EVAL_REPORT_DIR: /workspace/data/reports/eval
-      PHOENIX_COLLECTOR_ENDPOINT: ${PHOENIX_COLLECTOR_ENDPOINT:-http://phoenix:4317}
-      PHOENIX_UI_ENDPOINT: ${PHOENIX_UI_ENDPOINT:-http://phoenix:6006}
-      PHOENIX_UI_HOST_HEADER: ${PHOENIX_UI_HOST_HEADER:-localhost}
+      LANGFUSE_OTEL_ENDPOINT: ${LANGFUSE_OTEL_ENDPOINT:-http://langfuse-web:3000/api/public/otel/v1/traces}
+      LANGFUSE_UI_ENDPOINT: ${LANGFUSE_UI_ENDPOINT:-http://langfuse-web:3000}
+      LANGFUSE_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY:-pk-lf-local}
+      LANGFUSE_SECRET_KEY: ${LANGFUSE_SECRET_KEY:-sk-lf-local}
       RAG_INGEST_ALLOWED_DIRS: /workspace/data/raw
       EVAL_DATASET_DIR: /workspace/data/eval
+      RAG_AUTH_DISABLED: ${RAG_AUTH_DISABLED:-}
+      RAG_API_KEYS: ${RAG_API_KEYS:-nano-rag-local}
       MODEL_GATEWAY_MODE: ${MODEL_GATEWAY_MODE:-live}
-      MODEL_GATEWAY_BASE_URL: ${COMPOSE_MODEL_GATEWAY_BASE_URL:-http://bifrost:8080/v1}
-      MODEL_GATEWAY_API_KEY: ${COMPOSE_MODEL_GATEWAY_API_KEY:-bifrost-local}
-      GENERATION_MODEL_ALIAS: ${COMPOSE_GENERATION_MODEL_ALIAS:-gemini/gemini-3.1-pro-preview}
-      # Multimodal embedding bypasses Bifrost and calls Gemini directly.
-      # The client tries EMBEDDING_API_KEY first, then GEMINI_API_KEY (also
-      # used by Bifrost's Gemini provider, see docker/bifrost/.env).
+      MODEL_GATEWAY_BASE_URL: ${COMPOSE_MODEL_GATEWAY_BASE_URL:-https://generativelanguage.googleapis.com/v1beta/openai}
+      MODEL_GATEWAY_API_KEY: ${COMPOSE_MODEL_GATEWAY_API_KEY:-}
+      GENERATION_MODEL_ALIAS: ${COMPOSE_GENERATION_MODEL_ALIAS:-gemini-3.1-pro-preview}
+      GENERATION_API_BASE_URL: ${COMPOSE_GENERATION_API_BASE_URL:-https://generativelanguage.googleapis.com/v1beta/openai}
+      GENERATION_API_KEY: ${COMPOSE_GENERATION_API_KEY:-}
+      # Multimodal embedding calls the configured provider directly.
+      # No alternate provider key is applied.
+      EMBEDDING_PROVIDER: ${COMPOSE_EMBEDDING_PROVIDER:-gemini}
       EMBEDDING_MODEL_ALIAS: ${COMPOSE_EMBEDDING_MODEL_ALIAS:-gemini-embedding-2-preview}
       EMBEDDING_API_BASE_URL: ${COMPOSE_EMBEDDING_API_BASE_URL:-https://generativelanguage.googleapis.com}
       EMBEDDING_API_KEY: ${COMPOSE_EMBEDDING_API_KEY:-}
-      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      DOCUMENT_PARSER_ENABLED: ${DOCUMENT_PARSER_ENABLED:-true}
+      DOCUMENT_PARSER_PROVIDER: ${COMPOSE_DOCUMENT_PARSER_PROVIDER:-gemini}
+      DOCUMENT_PARSER_MODEL: ${COMPOSE_DOCUMENT_PARSER_MODEL:-gemini-3.1-pro-preview}
+      DOCUMENT_PARSER_API_BASE_URL: ${COMPOSE_DOCUMENT_PARSER_API_BASE_URL:-https://generativelanguage.googleapis.com}
+      DOCUMENT_PARSER_API_KEY: ${COMPOSE_DOCUMENT_PARSER_API_KEY:-}
       RERANK_MODEL_ALIAS: ${COMPOSE_RERANK_MODEL_ALIAS:-disabled}
+      RERANK_API_BASE_URL: ${COMPOSE_RERANK_API_BASE_URL:-}
+      RERANK_API_KEY: ${COMPOSE_RERANK_API_KEY:-}
+      RERANK_API_PATH: ${COMPOSE_RERANK_API_PATH:-}
       DISABLE_RERANK: ${COMPOSE_DISABLE_RERANK:-}
     volumes:
       - ../configs:/workspace/configs:ro
@@ -54,10 +59,6 @@ services:
     depends_on:
       milvus:
         condition: service_healthy
-      phoenix:
-        condition: service_healthy
-      bifrost:
-        condition: service_started
     restart: unless-stopped
     healthcheck:
       test:
@@ -135,25 +136,10 @@ services:
       retries: 18
       start_period: 20s
 
-  bifrost:
-    image: maximhq/bifrost:v1.3.9
-    container_name: nano-rag-bifrost
-    env_file:
-      - path: ./bifrost/.env
-        required: false
-    ports:
-      - "127.0.0.1:8080:8080"
-    volumes:
-      - ./bifrost/config.json:/app/data/config.json
-    restart: unless-stopped
-
   frontend:
     build:
       context: ..
       dockerfile: docker/frontend.Dockerfile
-      args:
-        UI_REPO_URL: ${UI_REPO_URL:-https://github.com/ifnodoraemon/nano-rag-ui.git}
-        UI_REF: ${UI_REF:-main}
     container_name: nano-rag-frontend
     ports:
       - "3000:80"
@@ -162,31 +148,139 @@ services:
         condition: service_healthy
     restart: unless-stopped
 
-  phoenix:
-    image: arizephoenix/phoenix:latest
-    container_name: nano-rag-phoenix
+  langfuse-worker:
+    image: langfuse/langfuse-worker:3
+    container_name: nano-rag-langfuse-worker
+    restart: unless-stopped
+    depends_on:
+      langfuse-postgres:
+        condition: service_healthy
+      langfuse-clickhouse:
+        condition: service_healthy
+      langfuse-redis:
+        condition: service_healthy
+      langfuse-minio-bootstrap:
+        condition: service_completed_successfully
+    environment: &langfuse-env
+      DATABASE_URL: postgresql://langfuse:langfuse@langfuse-postgres:5432/langfuse
+      SALT: ${LANGFUSE_SALT:-nano-rag-langfuse-local-salt}
+      ENCRYPTION_KEY: ${LANGFUSE_ENCRYPTION_KEY:-0000000000000000000000000000000000000000000000000000000000000000}
+      TELEMETRY_ENABLED: ${LANGFUSE_TELEMETRY_ENABLED:-false}
+      LANGFUSE_ENABLE_EXPERIMENTAL_FEATURES: ${LANGFUSE_ENABLE_EXPERIMENTAL_FEATURES:-true}
+      CLICKHOUSE_MIGRATION_URL: clickhouse://langfuse-clickhouse:9000
+      CLICKHOUSE_URL: http://langfuse-clickhouse:8123
+      CLICKHOUSE_USER: clickhouse
+      CLICKHOUSE_PASSWORD: clickhouse
+      CLICKHOUSE_CLUSTER_ENABLED: false
+      CLICKHOUSE_MIGRATION_CLUSTER_ENABLED: false
+      REDIS_CONNECTION_STRING: redis://langfuse-redis:6379
+      LANGFUSE_S3_EVENT_UPLOAD_BUCKET: langfuse
+      LANGFUSE_S3_EVENT_UPLOAD_REGION: auto
+      LANGFUSE_S3_EVENT_UPLOAD_ACCESS_KEY_ID: minioadmin
+      LANGFUSE_S3_EVENT_UPLOAD_SECRET_ACCESS_KEY: minioadmin
+      LANGFUSE_S3_EVENT_UPLOAD_ENDPOINT: http://minio:9000
+      LANGFUSE_S3_EVENT_UPLOAD_FORCE_PATH_STYLE: true
+      LANGFUSE_S3_MEDIA_UPLOAD_BUCKET: langfuse
+      LANGFUSE_S3_MEDIA_UPLOAD_REGION: auto
+      LANGFUSE_S3_MEDIA_UPLOAD_ACCESS_KEY_ID: minioadmin
+      LANGFUSE_S3_MEDIA_UPLOAD_SECRET_ACCESS_KEY: minioadmin
+      LANGFUSE_S3_MEDIA_UPLOAD_ENDPOINT: http://minio:9000
+      LANGFUSE_S3_MEDIA_UPLOAD_FORCE_PATH_STYLE: true
+      LANGFUSE_S3_BATCH_EXPORT_BUCKET: langfuse
+      LANGFUSE_S3_BATCH_EXPORT_REGION: auto
+      LANGFUSE_S3_BATCH_EXPORT_ACCESS_KEY_ID: minioadmin
+      LANGFUSE_S3_BATCH_EXPORT_SECRET_ACCESS_KEY: minioadmin
+      LANGFUSE_S3_BATCH_EXPORT_ENDPOINT: http://minio:9000
+      LANGFUSE_S3_BATCH_EXPORT_FORCE_PATH_STYLE: true
+
+  langfuse-web:
+    image: langfuse/langfuse:3
+    container_name: nano-rag-langfuse
     ports:
-      - "127.0.0.1:6006:6006"
-      - "127.0.0.1:4317:4317"
+      - "127.0.0.1:3001:3000"
+    restart: unless-stopped
+    depends_on:
+      langfuse-postgres:
+        condition: service_healthy
+      langfuse-clickhouse:
+        condition: service_healthy
+      langfuse-redis:
+        condition: service_healthy
+      langfuse-minio-bootstrap:
+        condition: service_completed_successfully
+    environment:
+      <<: *langfuse-env
+      NEXTAUTH_URL: ${LANGFUSE_NEXTAUTH_URL:-http://localhost:3001}
+      NEXTAUTH_SECRET: ${LANGFUSE_NEXTAUTH_SECRET:-nano-rag-langfuse-local-nextauth-secret}
+      LANGFUSE_INIT_ORG_ID: ${LANGFUSE_INIT_ORG_ID:-nano-rag}
+      LANGFUSE_INIT_ORG_NAME: ${LANGFUSE_INIT_ORG_NAME:-Nano RAG}
+      LANGFUSE_INIT_PROJECT_ID: ${LANGFUSE_INIT_PROJECT_ID:-nano-rag}
+      LANGFUSE_INIT_PROJECT_NAME: ${LANGFUSE_INIT_PROJECT_NAME:-Nano RAG}
+      LANGFUSE_INIT_PROJECT_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY:-pk-lf-local}
+      LANGFUSE_INIT_PROJECT_SECRET_KEY: ${LANGFUSE_SECRET_KEY:-sk-lf-local}
+      LANGFUSE_INIT_USER_EMAIL: ${LANGFUSE_INIT_USER_EMAIL:-admin@nano-rag.local}
+      LANGFUSE_INIT_USER_NAME: ${LANGFUSE_INIT_USER_NAME:-Nano RAG Admin}
+      LANGFUSE_INIT_USER_PASSWORD: ${LANGFUSE_INIT_USER_PASSWORD:-nano-rag-local-admin}
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:6006', timeout=5)"]
+      test: ["CMD-SHELL", "wget -q --spider http://$(hostname):3000/api/public/health || exit 1"]
       interval: 10s
       timeout: 5s
-      retries: 6
-      start_period: 10s
+      retries: 30
+      start_period: 30s
 
-  litellm:
-    image: ghcr.io/berriai/litellm:main-stable
-    container_name: nano-rag-litellm
-    profiles:
-      - litellm
-    ports:
-      - "127.0.0.1:4000:4000"
-    environment:
-      LITELLM_MASTER_KEY: ${LITELLM_MASTER_KEY:-change-me}
-    volumes:
-      - ./litellm/config.yaml:/app/config.yaml:ro
+  langfuse-postgres:
+    image: postgres:17-alpine
+    container_name: nano-rag-langfuse-postgres
     restart: unless-stopped
+    environment:
+      POSTGRES_USER: langfuse
+      POSTGRES_PASSWORD: langfuse
+      POSTGRES_DB: langfuse
+    volumes:
+      - langfuse-postgres-data-v2:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U langfuse -d langfuse"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  langfuse-clickhouse:
+    image: clickhouse/clickhouse-server:24.8
+    container_name: nano-rag-langfuse-clickhouse
+    restart: unless-stopped
+    environment:
+      CLICKHOUSE_DB: default
+      CLICKHOUSE_USER: clickhouse
+      CLICKHOUSE_PASSWORD: clickhouse
+    volumes:
+      - langfuse-clickhouse-data-v2:/var/lib/clickhouse
+      - langfuse-clickhouse-logs-v2:/var/log/clickhouse-server
+    healthcheck:
+      test: ["CMD", "clickhouse-client", "--query", "SELECT 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 18
+
+  langfuse-redis:
+    image: redis:7-alpine
+    container_name: nano-rag-langfuse-redis
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  langfuse-minio-bootstrap:
+    image: minio/mc:RELEASE.2024-05-24T09-08-49Z
+    container_name: nano-rag-langfuse-minio-bootstrap
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: ["/bin/sh", "-c"]
+    command: >
+      "mc alias set local http://minio:9000 minioadmin minioadmin &&
+      mc mb --ignore-existing local/langfuse"
 
 volumes:
   app-parsed-data:
@@ -194,3 +288,6 @@ volumes:
   etcd-data:
   minio-data:
   milvus-data:
+  langfuse-postgres-data-v2:
+  langfuse-clickhouse-data-v2:
+  langfuse-clickhouse-logs-v2:

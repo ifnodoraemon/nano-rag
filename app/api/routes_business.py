@@ -10,7 +10,7 @@ from uuid import uuid4
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, UploadFile
 
 from app.api.auth import require_api_key
-from app.ingestion.loader import IngestPathError, SUPPORTED_EXTENSIONS
+from app.ingestion.loader import IngestPathError, SUPPORTED_EXTENSIONS, list_allowed_ingest_sources
 from app.ingestion.pipeline import ChunkConfigurationError
 from app.schemas.benchmark import BenchmarkRunRequest, BenchmarkRunResponse
 from app.schemas.business import (
@@ -21,6 +21,8 @@ from app.schemas.business import (
     BusinessIngestResponse,
     FeedbackRequest,
     FeedbackResponse,
+    IngestSourceSummary,
+    WorkspaceSummary,
 )
 from app.schemas.chat import ChatRequest
 from app.schemas.trace import TraceRecord
@@ -172,6 +174,73 @@ def _list_scope_documents(
     return sorted(documents, key=lambda item: (-item.updated_at, item.title.lower()))
 
 
+def _workspace_id(kb_id: str, tenant_id: str | None) -> str:
+    return f"{kb_id}:{tenant_id or '__shared__'}"
+
+
+def _workspace_name(kb_id: str, tenant_id: str | None) -> str:
+    return f"{kb_id} / {tenant_id or '共享'}"
+
+
+def _list_workspaces(container) -> list[WorkspaceSummary]:  # noqa: ANN001
+    workspaces: dict[str, WorkspaceSummary] = {}
+
+    def ensure(kb_id: str, tenant_id: str | None) -> WorkspaceSummary:
+        workspace_id = _workspace_id(kb_id, tenant_id)
+        workspace = workspaces.get(workspace_id)
+        if workspace is None:
+            workspace = WorkspaceSummary(
+                workspace_id=workspace_id,
+                name=_workspace_name(kb_id, tenant_id),
+                kb_id=kb_id,
+                tenant_id=tenant_id,
+            )
+            workspaces[workspace_id] = workspace
+        return workspace
+
+    for kb_id in _get_supported_kb_ids():
+        ensure(kb_id, None)
+
+    parsed_dir = container.config.parsed_dir
+    if parsed_dir.exists():
+        for artifact in sorted(parsed_dir.glob("*.json")):
+            try:
+                payload = json.loads(artifact.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            document = payload.get("document") if isinstance(payload, dict) else None
+            chunks = payload.get("chunks") if isinstance(payload, dict) else None
+            if not isinstance(document, dict):
+                continue
+            metadata = document.get("metadata", {})
+            if not isinstance(metadata, dict):
+                metadata = {}
+            kb_id = str(metadata.get("kb_id", "default"))
+            tenant_id = metadata.get("tenant_id")
+            tenant = str(tenant_id) if tenant_id is not None else None
+            workspace = ensure(kb_id, tenant)
+            workspace.document_count += 1
+            workspace.chunk_count += len(chunks) if isinstance(chunks, list) else 0
+            updated_at = artifact.stat().st_mtime
+            if workspace.updated_at is None or updated_at > workspace.updated_at:
+                workspace.updated_at = updated_at
+
+    traces = container.trace_store.list(page=1, page_size=100)
+    for trace in traces.items:
+        kb_id = trace.kb_id or "default"
+        workspace = ensure(kb_id, trace.tenant_id)
+        workspace.trace_count += 1
+
+    return sorted(
+        workspaces.values(),
+        key=lambda item: (
+            -(item.updated_at or 0),
+            item.kb_id,
+            item.tenant_id or "",
+        ),
+    )
+
+
 @router.post(
     "/chat",
     response_model=BusinessChatResponse,
@@ -231,6 +300,27 @@ async def rag_ingest(
         chunks=response.chunks,
         source="path",
     )
+
+
+@router.get(
+    "/workspaces",
+    response_model=list[WorkspaceSummary],
+    dependencies=[Depends(require_api_key)],
+)
+async def rag_workspaces(request: Request) -> list[WorkspaceSummary]:
+    return _list_workspaces(request.app.state.container)
+
+
+@router.get(
+    "/ingest/sources",
+    response_model=list[IngestSourceSummary],
+    dependencies=[Depends(require_api_key)],
+)
+async def rag_ingest_sources() -> list[IngestSourceSummary]:
+    return [
+        IngestSourceSummary.model_validate(source)
+        for source in list_allowed_ingest_sources()
+    ]
 
 
 @router.post(

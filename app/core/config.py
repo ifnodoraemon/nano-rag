@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import re
+import base64
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -66,18 +67,15 @@ class AppConfig:
         explicit = os.getenv("MODEL_GATEWAY_API_KEY")
         if explicit:
             return explicit
-        legacy = os.getenv("LITELLM_MASTER_KEY")
-        if legacy:
-            return legacy
         key = self.models["model_gateway"]["api_key"]
-        if self.gateway_mode != "mock" and key in INSECURE_DEFAULT_KEYS:
+        if key in INSECURE_DEFAULT_KEYS:
             raise ConfigurationError(
                 "MODEL_GATEWAY_API_KEY must be set for production mode. "
-                "Set MODEL_GATEWAY_MODE=mock for local development."
+                "Configure a real provider key explicitly."
             )
         return str(key)
 
-    def gateway_for(self, capability: str) -> dict[str, str]:
+    def gateway_for(self, capability: str, validate: bool = True) -> dict[str, str]:
         env_prefix_map = {
             "embedding": "EMBEDDING",
             "generation": "GENERATION",
@@ -89,17 +87,21 @@ class AppConfig:
         base_url = (
             os.getenv(f"{env_prefix}_API_BASE_URL")
             or section.get("base_url")
-            or self.gateway_base_url
         )
         api_key = (
             os.getenv(f"{env_prefix}_API_KEY")
             or section.get("api_key")
-            or self.gateway_api_key
         )
-        if self.gateway_mode != "mock" and api_key in INSECURE_DEFAULT_KEYS:
+        if not validate:
+            return {"base_url": str(base_url or ""), "api_key": str(api_key or "")}
+        if not base_url:
+            raise ConfigurationError(
+                f"{capability.upper()}_API_BASE_URL must be configured explicitly."
+            )
+        if api_key in INSECURE_DEFAULT_KEYS:
             raise ConfigurationError(
                 f"{capability.upper()}_API_KEY must be set for production mode. "
-                "Set MODEL_GATEWAY_MODE=mock for local development."
+                "No alternate backend key will be used."
             )
         return {"base_url": str(base_url), "api_key": str(api_key)}
 
@@ -109,7 +111,12 @@ class AppConfig:
 
     @property
     def gateway_mode(self) -> str:
-        return os.getenv("MODEL_GATEWAY_MODE", "mock").lower()
+        mode = os.getenv("MODEL_GATEWAY_MODE", "live").lower()
+        if mode == "mock":
+            raise ConfigurationError(
+                "MODEL_GATEWAY_MODE=mock is not supported in the real-data runtime."
+            )
+        return mode
 
     @property
     def rerank_enabled(self) -> bool:
@@ -127,16 +134,70 @@ class AppConfig:
         )
 
     @property
-    def phoenix_collector_endpoint(self) -> str:
-        return os.getenv("PHOENIX_COLLECTOR_ENDPOINT", "").strip()
+    def langfuse_otel_endpoint(self) -> str:
+        return os.getenv("LANGFUSE_OTEL_ENDPOINT", "").strip()
 
     @property
-    def phoenix_ui_endpoint(self) -> str:
-        return os.getenv("PHOENIX_UI_ENDPOINT", "").strip()
+    def langfuse_ui_endpoint(self) -> str:
+        return os.getenv("LANGFUSE_UI_ENDPOINT", "").strip()
 
     @property
-    def phoenix_ui_host_header(self) -> str:
-        return os.getenv("PHOENIX_UI_HOST_HEADER", "").strip()
+    def langfuse_public_key(self) -> str:
+        return os.getenv("LANGFUSE_PUBLIC_KEY", "").strip()
+
+    @property
+    def langfuse_secret_key(self) -> str:
+        return os.getenv("LANGFUSE_SECRET_KEY", "").strip()
+
+    @property
+    def langfuse_otel_headers(self) -> dict[str, str]:
+        if not self.langfuse_public_key or not self.langfuse_secret_key:
+            return {}
+        token = base64.b64encode(
+            f"{self.langfuse_public_key}:{self.langfuse_secret_key}".encode("utf-8")
+        ).decode("ascii")
+        return {"Authorization": f"Basic {token}"}
+
+    @property
+    def document_parser_configured(self) -> dict[str, object]:
+        section = self.models.get("document_parser", {})
+        enabled_raw = os.getenv("DOCUMENT_PARSER_ENABLED")
+        if enabled_raw is None:
+            enabled_value = section.get("enabled", True)
+            enabled = enabled_value if isinstance(enabled_value, bool) else parse_bool_env(str(enabled_value))
+        else:
+            enabled = parse_bool_env(enabled_raw)
+        provider = (
+            os.getenv("DOCUMENT_PARSER_PROVIDER")
+            or section.get("provider")
+            or "gemini"
+        )
+        model = (
+            os.getenv("DOCUMENT_PARSER_MODEL")
+            or section.get("default_alias")
+            or ""
+        )
+        base_url = (
+            os.getenv("DOCUMENT_PARSER_API_BASE_URL")
+            or section.get("base_url")
+            or ""
+        )
+        api_key = os.getenv("DOCUMENT_PARSER_API_KEY") or section.get("api_key") or ""
+        missing: list[str] = []
+        if enabled and not str(base_url).strip():
+            missing.append("DOCUMENT_PARSER_API_BASE_URL")
+        if enabled and not str(model).strip():
+            missing.append("DOCUMENT_PARSER_MODEL")
+        if enabled and str(api_key).strip() in INSECURE_DEFAULT_KEYS:
+            missing.append("DOCUMENT_PARSER_API_KEY")
+        return {
+            "enabled": enabled,
+            "provider": str(provider),
+            "model": str(model),
+            "base_url": str(base_url) if base_url else None,
+            "configured": enabled and not missing,
+            "missing": missing,
+        }
 
     @property
     def trace_store_dir(self) -> Path:
@@ -223,9 +284,14 @@ def load_config() -> AppConfig:
 
 
 def build_repository(config: AppConfig) -> VectorRepository:
-    if os.getenv("VECTORSTORE_BACKEND", "memory").lower() == "milvus":
+    backend = os.getenv("VECTORSTORE_BACKEND", "milvus").lower()
+    if backend == "milvus":
         return MilvusVectorRepository.from_config(config)
-    return InMemoryVectorRepository()
+    if backend == "memory":
+        return InMemoryVectorRepository()
+    raise ConfigurationError(
+        f"Unsupported VECTORSTORE_BACKEND={backend!r}; expected 'milvus' or 'memory'."
+    )
 
 
 @dataclass
@@ -268,7 +334,11 @@ class AppContainer:
         document_parser = DocumentParserClient(config)
         trace_store = TraceStore(persist_dir=config.trace_store_dir)
         feedback_store = FeedbackStore(persist_dir=config.feedback_store_dir)
-        tracing_manager = TracingManager("nano-rag", config.phoenix_collector_endpoint)
+        tracing_manager = TracingManager(
+            "nano-rag",
+            config.langfuse_otel_endpoint,
+            headers=config.langfuse_otel_headers,
+        )
         wiki_compiler = WikiCompiler(config.wiki_dir) if config.wiki_enabled else None
         wiki_searcher = WikiSearcher(config.wiki_dir) if config.wiki_enabled else None
         query_rewriter = None

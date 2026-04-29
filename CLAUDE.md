@@ -1,106 +1,103 @@
 # nano-rag
 
-Enterprise RAG (Retrieval-Augmented Generation) system with hybrid retrieval, semantic chunking, and offline evaluation.
+Enterprise RAG system with a real-data runtime: no frontend hardcoded business data, no runtime mock mode, and no silent backend fallback paths.
+
+## Principles
+
+- Real backend data is the source of truth for workspaces, ingest sources, documents, traces, eval reports, and diagnosis targets.
+- Runtime failures should be visible. Missing provider keys, invalid model credentials, parser errors, and Milvus errors must not be hidden behind mock or fallback behavior.
+- The frontend does not store or submit business API keys. Browser requests go through the account system or the Docker nginx proxy, which injects the local backend key.
+- Every RAG answer should be traceable to retrieved context, citations, source documents, and trace IDs.
 
 ## Tech Stack
 
-- **Backend**: Python 3.12 + FastAPI 0.116 + Uvicorn
-- **Frontend**: React 19 + TypeScript 5.9 + Vite 8 + Zustand
-- **Vector DB**: Milvus 2.5 (etcd + MinIO)
-- **Model Gateway**: OpenAI-compatible (Gemini API default)
-- **Tracing**: OpenTelemetry + Phoenix UI
-- **Testing**: pytest + pytest-asyncio
-- **Evaluation**: RAGAS 0.2
+- **Backend**: Python 3.12 + FastAPI + Uvicorn
+- **Frontend**: React 19 + TypeScript + Vite, served by nginx in Docker
+- **Vector DB**: Milvus 2.6 standalone with etcd + MinIO
+- **Model Providers**: direct Gemini or Qwen provider configuration; no Bifrost/LiteLLM runtime layer
+- **Tracing**: OpenTelemetry HTTP export to Langfuse
+- **Testing**: pytest + pytest-asyncio, TypeScript build/lint
+- **Evaluation**: deterministic eval plus optional RAGAS library metrics
 
 ## Project Structure
 
-```
+```text
 app/
   api/          # FastAPI routes (business + debug)
   core/         # Config, exceptions, logging, tracing
   generation/   # Prompt builder, answer formatter, LLM service
   ingestion/    # Document parsing, chunking, metadata extraction
   model_client/ # Embedding, generation, rerank, document parser clients
-  retrieval/    # Hybrid retrieval (BM25 + vector), reranking, context builder
+  retrieval/    # Hybrid retrieval, reranking, context builder, freshness
   schemas/      # Pydantic models
-  vectorstore/  # Milvus + in-memory repository
-  tests/        # 31 test modules
-  main.py       # Entry point
+  vectorstore/  # Milvus plus in-memory test repository
 configs/        # settings.yaml, models.yaml, prompts.yaml
-frontend/       # React SPA
-docker/         # docker-compose.yml + Dockerfiles
+frontend/       # React SPA source
+docker/         # docker-compose.yml + Dockerfiles + nginx config
 scripts/        # run_eval.py, run_benchmark.py
 ```
 
-## Architecture
+## Runtime Architecture
 
 ### Ingestion Pipeline
-Document -> Parser (Docling/pypdf) -> Normalizer -> Semantic Chunker -> Metadata -> Embedding -> Milvus
+
+Document -> configured parser -> normalizer -> chunker -> metadata -> multimodal embedding -> Milvus
 
 ### Retrieval Pipeline
-Query -> Query Rewriter -> Hybrid Retrieval (BM25 + Vector) -> Reranking -> Context Builder -> Freshness Filter
+
+Query -> optional query rewrite -> hybrid retrieval -> reranking -> freshness filter -> context builder
 
 ### Generation Pipeline
-Context + Query -> Prompt Builder -> LLM -> Answer Formatter (with citation tracking)
 
-## Key Commands
+Context + query -> prompt builder -> configured generation gateway -> answer formatter with citations
+
+## Commands
 
 ```bash
-# Development
-uvicorn app.main:app --reload --port 8000
-cd frontend && npm run dev
+# Backend tests
+python -m pytest app/tests
 
-# Testing
-pytest app/tests
+# Frontend checks
+npm --prefix frontend run lint
+npm --prefix frontend run build
 
-# Docker
-cd docker && docker-compose up -d
-
-# Evaluation
-python scripts/run_eval.py
-python scripts/run_benchmark.py
+# Standard runtime
+docker compose -f docker/docker-compose.yml up -d --build
 ```
 
-## Configuration
-
-- `configs/settings.yaml` - Chunking (800 tokens, 120 overlap), retrieval (top_k=20), timeouts
-- `configs/models.yaml` - Model endpoints and aliases per capability
-- `configs/prompts.yaml` - System prompts for generation
-- `.env` - Runtime environment (gateway URLs, API keys, feature flags)
+Do not use non-Docker commands to start the app for runtime validation.
 
 ## Key Environment Variables
 
-- `MODEL_GATEWAY_MODE` - live / mock
-- `MODEL_GATEWAY_BASE_URL` - OpenAI-compatible endpoint
-- `VECTORSTORE_BACKEND` - milvus / memory
-- `DISABLE_RERANK` - 1 to skip reranking
+- `MODEL_GATEWAY_MODE` - `live`; `mock` is not supported by the real-data runtime
+- `GENERATION_API_BASE_URL` - generation provider endpoint
+- `GENERATION_API_KEY` - generation provider key
+- `GENERATION_MODEL_ALIAS` - generation model alias; default examples are Gemini or Qwen
+- `EMBEDDING_API_BASE_URL` - direct embedding provider endpoint
+- `EMBEDDING_API_KEY` - direct embedding provider key
+- `EMBEDDING_PROVIDER` - `gemini`, `dashscope`, or `vllm`
+- `DOCUMENT_PARSER_API_BASE_URL` - document parser endpoint
+- `DOCUMENT_PARSER_API_KEY` - document parser key
+- `DOCUMENT_PARSER_PROVIDER` - `gemini` or `qwen`; `qwen` covers DashScope and OpenAI-compatible vLLM
+- `VECTORSTORE_BACKEND` - defaults to `milvus`; `memory` is only for explicit tests/experiments
+- `RAG_API_KEYS` - backend business API keys
 
 ## Code Conventions
 
-- Pydantic v2 for all schemas (use `model_validate`, not `parse_obj`)
-- Async throughout (FastAPI async routes, httpx async client)
-- AppContainer for dependency injection (initialized in lifespan)
-- YAML config with env var substitution (`${VAR_NAME}`)
-- Structured logging via Python logging module
-- OpenTelemetry spans for tracing all pipeline stages
-
-## API Endpoints
-
-- `GET /health` - Health check (gateway + vectorstore + phoenix)
-- `POST /v1/rag/ingest` - Document ingestion
-- `POST /v1/rag/chat` - RAG chat (with streaming support)
-- `POST /v1/rag/feedback` - User feedback collection
-- `POST /v1/rag/benchmark` - Performance benchmarking
-- Business APIs require API key authentication (X-API-Key header)
+- Pydantic v2 for schemas (`model_validate`, not `parse_obj`)
+- Async FastAPI/httpx paths
+- `AppContainer` owns dependency wiring in lifespan
+- YAML config supports env substitution
+- OpenTelemetry spans should wrap pipeline stages
+- Do not introduce frontend hardcoded business data or backend fallback behavior
 
 ## Docker Services
 
 | Service | Port | Purpose |
 |---------|------|---------|
 | app | 8000 | FastAPI backend |
-| frontend | 3000 | Nginx + React SPA |
+| frontend | 3000 | nginx + React SPA |
+| langfuse | 3001 | Trace, eval, and prompt observability |
 | milvus | 19530 | Vector database |
 | etcd | 2379 | Milvus coordinator |
 | minio | 9000 | Object storage |
-| phoenix | 6006 | Trace visualization |
-| bifrost | 8080 | Optional LLM gateway (profile: bifrost) |

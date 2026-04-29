@@ -47,7 +47,7 @@ def test_prioritize_fresh_hits_prefers_newer_effective_date_within_same_section(
         ),
     ]
 
-    ranked = prioritize_fresh_hits(hits, FreshnessPolicy(enabled=True, allow_stale_fallback=False))
+    ranked = prioritize_fresh_hits(hits, FreshnessPolicy(enabled=True))
 
     assert [hit.chunk.chunk_id for hit in ranked] == ["new"]
     assert ranked[0].chunk.metadata["freshness_tier"] == "primary"
@@ -78,6 +78,6 @@ def test_prioritize_fresh_hits_prefers_higher_version_when_dates_match() -> None
         ),
     ]
 
-    ranked = prioritize_fresh_hits(hits, FreshnessPolicy(enabled=True, allow_stale_fallback=False))
+    ranked = prioritize_fresh_hits(hits, FreshnessPolicy(enabled=True))
 
     assert [hit.chunk.chunk_id for hit in ranked] == ["v2"]

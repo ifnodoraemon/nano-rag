@@ -125,7 +125,6 @@ async def test_file_item_reads_bytes(tmp_path: Path) -> None:
 async def test_missing_api_key_raises() -> None:
     config = _make_config(api_key="")
     client = GeminiMultimodalEmbedding(config)
-    # Live mode requires a key; mock fallback bypasses, so flip explicitly
     client.api_key = ""
     with pytest.raises(ModelGatewayError, match="EMBEDDING_API_KEY"):
         await client.embed_one([TextItem("hi")])
@@ -160,32 +159,23 @@ async def test_empty_response_raises() -> None:
 
 
 @pytest.mark.asyncio
-async def test_mock_mode_returns_deterministic_vector() -> None:
-    config = _make_config(mode="mock", api_key="", dimension=16)
-    client = GeminiMultimodalEmbedding(config)
-
-    v1 = await client.embed_one([TextItem("alpha beta")])
-    v2 = await client.embed_one([TextItem("alpha beta")])
-    v3 = await client.embed_one([TextItem("gamma delta")])
-
-    assert len(v1) == 16
-    assert v1 == v2
-    assert v1 != v3
-
-
-@pytest.mark.asyncio
 async def test_embed_batch_preserves_order() -> None:
-    config = _make_config(mode="mock", api_key="", dimension=8)
+    config = _make_config(dimension=8)
     client = GeminiMultimodalEmbedding(config)
+    values_by_call = [[float(i)] * 8 for i in range(4)]
+
+    def handler(request: httpx.Request) -> httpx.Response:  # noqa: ARG001
+        return _ok_response(values_by_call.pop(0))
+
+    client._client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
 
     batches = [[TextItem(f"item-{i}")] for i in range(4)]
     vectors = await client.embed_batch(batches)
 
     assert len(vectors) == 4
     assert all(len(v) == 8 for v in vectors)
-    # Same input twice must produce same vector (determinism)
-    repeat = await client.embed_batch([batches[0]])
-    assert repeat[0] == vectors[0]
+    assert vectors[0] == [0.0] * 8
+    assert vectors[3] == [3.0] * 8
 
 
 def _dashscope_config(
@@ -288,7 +278,7 @@ async def test_dashscope_missing_key_raises() -> None:
     config = _dashscope_config(api_key="")
     client = DashScopeMultimodalEmbedding(config)
     client.api_key = ""
-    with pytest.raises(ModelGatewayError, match="DASHSCOPE_API_KEY"):
+    with pytest.raises(ModelGatewayError, match="EMBEDDING_API_KEY"):
         await client.embed_one([TextItem("hi")])
 
 

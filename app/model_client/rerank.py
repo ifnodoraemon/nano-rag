@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+
 from app.model_client.base import GatewayClient
 from app.model_client.schemas import RerankResult
 
@@ -11,8 +13,23 @@ if TYPE_CHECKING:
 
 class RerankClient(GatewayClient):
     def __init__(self, config: AppConfig) -> None:
+        if not config.rerank_enabled:
+            self.config = config
+            self.capability = "rerank"
+            self.base_url = ""
+            self.api_key = ""
+            self.timeout = config.settings["timeout"]["rerank_seconds"]
+            self._client = None
+            self.alias = "disabled"
+            self.path = ""
+            return
         super().__init__(config, config.settings["timeout"]["rerank_seconds"], "rerank")
         self.alias = config.models["rerank"]["default_alias"]
+        self.path = (
+            os.getenv("RERANK_API_PATH")
+            or config.models.get("rerank", {}).get("path")
+            or ""
+        )
 
     async def rerank(
         self, query: str, documents: list[str], top_k: int
@@ -22,10 +39,10 @@ class RerankClient(GatewayClient):
         payload = {
             "model": self.alias,
             "query": query,
-            "documents": [{"text": document} for document in documents],
+            "documents": documents,
             "top_n": top_k,
         }
-        data = await self.post("/rerank", payload)
+        data = await self.post(self.path, payload)
         results = data.get("results", [])
         valid_results: list[RerankResult] = []
         for result in results:
