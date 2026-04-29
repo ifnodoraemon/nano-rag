@@ -28,6 +28,8 @@ services:
       EVAL_DATASET_DIR: /workspace/data/eval
       RAG_AUTH_DISABLED: ${RAG_AUTH_DISABLED:-}
       RAG_API_KEYS: ${RAG_API_KEYS:-nano-rag-local}
+      RAG_DIAGNOSIS_ENABLED: ${RAG_DIAGNOSIS_ENABLED:-true}
+      RAG_EVAL_ENABLED: ${RAG_EVAL_ENABLED:-true}
       MODEL_GATEWAY_MODE: ${MODEL_GATEWAY_MODE:-live}
       MODEL_GATEWAY_BASE_URL: ${COMPOSE_MODEL_GATEWAY_BASE_URL:-https://generativelanguage.googleapis.com/v1beta/openai}
       MODEL_GATEWAY_API_KEY: ${COMPOSE_MODEL_GATEWAY_API_KEY:-}
