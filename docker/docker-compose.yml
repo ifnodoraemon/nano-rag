@@ -29,8 +29,12 @@ services:
       RAG_INGEST_ALLOWED_DIRS: /workspace/data/raw
       EVAL_DATASET_DIR: /workspace/data/eval
       MODEL_GATEWAY_MODE: ${MODEL_GATEWAY_MODE:-live}
-      MODEL_GATEWAY_BASE_URL: ${MODEL_GATEWAY_BASE_URL:-http://bifrost:8080/v1}
-      MODEL_GATEWAY_API_KEY: ${MODEL_GATEWAY_API_KEY:-bifrost-local}
+      MODEL_GATEWAY_BASE_URL: ${COMPOSE_MODEL_GATEWAY_BASE_URL:-http://bifrost:8080/v1}
+      MODEL_GATEWAY_API_KEY: ${COMPOSE_MODEL_GATEWAY_API_KEY:-bifrost-local}
+      GENERATION_MODEL_ALIAS: ${COMPOSE_GENERATION_MODEL_ALIAS:-gemini/gemini-3.1-pro-preview}
+      EMBEDDING_MODEL_ALIAS: ${COMPOSE_EMBEDDING_MODEL_ALIAS:-gemini/gemini-embedding-2}
+      RERANK_MODEL_ALIAS: ${COMPOSE_RERANK_MODEL_ALIAS:-disabled}
+      DISABLE_RERANK: ${COMPOSE_DISABLE_RERANK:-}
     volumes:
       - ../configs:/workspace/configs:ro
       - ../data/raw:/workspace/data/raw:ro
@@ -137,6 +141,9 @@ services:
     build:
       context: ..
       dockerfile: docker/frontend.Dockerfile
+      args:
+        UI_REPO_URL: ${UI_REPO_URL:-https://github.com/ifnodoraemon/nano-rag-ui.git}
+        UI_REF: ${UI_REF:-main}
     container_name: nano-rag-frontend
     ports:
       - "3000:80"
