@@ -20,6 +20,8 @@ from app.schemas.business import (
     BusinessDocumentSummary,
     BusinessIngestRequest,
     BusinessIngestResponse,
+    BusinessRetrieveRequest,
+    BusinessRetrieveResponse,
     FeedbackRequest,
     FeedbackResponse,
     IngestSourceSummary,
@@ -257,6 +259,35 @@ async def rag_chat(
         answer=response.answer,
         citations=response.citations,
         contexts=response.contexts,
+        trace_id=response.trace_id,
+        kb_id=payload.kb_id,
+        session_id=payload.session_id,
+    )
+
+
+@router.post(
+    "/retrieve",
+    response_model=BusinessRetrieveResponse,
+)
+async def rag_retrieve(
+    payload: BusinessRetrieveRequest,
+    request: Request,
+    context: RequestContext = Depends(require_api_key),
+) -> BusinessRetrieveResponse:
+    container = request.app.state.container
+    _ensure_kb_access(container, payload.kb_id, context)
+    response = await container.retrieval_pipeline.debug(
+        payload.query,
+        payload.top_k,
+        kb_id=payload.kb_id,
+        session_id=payload.session_id,
+        metadata_filters=payload.metadata_filters,
+    )
+    return BusinessRetrieveResponse(
+        query=response.query,
+        contexts=response.contexts,
+        retrieved=response.retrieved,
+        reranked=response.reranked,
         trace_id=response.trace_id,
         kb_id=payload.kb_id,
         session_id=payload.session_id,

@@ -42,7 +42,7 @@ Nano RAG 的核心原则是：**真实输入、真实索引、真实模型、真
 
 ## 当前能力
 
-- 业务 API：`/v1/rag/chat`、`/v1/rag/ingest`、`/v1/rag/ingest/upload`、`/v1/rag/documents`、`/v1/rag/knowledge-bases`、`/v1/rag/ingest/sources`、`/v1/rag/feedback`、`/v1/rag/traces/{trace_id}`、`/v1/rag/benchmark/run`
+- 业务 API：`/v1/rag/chat`、`/v1/rag/retrieve`、`/v1/rag/ingest`、`/v1/rag/ingest/upload`、`/v1/rag/documents`、`/v1/rag/knowledge-bases`、`/v1/rag/ingest/sources`、`/v1/rag/feedback`、`/v1/rag/traces/{trace_id}`、`/v1/rag/benchmark/run`
 - 运维 API：`/health/detail`、`/debug/storage`、`/debug/parsed/{doc_id}`、`/retrieve/debug`、`/traces`、`/replay/{trace_id}`
 - 评测和诊断：`/eval/datasets`、`/eval/reports`、`/eval/run`、`/benchmark/reports`、`/diagnose/*`
 - 向量库：Docker 默认使用 Milvus，collection 包含 dense vector、analyzer text、BM25 sparse 字段和原生 hybrid search
@@ -219,6 +219,14 @@ curl -sS -X POST http://127.0.0.1:3000/v1/rag/ingest \
 curl -sS -X POST http://127.0.0.1:3000/v1/rag/chat \
   -H 'Content-Type: application/json' \
   -d '{"query":"请输入你的真实业务问题","kb_id":"default","session_id":"manual-session","top_k":4}'
+```
+
+仅检索上下文，不调用生成模型：
+
+```bash
+curl -sS -X POST http://127.0.0.1:3000/v1/rag/retrieve \
+  -H 'Content-Type: application/json' \
+  -d '{"query":"请输入你的真实检索问题","kb_id":"default","session_id":"manual-session","top_k":10}'
 ```
 
 检索调试：

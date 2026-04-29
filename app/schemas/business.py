@@ -28,6 +28,29 @@ class BusinessChatResponse(BaseModel):
     session_id: str | None = None
 
 
+class BusinessRetrieveRequest(BaseModel):
+    query: str = Field(..., min_length=1, max_length=8192)
+    kb_id: str = Field(default="default", max_length=256)
+    session_id: str | None = Field(default=None, max_length=256)
+    top_k: int | None = Field(default=None, ge=1, le=100)
+    metadata_filters: dict[str, object] | None = None
+
+    @field_validator("session_id", mode="before")
+    @classmethod
+    def blank_scope_values_are_none(cls, value: object) -> str | None:
+        return normalize_optional_scope(value)
+
+
+class BusinessRetrieveResponse(BaseModel):
+    query: str
+    contexts: list[dict]
+    retrieved: list[dict]
+    reranked: list[dict]
+    trace_id: str | None = None
+    kb_id: str = "default"
+    session_id: str | None = None
+
+
 class BusinessIngestRequest(BaseModel):
     path: str
     kb_id: str = "default"

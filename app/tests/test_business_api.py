@@ -9,6 +9,7 @@ from app.api.auth import RequestContext
 from app.api.routes_business import (
     BusinessChatRequest,
     BusinessIngestRequest,
+    BusinessRetrieveRequest,
     FeedbackRequest,
     KnowledgeBaseCreateRequest,
     _build_upload_source_path,
@@ -19,6 +20,7 @@ from app.api.routes_business import (
     rag_ingest,
     rag_ingest_upload,
     rag_knowledge_bases,
+    rag_retrieve,
     rag_trace,
 )
 from app.core.tracing import FeedbackStore, TraceStore
@@ -96,6 +98,68 @@ async def test_business_chat_uses_kb_scope_and_metadata_filters() -> None:
     assert response.kb_id == "default"
     assert response.session_id == "session-a"
     assert response.trace_id == "trace-1"
+
+
+@pytest.mark.asyncio
+async def test_business_retrieve_uses_kb_scope_and_metadata_filters() -> None:
+    async def fake_retrieve_debug(  # noqa: ANN001
+        query,
+        top_k=None,
+        kb_id="default",
+        session_id=None,
+        metadata_filters=None,
+    ):
+        assert query == "policy"
+        assert top_k == 5
+        assert kb_id == "default"
+        assert session_id == "session-a"
+        assert metadata_filters == {"doc_types": ["policy"]}
+        return SimpleNamespace(
+            query=query,
+            contexts=[{"chunk_id": "c1", "text": "answer context"}],
+            retrieved=[{"chunk_id": "c1", "score": 0.9}],
+            reranked=[{"chunk_id": "c1", "score": 0.95}],
+            trace_id="trace-retrieve-1",
+        )
+
+    container = SimpleNamespace(
+        retrieval_pipeline=SimpleNamespace(debug=fake_retrieve_debug)
+    )
+
+    response = await rag_retrieve(
+        BusinessRetrieveRequest(
+            query="policy",
+            kb_id="default",
+            session_id="session-a",
+            top_k=5,
+            metadata_filters={"doc_types": ["policy"]},
+        ),
+        _request_with_container(container),
+        CONTEXT,
+    )
+
+    assert response.kb_id == "default"
+    assert response.session_id == "session-a"
+    assert response.trace_id == "trace-retrieve-1"
+    assert response.contexts == [{"chunk_id": "c1", "text": "answer context"}]
+    assert response.retrieved == [{"chunk_id": "c1", "score": 0.9}]
+    assert response.reranked == [{"chunk_id": "c1", "score": 0.95}]
+
+
+@pytest.mark.asyncio
+async def test_business_retrieve_rejects_inaccessible_kb() -> None:
+    container = SimpleNamespace(
+        retrieval_pipeline=SimpleNamespace(debug=None),
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        await rag_retrieve(
+            BusinessRetrieveRequest(query="policy", kb_id="default"),
+            _request_with_container(container),
+            RequestContext(auth_mode="api_key", allowed_kb_ids={"other"}),
+        )
+
+    assert exc_info.value.status_code == 403
 
 
 def test_business_requests_normalize_blank_session() -> None:
