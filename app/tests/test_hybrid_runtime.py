@@ -329,6 +329,49 @@ async def test_ingestion_pipeline_updates_hybrid_index(monkeypatch, tmp_path) ->
 
 
 @pytest.mark.asyncio
+async def test_ingestion_pipeline_routes_image_audio_video_modalities(
+    monkeypatch, tmp_path
+) -> None:
+    monkeypatch.setenv("PARSED_OUTPUT_DIR", str(tmp_path / "parsed"))
+    image_path = tmp_path / "logo.png"
+    audio_path = tmp_path / "clip.mp3"
+    video_path = tmp_path / "demo.mp4"
+    image_path.write_bytes(b"\x89PNGfake")
+    audio_path.write_bytes(b"ID3audio")
+    video_path.write_bytes(b"\x00\x00mp4")
+    monkeypatch.setattr(
+        "app.ingestion.pipeline.discover_files",
+        lambda path: [image_path, audio_path, video_path],
+    )
+
+    repository = InMemoryVectorRepository()
+    config = AppConfig(
+        config_dir=tmp_path,
+        settings={"chunk": {"size": 200, "overlap": 20}},
+        models={"model_gateway": {"base_url": "", "api_key": ""}},
+        prompts={},
+    )
+    pipeline = IngestionPipeline(
+        config=config,
+        repository=repository,
+        embedding_client=FakeEmbeddingClient(),
+        tracing_manager=TracingManager("test-service", ""),
+    )
+
+    response = await pipeline.run(str(tmp_path), kb_id="default")
+
+    assert response.documents == 3
+    assert response.chunks == 3
+    assert len(repository.entries) == 3
+    modalities = sorted(chunk.modality for chunk, _ in repository.entries)
+    assert modalities == ["audio", "image", "video"]
+    for chunk, _ in repository.entries:
+        assert chunk.media_uri is not None
+        assert chunk.mime_type is not None
+        assert chunk.text == ""
+
+
+@pytest.mark.asyncio
 async def test_ingestion_pipeline_does_not_write_parsed_artifact_when_embeddings_fail(
     monkeypatch, tmp_path
 ) -> None:

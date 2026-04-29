@@ -19,7 +19,7 @@ class GenerationClient(GatewayClient):
         self.alias = config.models["generation"]["default_alias"]
 
     async def generate(
-        self, messages: list[dict[str, str]], model_alias: str | None = None
+        self, messages: list[dict[str, Any]], model_alias: str | None = None
     ) -> dict[str, Any]:
         payload = {"model": model_alias or self.alias, "messages": messages}
         data = await self.post("/chat/completions", payload)

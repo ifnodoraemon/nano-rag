@@ -28,8 +28,13 @@ def mock_rerank(query: str, documents: list[object], top_n: int) -> dict:
     return {"results": scored[:top_n]}
 
 
-def mock_chat(messages: list[dict[str, str]]) -> dict:
-    user_message = next((message["content"] for message in reversed(messages) if message["role"] == "user"), "")
+def mock_chat(messages: list[dict]) -> dict:
+    user_message = _stringify_content(
+        next(
+            (message["content"] for message in reversed(messages) if message["role"] == "user"),
+            "",
+        )
+    )
     contexts = _extract_contexts(user_message)
     question = _extract_question(user_message)
 
@@ -151,6 +156,22 @@ def _document_text(document: object) -> str:
     if isinstance(document, dict):
         return str(document.get("text", ""))
     return str(document)
+
+
+def _stringify_content(content: object) -> str:
+    """Flatten OpenAI vision-style list content to plain text for mock parsing."""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: list[str] = []
+        for entry in content:
+            if isinstance(entry, dict):
+                if entry.get("type") == "text" and "text" in entry:
+                    parts.append(str(entry["text"]))
+                elif "text" in entry and isinstance(entry["text"], str):
+                    parts.append(entry["text"])
+        return "\n".join(parts)
+    return str(content) if content is not None else ""
 
 
 def _clean_context_text(text: str) -> str:

@@ -302,7 +302,7 @@ class MilvusVectorRepository(VectorRepository):
             if not match_metadata_filters(metadata, metadata_filters):
                 continue
             modality = str(entity.get("modality") or metadata.get("modality") or "text")
-            if modality not in ("text", "image"):
+            if modality not in ("text", "image", "audio", "video"):
                 modality = "text"
             media_uri = entity.get("media_uri") or metadata.get("media_uri") or None
             mime_type = entity.get("mime_type") or metadata.get("mime_type") or None
@@ -393,7 +393,7 @@ class MilvusVectorRepository(VectorRepository):
             if not match_metadata_filters(metadata, metadata_filters):
                 continue
             modality = str(entity.get("modality") or metadata.get("modality") or "text")
-            if modality not in ("text", "image"):
+            if modality not in ("text", "image", "audio", "video"):
                 modality = "text"
             media_uri = entity.get("media_uri") or metadata.get("media_uri") or None
             mime_type = entity.get("mime_type") or metadata.get("mime_type") or None

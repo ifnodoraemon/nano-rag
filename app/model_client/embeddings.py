@@ -6,8 +6,8 @@ from typing import TYPE_CHECKING, Sequence
 from app.core.exceptions import ModelGatewayError
 from app.model_client.multimodal_embedding import (
     EmbedItem,
-    GeminiMultimodalEmbedding,
     TextItem,
+    create_multimodal_embedding,
 )
 
 if TYPE_CHECKING:
@@ -27,7 +27,7 @@ class EmbeddingClient:
 
     def __init__(self, config: "AppConfig") -> None:
         self.config = config
-        self._provider = GeminiMultimodalEmbedding(config)
+        self._provider = create_multimodal_embedding(config)
         self.alias = self._provider.alias
         self.dimension = self._provider.dimension
 

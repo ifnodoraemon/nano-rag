@@ -86,6 +86,9 @@ def build_contexts(
             "freshness_rank": metadata.get("freshness_rank"),
             "chunk_kind": metadata.get("chunk_kind"),
             "supporting_chunk_id": hit.chunk.chunk_id,
+            "modality": hit.chunk.modality,
+            "media_uri": hit.chunk.media_uri,
+            "mime_type": hit.chunk.mime_type,
         }
         context_entry["evidence_role"] = _evidence_role(context_entry)
         contexts.append(context_entry)

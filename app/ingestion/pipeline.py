@@ -20,21 +20,52 @@ from app.core.exceptions import ModelGatewayError, ParsingError
 from app.model_client.embeddings import EmbeddingClient
 from app.model_client.document_parser import DocumentParserClient
 from app.model_client.multimodal_embedding import (
+    AudioItem,
     EmbedItem,
     ImageItem,
     TextItem,
+    VideoItem,
 )
 from app.retrieval.hybrid_retriever import HybridRetriever
 from app.schemas.chunk import Chunk
 from app.schemas.document import Document, IngestResponse
 
 IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp"}
-IMAGE_MIME_FALLBACK = {
+AUDIO_SUFFIXES = {".mp3", ".wav", ".m4a", ".aac", ".ogg", ".flac"}
+VIDEO_SUFFIXES = {".mp4", ".mov", ".webm", ".mkv", ".avi", ".mpeg", ".mpg"}
+MEDIA_SUFFIXES = IMAGE_SUFFIXES | AUDIO_SUFFIXES | VIDEO_SUFFIXES
+
+MEDIA_MIME_FALLBACK = {
     ".png": "image/png",
     ".jpg": "image/jpeg",
     ".jpeg": "image/jpeg",
     ".webp": "image/webp",
+    ".mp3": "audio/mpeg",
+    ".wav": "audio/wav",
+    ".m4a": "audio/mp4",
+    ".aac": "audio/aac",
+    ".ogg": "audio/ogg",
+    ".flac": "audio/flac",
+    ".mp4": "video/mp4",
+    ".mov": "video/quicktime",
+    ".webm": "video/webm",
+    ".mkv": "video/x-matroska",
+    ".avi": "video/x-msvideo",
+    ".mpeg": "video/mpeg",
+    ".mpg": "video/mpeg",
 }
+# Backward-compat alias retained so older imports still work.
+IMAGE_MIME_FALLBACK = MEDIA_MIME_FALLBACK
+
+
+def _modality_for_suffix(suffix: str) -> str:
+    if suffix in IMAGE_SUFFIXES:
+        return "image"
+    if suffix in AUDIO_SUFFIXES:
+        return "audio"
+    if suffix in VIDEO_SUFFIXES:
+        return "video"
+    return "text"
 
 logger = logging.getLogger(__name__)
 from app.vectorstore.repository import VectorRepository
@@ -175,8 +206,9 @@ class IngestionPipeline:
     ) -> PreparedDocument:
         source_path = self._resolve_source_path(file_path, source_path_overrides)
         doc_id = self._stable_doc_id(source_path, kb_id, tenant_id)
-        if file_path.suffix.lower() in IMAGE_SUFFIXES:
-            return await self._prepare_image_document(
+        suffix = file_path.suffix.lower()
+        if suffix in MEDIA_SUFFIXES:
+            return await self._prepare_media_document(
                 file_path=file_path,
                 source_path=source_path,
                 doc_id=doc_id,
@@ -277,12 +309,16 @@ class IngestionPipeline:
                     parts.append(item.text)
                 elif isinstance(item, ImageItem):
                     parts.append(f"<image:{item.mime_type}:{len(item.data)} bytes>")
+                elif isinstance(item, AudioItem):
+                    parts.append(f"<audio:{item.mime_type}:{len(item.data)} bytes>")
+                elif isinstance(item, VideoItem):
+                    parts.append(f"<video:{item.mime_type}:{len(item.data)} bytes>")
                 else:
                     parts.append(str(item))
             flat_texts.append("\n".join(parts))
         return await self.embedding_client.embed_texts(flat_texts)
 
-    async def _prepare_image_document(
+    async def _prepare_media_document(
         self,
         file_path: Path,
         source_path: str,
@@ -291,15 +327,16 @@ class IngestionPipeline:
         tenant_id: str | None,
     ) -> PreparedDocument:
         suffix = file_path.suffix.lower()
-        mime_type = IMAGE_MIME_FALLBACK.get(suffix) or (
+        modality = _modality_for_suffix(suffix)
+        mime_type = MEDIA_MIME_FALLBACK.get(suffix) or (
             mimetypes.guess_type(file_path.name)[0] or "application/octet-stream"
         )
         title = file_path.stem
         document_metadata = {
             "kb_id": kb_id,
             "tenant_id": tenant_id,
-            "doc_type": "image",
-            "modality": "image",
+            "doc_type": modality,
+            "modality": modality,
             "mime_type": mime_type,
             "source_key": title.lower(),
             "headings": [],
@@ -322,23 +359,30 @@ class IngestionPipeline:
             metadata={
                 "kb_id": kb_id,
                 "tenant_id": tenant_id,
-                "modality": "image",
+                "modality": modality,
                 "mime_type": mime_type,
                 "media_uri": source_path,
             },
-            modality="image",
+            modality=modality,
             media_uri=source_path,
             mime_type=mime_type,
         )
         try:
-            image_bytes = file_path.read_bytes()
+            media_bytes = file_path.read_bytes()
         except OSError as exc:
             raise ParsingError(
-                f"failed to read image bytes for {source_path}: {exc}"
+                f"failed to read {modality} bytes for {source_path}: {exc}"
             ) from exc
-        embeddings = await self._embed_items(
-            [[ImageItem(data=image_bytes, mime_type=mime_type)]]
-        )
+        item: EmbedItem
+        if modality == "image":
+            item = ImageItem(data=media_bytes, mime_type=mime_type)
+        elif modality == "audio":
+            item = AudioItem(data=media_bytes, mime_type=mime_type)
+        elif modality == "video":
+            item = VideoItem(data=media_bytes, mime_type=mime_type)
+        else:  # pragma: no cover — guarded by MEDIA_SUFFIXES
+            raise ParsingError(f"unsupported media modality for {source_path}")
+        embeddings = await self._embed_items([[item]])
         if len(embeddings) != 1:
             raise ModelGatewayError(
                 "embedding service returned an inconsistent number of vectors"
@@ -356,10 +400,11 @@ class IngestionPipeline:
     ) -> list[list[EmbedItem]]:
         inputs: list[list[EmbedItem]] = []
         for chunk in chunks:
-            if chunk.modality == "image":
+            if chunk.modality in ("image", "audio", "video"):
                 source = (
                     file_path
-                    if file_path is not None and file_path.suffix.lower() in IMAGE_SUFFIXES
+                    if file_path is not None
+                    and file_path.suffix.lower() in MEDIA_SUFFIXES
                     else None
                 )
                 if source is None and chunk.media_uri:
@@ -367,16 +412,20 @@ class IngestionPipeline:
                     source = candidate if candidate.exists() else None
                 if source is None:
                     raise ModelGatewayError(
-                        f"cannot re-embed image chunk {chunk.chunk_id}: bytes not "
-                        "available; the upload directory may have been pruned. "
-                        "Re-ingest the original file."
+                        f"cannot re-embed {chunk.modality} chunk {chunk.chunk_id}: "
+                        "bytes not available; the upload directory may have been "
+                        "pruned. Re-ingest the original file."
                     )
-                mime = chunk.mime_type or IMAGE_MIME_FALLBACK.get(
+                mime = chunk.mime_type or MEDIA_MIME_FALLBACK.get(
                     source.suffix.lower(), "application/octet-stream"
                 )
-                inputs.append(
-                    [ImageItem(data=source.read_bytes(), mime_type=mime)]
-                )
+                payload = source.read_bytes()
+                if chunk.modality == "image":
+                    inputs.append([ImageItem(data=payload, mime_type=mime)])
+                elif chunk.modality == "audio":
+                    inputs.append([AudioItem(data=payload, mime_type=mime)])
+                else:  # video
+                    inputs.append([VideoItem(data=payload, mime_type=mime)])
             else:
                 inputs.append([TextItem(chunk.text)])
         return inputs

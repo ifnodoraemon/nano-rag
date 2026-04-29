@@ -129,7 +129,7 @@ EMBEDDING_API_BASE_URL=https://generativelanguage.googleapis.com
 真实模型调用需要在 `docker/bifrost/.env` 中配置 provider key，例如 `GEMINI_API_KEY`、`COHERE_API_KEY` 或 `OPENAI_API_KEY`。`app` 服务也会读取 `docker/bifrost/.env`，多模态 embedding 客户端通过其中的 `GEMINI_API_KEY` 直连 Gemini API（不经过 Bifrost）。
 Docker Compose 的模型网关变量使用 `COMPOSE_*` 前缀覆盖，因此根目录 `.env` 直连 Gemini 时不会影响 Docker 默认走 Bifrost。
 未配置 rerank provider key 时，Compose 默认把 `RERANK_MODEL_ALIAS` 置为 `disabled`；要启用 rerank，请设置 `COMPOSE_RERANK_MODEL_ALIAS=cohere/rerank-v3.5` 并在 `docker/bifrost/.env` 配置 `COHERE_API_KEY`。
-PDF 解析仍走 Bifrost GenAI 的 multipart file upload + `generateContent`；图片不再走"图片→Markdown"路径，而是直接生成 image-modality chunk 并由多模态 embedding 索引到同一向量空间。
+PDF 解析仍走 Bifrost GenAI 的 multipart file upload + `generateContent`；图片 / 音频 / 视频不再走"媒体→Markdown"路径，而是直接生成对应 modality 的 chunk 并由多模态 embedding 索引到同一向量空间。生成阶段对 image 命中的 chunk 自动以 `image_url` 部件回传给视觉 LLM，实现图像增强问答（OpenAI vision-style 格式，Bifrost 透传至 Gemini 或其他视觉模型）。
 
 ### 4. 直连外部模型接口
 
@@ -140,12 +140,33 @@ export MODEL_GATEWAY_MODE=live
 export MODEL_GATEWAY_BASE_URL=https://generativelanguage.googleapis.com/v1beta/openai
 export MODEL_GATEWAY_API_KEY=<your-gemini-api-key>
 export GENERATION_MODEL_ALIAS=gemini-3.1-pro-preview
-# 多模态 embedding 直连 Gemini，不走 Bifrost / OpenAI-compat
+# 多模态 embedding 默认走 Gemini Embedding 2，绕开 Bifrost / OpenAI-compat
+export EMBEDDING_PROVIDER=gemini    # 可选 gemini / dashscope / vllm
 export EMBEDDING_MODEL_ALIAS=gemini-embedding-2-preview
 export EMBEDDING_API_BASE_URL=https://generativelanguage.googleapis.com
 export EMBEDDING_API_KEY=<your-gemini-api-key>
 export DISABLE_RERANK=1
 ```
+
+**多模态 Embedding Provider 选项**
+
+| `EMBEDDING_PROVIDER` | 路径 | 适用场景 | 鉴权 |
+|---|---|---|---|
+| `gemini` (默认) | `:embedContent` direct | 复用现有 Gemini API key，云端、零运维 | `EMBEDDING_API_KEY` 或 `GEMINI_API_KEY` |
+| `dashscope` | DashScope `/api/v1/services/embeddings/multimodal-embedding/...` | 阿里 Qwen3-VL-Embedding / multimodal-embedding-v1，国内访问 | `EMBEDDING_API_KEY` 或 `DASHSCOPE_API_KEY` |
+| `vllm` | 自托管 vLLM `/v1/embeddings`，OpenAI 兼容 messages-style | 自部署 Qwen3-VL-Embedding-2B/4B/8B，控成本与隐私 | 可选 `EMBEDDING_API_KEY`（vLLM 默认 EMPTY） |
+
+vLLM 启动示例（需要 vLLM ≥ 0.14 + 多模态 pooling 支持）：
+
+```bash
+vllm serve Qwen/Qwen3-VL-Embedding-8B --runner pooling --port 8001
+# 然后在 nano-rag .env 中：
+EMBEDDING_PROVIDER=vllm
+EMBEDDING_API_BASE_URL=http://localhost:8001/v1
+EMBEDDING_MODEL_ALIAS=Qwen/Qwen3-VL-Embedding-8B
+```
+
+不同 provider 的输出维度不一致，切换 provider 时 **必须 drop & recreate** Milvus collection（`docker compose down -v`）。
 
 推荐同时把 [models.yaml](/home/ifnodoraemon/myagent/nano-rag/configs/models.yaml) 改成：
 

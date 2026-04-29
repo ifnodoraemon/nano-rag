@@ -2,7 +2,16 @@ import os
 from pathlib import Path
 
 
-SUPPORTED_EXTENSIONS = {".pdf", ".md", ".txt", ".html", ".png", ".jpg", ".jpeg", ".webp"}
+SUPPORTED_EXTENSIONS = {
+    # text-bearing
+    ".pdf", ".md", ".txt", ".html",
+    # image
+    ".png", ".jpg", ".jpeg", ".webp",
+    # audio
+    ".mp3", ".wav", ".m4a", ".aac", ".ogg", ".flac",
+    # video
+    ".mp4", ".mov", ".webm", ".mkv", ".avi", ".mpeg", ".mpg",
+}
 _DEFAULT_TEST_DIR = Path(__file__).resolve().parents[2] / "tests" / "fixtures"
 _DEFAULT_UPLOAD_DIR = Path(__file__).resolve().parents[2] / "data" / "uploads"
 
