@@ -53,7 +53,7 @@ class DocumentParserClient:
             os.getenv("DOCUMENT_PARSER_MODEL")
             or self.config.models.get("document_parser", {}).get("default_alias")
             or self.config.models.get("generation", {}).get("default_alias")
-            or "gemini-2.5-flash"
+            or "gemini-3.1-pro-preview"
         )
 
     def _resolve_base_url(self) -> str:

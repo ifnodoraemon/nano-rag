@@ -33,5 +33,5 @@ prompt:
 timeout:
   embeddings_seconds: 30
   rerank_seconds: 30
-  generation_seconds: 60
+  generation_seconds: 120
   document_parser_seconds: 120

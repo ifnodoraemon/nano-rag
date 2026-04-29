@@ -1,0 +1,36 @@
+name: Live Smoke
+
+on:
+  workflow_dispatch:
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
+jobs:
+  gemini:
+    name: Gemini Live Smoke
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: python -m pip install -r requirements.txt
+
+      - name: Run live smoke
+        env:
+          MODEL_GATEWAY_MODE: live
+          MODEL_GATEWAY_BASE_URL: https://generativelanguage.googleapis.com/v1beta/openai
+          MODEL_GATEWAY_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GENERATION_MODEL_ALIAS: gemini-3.1-pro-preview
+          EMBEDDING_MODEL_ALIAS: gemini-embedding-2
+          DISABLE_RERANK: "1"
+          VECTORSTORE_BACKEND: memory
+          RAG_AUTH_DISABLED: "true"
+        run: python scripts/live_smoke.py

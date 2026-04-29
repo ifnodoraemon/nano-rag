@@ -70,7 +70,7 @@ def test_capability_gateway_falls_back_to_global_gateway() -> None:
         settings={},
         models={
             "model_gateway": {"base_url": "http://localhost:4000", "api_key": "secret"},
-            "embedding": {"default_alias": "gemini-embedding-2-preview"},
+            "embedding": {"default_alias": "gemini-embedding-2"},
         },
         prompts={},
     )

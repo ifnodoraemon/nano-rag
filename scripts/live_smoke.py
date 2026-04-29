@@ -1,5 +1,6 @@
 import argparse
 import asyncio
+import getpass
 import os
 import sys
 from pathlib import Path
@@ -30,10 +31,16 @@ def configured(name: str) -> str:
     return "set" if value and value != "change-me" else "missing"
 
 
+def read_secret_from_stdin(prompt: str) -> str:
+    if sys.stdin.isatty():
+        return getpass.getpass(prompt).strip()
+    return sys.stdin.readline().strip()
+
+
 async def run_smoke(args: argparse.Namespace) -> int:
     load_env_file(ROOT / ".env")
     if args.api_key_stdin:
-        api_key = sys.stdin.readline().strip()
+        api_key = read_secret_from_stdin("MODEL_GATEWAY_API_KEY: ")
         if api_key:
             os.environ["MODEL_GATEWAY_API_KEY"] = api_key
     if args.generation_model:

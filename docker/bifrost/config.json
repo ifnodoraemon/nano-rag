@@ -1,18 +1,27 @@
 {
   "providers": {
-    "google": {
+    "gemini": {
       "keys": [
         {
-          "value": "env.GOOGLE_API_KEY",
+          "name": "gemini-primary",
+          "value": "env.GEMINI_API_KEY",
           "models": [
-            "gemini-2.5-flash",
-            "gemini-embedding-2-preview",
-            "google/gemini-2.5-flash",
-            "google/gemini-embedding-2-preview"
+            "gemini-3.1-pro-preview",
+            "gemini-3-pro-preview",
+            "gemini-3-flash-preview",
+            "gemini-embedding-2",
+            "gemini/gemini-3.1-pro-preview",
+            "gemini/gemini-3-pro-preview",
+            "gemini/gemini-3-flash-preview",
+            "gemini/gemini-embedding-2"
           ],
           "weight": 1.0
         }
-      ]
+      ],
+      "network_config": {
+        "default_request_timeout_in_seconds": 120,
+        "max_retries": 1
+      }
     },
     "openai": {
       "keys": [
@@ -43,6 +52,6 @@
   },
   "fallback": {
     "enabled": true,
-    "order": ["google", "openai"]
+    "order": ["gemini", "openai"]
   }
 }

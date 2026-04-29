@@ -42,12 +42,12 @@ def _load_metric_classes() -> dict[str, type]:
 @dataclass
 class RAGASConfig:
     enable_llm_judge: bool = True
-    llm_judge_model: str = "gemini-2.5-flash"
+    llm_judge_model: str = "gemini-3.1-pro-preview"
     max_concurrent_judgments: int = 3
     lib_metrics: list[str] = field(default_factory=lambda: [
         "faithfulness", "answer_relevancy", "context_precision",
     ])
-    lib_llm_model: str = "gemini-2.5-flash"
+    lib_llm_model: str = "gemini-3.1-pro-preview"
     lib_llm_base_url: str | None = None
     lib_llm_api_key: str | None = None
 
@@ -61,10 +61,14 @@ class RAGASConfig:
         return cls(
             enable_llm_judge=os.getenv("RAG_RAGAS_LLM_JUDGE", "true").lower()
             in ("true", "1", "yes"),
-            llm_judge_model=os.getenv("RAG_RAGAS_JUDGE_MODEL", "gemini-2.5-flash"),
+            llm_judge_model=os.getenv(
+                "RAG_RAGAS_JUDGE_MODEL", "gemini-3.1-pro-preview"
+            ),
             max_concurrent_judgments=int(os.getenv("RAG_RAGAS_MAX_CONCURRENT", "3")),
             lib_metrics=metrics,
-            lib_llm_model=os.getenv("RAG_RAGAS_LIB_LLM_MODEL", "gemini-2.5-flash"),
+            lib_llm_model=os.getenv(
+                "RAG_RAGAS_LIB_LLM_MODEL", "gemini-3.1-pro-preview"
+            ),
             lib_llm_base_url=os.getenv("RAG_RAGAS_LIB_LLM_BASE_URL"),
             lib_llm_api_key=os.getenv("RAG_RAGAS_LIB_LLM_API_KEY"),
         )

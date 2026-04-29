@@ -10,7 +10,7 @@
 - Hybrid 检索已落到 **Milvus v2.5 原生 full-text search + hybrid search**，memory 后端保留 BM25 fallback
 - 编排框架**去掉 LangChain**，沿用自研 pipeline（已验证更轻量可控）
 - 评测从自研指标升级为 **RAGAS 库.x 标准库 + 自研指标补充**
-- Rerank 从 disabled 改为 **默认启用**
+- Rerank 从 disabled 改为 **网关可配置启用**
 - 补全 **eval/replay** 功能
 
 ---
@@ -61,7 +61,7 @@
 - 编排框架：**自研 pipeline**（不引入 LangChain）
 - 向量数据库：Milvus v2.5+（原生支持 full-text search + hybrid search）
 - 向量模型：Gemini Embedding（3072 维）或通过 Bifrost 路由的任意 embedding API
-- 重排模型：通过 Bifrost 转发的 rerank API（默认启用）
+- 重排模型：通过 Bifrost 转发的 rerank API（配置 provider key 后启用）
 - 生成模型：通过 Bifrost 转发的 LLM API
 - 模型网关：**Bifrost**（默认），LiteLLM（可选 profile）
 - tracing / 实验：Phoenix
@@ -364,7 +364,7 @@ model_gateway:
   api_key: ${MODEL_GATEWAY_API_KEY:-change-me}
 
 embedding:
-  default_alias: ${EMBEDDING_MODEL_ALIAS:-google/gemini-embedding-2-preview}
+  default_alias: ${EMBEDDING_MODEL_ALIAS:-gemini/gemini-embedding-2}
   dimension: 3072
   base_url: ${EMBEDDING_API_BASE_URL:-}
   api_key: ${EMBEDDING_API_KEY:-}
@@ -375,13 +375,13 @@ rerank:
   api_key: ${RERANK_API_KEY:-}
 
 generation:
-  default_alias: ${GENERATION_MODEL_ALIAS:-google/gemini-2.5-flash}
+  default_alias: ${GENERATION_MODEL_ALIAS:-gemini/gemini-3.1-pro-preview}
   base_url: ${GENERATION_API_BASE_URL:-}
   api_key: ${GENERATION_API_KEY:-}
 
 document_parser:
   enabled: ${DOCUMENT_PARSER_ENABLED:-true}
-  default_alias: ${DOCUMENT_PARSER_MODEL:-gemini-2.5-flash}
+  default_alias: ${DOCUMENT_PARSER_MODEL:-gemini-3.1-pro-preview}
   base_url: ${DOCUMENT_PARSER_API_BASE_URL:-http://bifrost:8080/genai}
   api_key: ${DOCUMENT_PARSER_API_KEY:-}
 ```
@@ -437,17 +437,17 @@ hybrid_search:
 - Milvus 原生路径不再 bootstrap / update 应用内 BM25 index
 - memory 后端继续支持本地 smoke / 单测
 
-### Milestone 5：Bifrost 默认启用 + Rerank 启用 ✅ 已完成
+### Milestone 5：Bifrost 默认启用 + Rerank 支持 ✅ 已完成
 
 目标：
 - Bifrost 从可选 profile 改为默认服务
-- Rerank 默认启用
+- Rerank 通过 Bifrost 支持；未配置 rerank provider key 的 Compose 环境默认关闭
 - 配置 fallback 策略
 
 完成标准：
 - `docker-compose up` 默认启动 Bifrost ✅
 - 所有模型调用默认经 Bifrost 转发 ✅
-- Rerank 在 chat 流程中默认执行 ✅
+- Rerank 在配置 provider key 后执行 ✅
 - Bifrost 配置中包含 primary + fallback provider ✅
 
 ### Milestone 6：模型路由策略验证
@@ -467,7 +467,7 @@ hybrid_search:
 ## 11. 开发顺序
 
 1. Milestone 3：RAGAS 库 接入 + replay 实现（独立于基础设施变更）
-2. Milestone 5：Bifrost 默认启用 + Rerank 启用（配置变更，风险低）
+2. Milestone 5：Bifrost 默认启用 + Rerank 支持（配置变更，风险低）
 3. Milestone 4：Milvus 原生 Hybrid（已落地）
 4. Milestone 6：Fallback 验证（剩余端到端验证项）
 
@@ -530,11 +530,11 @@ RAGAS 库.x 标准指标 + 自研业务指标并存，互为补充。
 4. ~~统一模型客户端层~~ ✅ 已有
 5. ~~Milvus collection 初始化~~ ✅ 已有
 6. **Bifrost 作为默认模型网关** ✅ 已完成
-7. **Rerank 默认启用** ✅ 已完成（环境变量控制）
+7. **Rerank 网关接入** ✅ 已完成（环境变量控制）
 8. **RAGAS 库.x 集成** ✅ 已完成
 9. **eval/replay.py 实际实现** ✅ 已完成
 10. **Milvus 原生 hybrid search** ✅ 新 collection schema 与 `native_hybrid_search` 路径已实现
-11. **Fallback 策略验证** 待做
+11. **Fallback 策略验证** ✅ 配置校验已纳入 CI；多 provider failover 通过手动 live smoke 执行
 12. README 更新（启动、索引、问答、评测步骤）
 
 ### 明确要求
@@ -556,7 +556,7 @@ RAGAS 库.x 标准指标 + 自研业务指标并存，互为补充。
 | 编排框架 | LangChain | **自研 pipeline**（已验证） |
 | Hybrid 检索 | 第一阶段不做 | **Milvus 原生 hybrid + memory BM25 fallback** |
 | Query Rewrite | 第一阶段不做 | **已实现** |
-| Rerank | Qwen3-Reranker（外部 API） | **默认启用，经 Bifrost 转发** |
+| Rerank | Qwen3-Reranker（外部 API） | **可通过 Bifrost 转发启用** |
 | 评测 | RAGAS 库 | **RAGAS 库.x + 自研指标双轨** |
 | Replay | 未规划 | **本次补实现** |
 | 多租户 | 第一阶段不做 | **已有 kb_id / tenant_id** |
@@ -616,14 +616,14 @@ RAGAS 库.x 标准指标 + 自研业务指标并存，互为补充。
 |------|--------|------|
 | `test_vector_repository.py::test_milvus_repository_refuses_to_drop_collection_on_dimension_mismatch` 因 pymilvus 未安装导致 ImportError 而非 RuntimeError | 中 | ✅ 已修复：monkeypatch pymilvus 模块 |
 | `eval/replay.py` 为 stub | 高 | ✅ 已重写：完整 replay_trace 实现 + /replay API |
-| Rerank 默认 disabled | 中 | ✅ 已修复：rerank.default_alias 改为环境变量控制 |
+| Rerank 默认 disabled | 中 | ✅ 已修复：rerank 可通过环境变量和 provider key 启用 |
 | Bifrost 为可选 profile | 中 | ✅ 已修复：删除 profiles，添加 fallback 配置，app depends_on bifrost |
 | 无 LiteLLM 可选 profile | 低 | ✅ 已添加：litellm profile + config.yaml + .env.example |
 
-### 16.5 剩余待做项
+### 16.5 剩余验证项
 
 | 项 | 优先级 | 风险 | 状态 |
 |----|--------|------|------|
 | RAGAS 库.x 库集成 | P1 | 低 | 已接入 |
 | Milvus 原生 hybrid search | P2 | 中（中文 analyzer 效果需真实语料验证） | 已接入 |
-| Fallback 端到端验证 | P3 | 低 | 待做 |
+| Fallback 端到端验证 | P3 | 低 | 配置已校验；真实 failover 依赖第二 provider key |
