@@ -120,15 +120,16 @@ MILVUS_URI=http://milvus:19530
 MODEL_GATEWAY_MODE=live
 MODEL_GATEWAY_BASE_URL=http://bifrost:8080/v1
 GENERATION_MODEL_ALIAS=gemini/gemini-3.1-pro-preview
-EMBEDDING_MODEL_ALIAS=gemini/gemini-embedding-2
+EMBEDDING_MODEL_ALIAS=gemini-embedding-2-preview
+EMBEDDING_API_BASE_URL=https://generativelanguage.googleapis.com
 ```
 
 鉴权策略与本地运行一致：共享或生产环境在 `.env` 里配置 `RAG_API_KEYS`；
 只做本机开发验证时，可以在 `.env` 里显式设置 `RAG_AUTH_DISABLED=true`。
-真实模型调用需要在 `docker/bifrost/.env` 中配置 provider key，例如 `GEMINI_API_KEY`、`COHERE_API_KEY` 或 `OPENAI_API_KEY`。
+真实模型调用需要在 `docker/bifrost/.env` 中配置 provider key，例如 `GEMINI_API_KEY`、`COHERE_API_KEY` 或 `OPENAI_API_KEY`。`app` 服务也会读取 `docker/bifrost/.env`，多模态 embedding 客户端通过其中的 `GEMINI_API_KEY` 直连 Gemini API（不经过 Bifrost）。
 Docker Compose 的模型网关变量使用 `COMPOSE_*` 前缀覆盖，因此根目录 `.env` 直连 Gemini 时不会影响 Docker 默认走 Bifrost。
 未配置 rerank provider key 时，Compose 默认把 `RERANK_MODEL_ALIAS` 置为 `disabled`；要启用 rerank，请设置 `COMPOSE_RERANK_MODEL_ALIAS=cohere/rerank-v3.5` 并在 `docker/bifrost/.env` 配置 `COHERE_API_KEY`。
-PDF / 图片解析默认走 Bifrost GenAI 的 multipart file upload，再调用 `generateContent` 生成 Markdown。
+PDF 解析仍走 Bifrost GenAI 的 multipart file upload + `generateContent`；图片不再走"图片→Markdown"路径，而是直接生成 image-modality chunk 并由多模态 embedding 索引到同一向量空间。
 
 ### 4. 直连外部模型接口
 
@@ -139,7 +140,10 @@ export MODEL_GATEWAY_MODE=live
 export MODEL_GATEWAY_BASE_URL=https://generativelanguage.googleapis.com/v1beta/openai
 export MODEL_GATEWAY_API_KEY=<your-gemini-api-key>
 export GENERATION_MODEL_ALIAS=gemini-3.1-pro-preview
-export EMBEDDING_MODEL_ALIAS=gemini-embedding-2
+# 多模态 embedding 直连 Gemini，不走 Bifrost / OpenAI-compat
+export EMBEDDING_MODEL_ALIAS=gemini-embedding-2-preview
+export EMBEDDING_API_BASE_URL=https://generativelanguage.googleapis.com
+export EMBEDDING_API_KEY=<your-gemini-api-key>
 export DISABLE_RERANK=1
 ```
 
@@ -147,8 +151,11 @@ export DISABLE_RERANK=1
 
 ```yaml
 embedding:
-  default_alias: gemini-embedding-2
-  dimension: 3072
+  provider: gemini
+  multimodal: true
+  default_alias: gemini-embedding-2-preview
+  dimension: 1536        # Matryoshka 截断；可选 768 / 1536 / 3072
+  base_url: https://generativelanguage.googleapis.com
 
 rerank:
   default_alias: disabled
@@ -159,9 +166,9 @@ generation:
 
 说明：
 
-- Gemini API 当前可直接覆盖 `/chat/completions` 和 `/embeddings`
-- Gemini API 模型列表中没有直接可用的 rerank 模型；Google 的 rerank 能力在 Vertex AI Ranking/RAG Engine 侧，需要 Vertex 项目鉴权，不等同于 Gemini API key
-- 当前项目的 `/rerank` 阶段需要单独的 rerank provider；若走 Gemini API，请关闭 rerank
+- Embedding 走 **Gemini Embedding 2-preview**，原生跨模态（text / image / document / audio / video 共享一个向量空间）。客户端使用 `:embedContent` REST 路径，绕过 Bifrost 与 OpenAI `/embeddings`。
+- Gemini API 当前 `/chat/completions` 走 Bifrost 或 `/v1beta/openai/chat/completions`；rerank 需要独立 provider，若走 Gemini API 请关闭。
+- 升级提示：Gemini Embedding 1 与 2 的向量空间**不兼容**。从旧 collection 切到 1536 维 multimodal collection 必须 `docker compose down -v` 清空 milvus volume 后重新 ingest。
 - 业务 API 中的 `kb_id` 已预留，但当前部署仅支持 `default`
 
 ### 5. 按能力拆分模型网关

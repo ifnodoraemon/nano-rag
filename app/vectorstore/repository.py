@@ -134,14 +134,14 @@ class InMemoryVectorRepository(VectorRepository):
 
 
 class MilvusVectorRepository(VectorRepository):
-    def __init__(self, dimension: int = 1024) -> None:
+    def __init__(self, dimension: int = 1536) -> None:
         self.client = create_milvus_client()
         self.dimension = dimension
         self._ensure_collection()
 
     @classmethod
     def from_config(cls, config: AppConfig) -> "MilvusVectorRepository":
-        dimension = int(config.models.get("embedding", {}).get("dimension", 1024))
+        dimension = int(config.models.get("embedding", {}).get("dimension", 1536))
         return cls(dimension=dimension)
 
     def _ensure_collection(self) -> None:
@@ -243,6 +243,9 @@ class MilvusVectorRepository(VectorRepository):
                     "metadata_json": chunk.metadata,
                     "kb_id": document.metadata.get("kb_id", "default"),
                     "tenant_id": document.metadata.get("tenant_id") or "",
+                    "modality": chunk.modality,
+                    "media_uri": chunk.media_uri or "",
+                    "mime_type": chunk.mime_type or "",
                 }
             )
         self.client.upsert(collection_name=CHUNKS_COLLECTION, data=rows)
@@ -287,6 +290,9 @@ class MilvusVectorRepository(VectorRepository):
                 "chunk_index",
                 "text",
                 "metadata_json",
+                "modality",
+                "media_uri",
+                "mime_type",
             ],
         )
         hits: list[SearchHit] = []
@@ -295,6 +301,11 @@ class MilvusVectorRepository(VectorRepository):
             metadata = entity.get("metadata_json") or {}
             if not match_metadata_filters(metadata, metadata_filters):
                 continue
+            modality = str(entity.get("modality") or metadata.get("modality") or "text")
+            if modality not in ("text", "image"):
+                modality = "text"
+            media_uri = entity.get("media_uri") or metadata.get("media_uri") or None
+            mime_type = entity.get("mime_type") or metadata.get("mime_type") or None
             hits.append(
                 SearchHit(
                     chunk=Chunk(
@@ -305,6 +316,9 @@ class MilvusVectorRepository(VectorRepository):
                         source_path=entity["source"],
                         title=entity.get("title"),
                         metadata=metadata,
+                        modality=modality,
+                        media_uri=media_uri or None,
+                        mime_type=mime_type or None,
                     ),
                     score=float(item["distance"]),
                 )
@@ -359,6 +373,9 @@ class MilvusVectorRepository(VectorRepository):
                 "chunk_index",
                 TEXT_FIELD,
                 "metadata_json",
+                "modality",
+                "media_uri",
+                "mime_type",
             ],
         )
         return self._build_hits(results, top_k, metadata_filters)
@@ -375,6 +392,11 @@ class MilvusVectorRepository(VectorRepository):
             metadata = entity.get("metadata_json") or {}
             if not match_metadata_filters(metadata, metadata_filters):
                 continue
+            modality = str(entity.get("modality") or metadata.get("modality") or "text")
+            if modality not in ("text", "image"):
+                modality = "text"
+            media_uri = entity.get("media_uri") or metadata.get("media_uri") or None
+            mime_type = entity.get("mime_type") or metadata.get("mime_type") or None
             hits.append(
                 SearchHit(
                     chunk=Chunk(
@@ -385,6 +407,9 @@ class MilvusVectorRepository(VectorRepository):
                         source_path=entity["source"],
                         title=entity.get("title"),
                         metadata=metadata,
+                        modality=modality,
+                        media_uri=media_uri or None,
+                        mime_type=mime_type or None,
                     ),
                     score=float(item["distance"]),
                 )

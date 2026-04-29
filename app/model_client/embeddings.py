@@ -1,63 +1,63 @@
 from __future__ import annotations
 
-import asyncio
 import logging
-import os
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Sequence
 
 from app.core.exceptions import ModelGatewayError
-from app.model_client.base import GatewayClient
+from app.model_client.multimodal_embedding import (
+    EmbedItem,
+    GeminiMultimodalEmbedding,
+    TextItem,
+)
 
 if TYPE_CHECKING:
     from app.core.config import AppConfig
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_BATCH_SIZE = int(os.getenv("RAG_EMBED_BATCH_SIZE", "100"))
-DEFAULT_CONCURRENCY_LIMIT = int(os.getenv("RAG_EMBED_CONCURRENCY", "5"))
 
+class EmbeddingClient:
+    """Embedding facade.
 
-class EmbeddingClient(GatewayClient):
-    def __init__(self, config: AppConfig) -> None:
-        super().__init__(
-            config, config.settings["timeout"]["embeddings_seconds"], "embedding"
-        )
-        self.alias = config.models["embedding"]["default_alias"]
-        self.dimension = int(config.models["embedding"].get("dimension", 1024))
-        self._semaphore = asyncio.Semaphore(DEFAULT_CONCURRENCY_LIMIT)
+    The wire-level client is multimodal (Gemini Embedding 2). This class
+    keeps the legacy ``embed_texts(list[str])`` signature so retrieval and
+    test fakes do not have to change, and adds ``embed_items`` for ingestion
+    paths that need to embed images alongside text.
+    """
+
+    def __init__(self, config: "AppConfig") -> None:
+        self.config = config
+        self._provider = GeminiMultimodalEmbedding(config)
+        self.alias = self._provider.alias
+        self.dimension = self._provider.dimension
 
     async def embed_texts(
-        self, texts: list[str], batch_size: int = DEFAULT_BATCH_SIZE
+        self, texts: Sequence[str], batch_size: int | None = None
     ) -> list[list[float]]:
+        # batch_size kept for backward compat; concurrency is controlled
+        # inside the provider.
+        del batch_size
         if not texts:
             return []
+        items: list[list[EmbedItem]] = [[TextItem(text)] for text in texts]
+        vectors = await self._provider.embed_batch(items)
+        if len(vectors) != len(texts):
+            raise ModelGatewayError(
+                "embedding API returned an inconsistent number of vectors"
+            )
+        return vectors
 
-        results: list[list[float] | None] = [None] * len(texts)
-        for i in range(0, len(texts), batch_size):
-            batch = texts[i : i + batch_size]
-            async with self._semaphore:
-                payload = {"model": self.alias, "input": batch}
-                data = await self.post("/embeddings", payload)
-                for item in data.get("data", []):
-                    idx = item.get("index", 0)
-                    embedding = item.get("embedding")
-                    if 0 <= idx < len(batch) and results[i + idx] is None:
-                        if not isinstance(embedding, list) or len(embedding) == 0:
-                            raise ModelGatewayError(
-                                f"embedding API returned empty/invalid vector at index {idx}"
-                            )
-                        if len(embedding) != self.dimension:
-                            logger.warning(
-                                "embedding dimension mismatch: expected %d, got %d",
-                                self.dimension,
-                                len(embedding),
-                            )
-                        results[i + idx] = embedding
+    async def embed_items(
+        self, items: Sequence[Sequence[EmbedItem]]
+    ) -> list[list[float]]:
+        if not items:
+            return []
+        vectors = await self._provider.embed_batch(items)
+        if len(vectors) != len(items):
+            raise ModelGatewayError(
+                "embedding API returned an inconsistent number of vectors"
+            )
+        return vectors
 
-        for j, r in enumerate(results):
-            if r is None:
-                raise ModelGatewayError(
-                    f"embedding API did not return a vector for text at index {j}"
-                )
-
-        return results
+    async def close(self) -> None:
+        await self._provider.close()

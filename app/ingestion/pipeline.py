@@ -8,6 +8,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+import mimetypes
+
 from app.ingestion.chunker import build_chunks
 from app.ingestion.loader import discover_files
 from app.ingestion.metadata import extract_document_metadata
@@ -17,9 +19,22 @@ from app.ingestion.semantic_chunker import SemanticChunker
 from app.core.exceptions import ModelGatewayError, ParsingError
 from app.model_client.embeddings import EmbeddingClient
 from app.model_client.document_parser import DocumentParserClient
+from app.model_client.multimodal_embedding import (
+    EmbedItem,
+    ImageItem,
+    TextItem,
+)
 from app.retrieval.hybrid_retriever import HybridRetriever
 from app.schemas.chunk import Chunk
 from app.schemas.document import Document, IngestResponse
+
+IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp"}
+IMAGE_MIME_FALLBACK = {
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".webp": "image/webp",
+}
 
 logger = logging.getLogger(__name__)
 from app.vectorstore.repository import VectorRepository
@@ -160,6 +175,14 @@ class IngestionPipeline:
     ) -> PreparedDocument:
         source_path = self._resolve_source_path(file_path, source_path_overrides)
         doc_id = self._stable_doc_id(source_path, kb_id, tenant_id)
+        if file_path.suffix.lower() in IMAGE_SUFFIXES:
+            return await self._prepare_image_document(
+                file_path=file_path,
+                source_path=source_path,
+                doc_id=doc_id,
+                kb_id=kb_id,
+                tenant_id=tenant_id,
+            )
         text = normalize_text(await parse_document(file_path, self.document_parser))
         if not text:
             raise ParsingError(
@@ -224,9 +247,8 @@ class IngestionPipeline:
             )
             for chunk in chunks
         ]
-        embeddings = await self.embedding_client.embed_texts(
-            [chunk.text for chunk in chunks]
-        )
+        embed_inputs = self._chunks_to_embed_inputs(chunks, file_path=file_path)
+        embeddings = await self._embed_items(embed_inputs)
         if len(embeddings) != len(chunks):
             raise ModelGatewayError(
                 "embedding service returned an inconsistent number of vectors"
@@ -238,6 +260,126 @@ class IngestionPipeline:
             chunks=chunks,
             embeddings=embeddings,
         )
+
+    async def _embed_items(
+        self, items: list[list[EmbedItem]]
+    ) -> list[list[float]]:
+        embed_items_fn = getattr(self.embedding_client, "embed_items", None)
+        if embed_items_fn is not None:
+            return await embed_items_fn(items)
+        # Backward-compat fallback for legacy / test fake clients without
+        # multimodal support: degrade to text-only by stringifying items.
+        flat_texts: list[str] = []
+        for batch in items:
+            parts: list[str] = []
+            for item in batch:
+                if isinstance(item, TextItem):
+                    parts.append(item.text)
+                elif isinstance(item, ImageItem):
+                    parts.append(f"<image:{item.mime_type}:{len(item.data)} bytes>")
+                else:
+                    parts.append(str(item))
+            flat_texts.append("\n".join(parts))
+        return await self.embedding_client.embed_texts(flat_texts)
+
+    async def _prepare_image_document(
+        self,
+        file_path: Path,
+        source_path: str,
+        doc_id: str,
+        kb_id: str,
+        tenant_id: str | None,
+    ) -> PreparedDocument:
+        suffix = file_path.suffix.lower()
+        mime_type = IMAGE_MIME_FALLBACK.get(suffix) or (
+            mimetypes.guess_type(file_path.name)[0] or "application/octet-stream"
+        )
+        title = file_path.stem
+        document_metadata = {
+            "kb_id": kb_id,
+            "tenant_id": tenant_id,
+            "doc_type": "image",
+            "modality": "image",
+            "mime_type": mime_type,
+            "source_key": title.lower(),
+            "headings": [],
+            "section_count": 0,
+        }
+        document = Document(
+            doc_id=doc_id,
+            source_path=source_path,
+            title=title,
+            content="",
+            metadata=document_metadata,
+        )
+        chunk = Chunk(
+            chunk_id=f"{doc_id}:0",
+            doc_id=doc_id,
+            chunk_index=0,
+            text="",
+            source_path=source_path,
+            title=title,
+            metadata={
+                "kb_id": kb_id,
+                "tenant_id": tenant_id,
+                "modality": "image",
+                "mime_type": mime_type,
+                "media_uri": source_path,
+            },
+            modality="image",
+            media_uri=source_path,
+            mime_type=mime_type,
+        )
+        try:
+            image_bytes = file_path.read_bytes()
+        except OSError as exc:
+            raise ParsingError(
+                f"failed to read image bytes for {source_path}: {exc}"
+            ) from exc
+        embeddings = await self._embed_items(
+            [[ImageItem(data=image_bytes, mime_type=mime_type)]]
+        )
+        if len(embeddings) != 1:
+            raise ModelGatewayError(
+                "embedding service returned an inconsistent number of vectors"
+            )
+        return PreparedDocument(
+            source_path=source_path,
+            doc_id=doc_id,
+            document=document,
+            chunks=[chunk],
+            embeddings=embeddings,
+        )
+
+    def _chunks_to_embed_inputs(
+        self, chunks: list[Chunk], file_path: Path | None = None
+    ) -> list[list[EmbedItem]]:
+        inputs: list[list[EmbedItem]] = []
+        for chunk in chunks:
+            if chunk.modality == "image":
+                source = (
+                    file_path
+                    if file_path is not None and file_path.suffix.lower() in IMAGE_SUFFIXES
+                    else None
+                )
+                if source is None and chunk.media_uri:
+                    candidate = Path(chunk.media_uri)
+                    source = candidate if candidate.exists() else None
+                if source is None:
+                    raise ModelGatewayError(
+                        f"cannot re-embed image chunk {chunk.chunk_id}: bytes not "
+                        "available; the upload directory may have been pruned. "
+                        "Re-ingest the original file."
+                    )
+                mime = chunk.mime_type or IMAGE_MIME_FALLBACK.get(
+                    source.suffix.lower(), "application/octet-stream"
+                )
+                inputs.append(
+                    [ImageItem(data=source.read_bytes(), mime_type=mime)]
+                )
+            else:
+                inputs.append([TextItem(chunk.text)])
+        return inputs
 
     async def _rollback_applied_documents(
         self,
@@ -255,8 +397,8 @@ class IngestionPipeline:
                 )
                 if snapshot is None:
                     continue
-                embeddings = await self.embedding_client.embed_texts(
-                    [chunk.text for chunk in snapshot.chunks]
+                embeddings = await self._embed_items(
+                    self._chunks_to_embed_inputs(snapshot.chunks)
                 )
                 if len(embeddings) != len(snapshot.chunks):
                     raise ModelGatewayError(

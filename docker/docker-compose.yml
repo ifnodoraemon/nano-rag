@@ -7,6 +7,10 @@ services:
     env_file:
       - path: ../.env
         required: false
+      # bifrost/.env carries GEMINI_API_KEY etc; the multimodal embedding
+      # client needs direct access to this provider key (it bypasses Bifrost).
+      - path: ./bifrost/.env
+        required: false
     ports:
       - "8000:8000"
     environment:
@@ -32,7 +36,13 @@ services:
       MODEL_GATEWAY_BASE_URL: ${COMPOSE_MODEL_GATEWAY_BASE_URL:-http://bifrost:8080/v1}
       MODEL_GATEWAY_API_KEY: ${COMPOSE_MODEL_GATEWAY_API_KEY:-bifrost-local}
       GENERATION_MODEL_ALIAS: ${COMPOSE_GENERATION_MODEL_ALIAS:-gemini/gemini-3.1-pro-preview}
-      EMBEDDING_MODEL_ALIAS: ${COMPOSE_EMBEDDING_MODEL_ALIAS:-gemini/gemini-embedding-2}
+      # Multimodal embedding bypasses Bifrost and calls Gemini directly.
+      # The client tries EMBEDDING_API_KEY first, then GEMINI_API_KEY (also
+      # used by Bifrost's Gemini provider, see docker/bifrost/.env).
+      EMBEDDING_MODEL_ALIAS: ${COMPOSE_EMBEDDING_MODEL_ALIAS:-gemini-embedding-2-preview}
+      EMBEDDING_API_BASE_URL: ${COMPOSE_EMBEDDING_API_BASE_URL:-https://generativelanguage.googleapis.com}
+      EMBEDDING_API_KEY: ${COMPOSE_EMBEDDING_API_KEY:-}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
       RERANK_MODEL_ALIAS: ${COMPOSE_RERANK_MODEL_ALIAS:-disabled}
       DISABLE_RERANK: ${COMPOSE_DISABLE_RERANK:-}
     volumes:

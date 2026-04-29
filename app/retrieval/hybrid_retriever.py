@@ -57,6 +57,10 @@ class HybridRetriever:
     def index_chunk(self, chunk: Chunk) -> None:
         if not self._bm25_enabled or self._native_hybrid_available:
             return
+        # BM25 only indexes textual content; image-modality chunks have empty
+        # text and would just be noise.
+        if chunk.modality == "image" or not chunk.text.strip():
+            return
         with self._lock:
             self._chunk_cache[chunk.chunk_id] = chunk
             self.bm25_index.add_document(chunk.chunk_id, chunk.text)
