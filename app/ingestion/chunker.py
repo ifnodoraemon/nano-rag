@@ -7,6 +7,53 @@ from app.ingestion.metadata import (
 from app.schemas.chunk import Chunk
 
 
+def _is_table_line(line: str) -> bool:
+    stripped = line.strip()
+    return stripped.startswith("|") and stripped.endswith("|") and stripped.count("|") >= 3
+
+
+def _is_table_separator(line: str) -> bool:
+    stripped = line.strip()
+    if not _is_table_line(stripped):
+        return False
+    cells = [cell.strip() for cell in stripped.strip("|").split("|")]
+    return bool(cells) and all(cell and set(cell) <= {":", "-"} for cell in cells)
+
+
+def _split_table_block(block: str, chunk_size: int) -> list[str]:
+    lines = [line.rstrip() for line in block.splitlines() if line.strip()]
+    if len(lines) < 3 or not all(_is_table_line(line) for line in lines[:2]):
+        return []
+    header = lines[:2] if _is_table_separator(lines[1]) else lines[:1]
+    rows = lines[len(header):]
+    header_text = "\n".join(header)
+    chunks: list[str] = []
+    current = header_text
+    for row in rows:
+        candidate = f"{current}\n{row}" if current else row
+        if len(candidate) <= chunk_size or current == header_text:
+            current = candidate
+            continue
+        chunks.append(current.strip())
+        current = f"{header_text}\n{row}"
+    if current.strip():
+        chunks.append(current.strip())
+    return chunks
+
+
+def _split_oversized_section(section: str, chunk_size: int, overlap: int) -> list[str]:
+    table_chunks = _split_table_block(section, chunk_size)
+    if table_chunks:
+        return table_chunks
+    chunks: list[str] = []
+    start = 0
+    step = chunk_size - overlap
+    while start < len(section):
+        chunks.append(section[start : start + chunk_size].strip())
+        start += step
+    return chunks
+
+
 def split_text(text: str, chunk_size: int, overlap: int) -> list[str]:
     if not text:
         return []
@@ -27,11 +74,7 @@ def split_text(text: str, chunk_size: int, overlap: int) -> list[str]:
         if len(section) <= chunk_size:
             buffer = section
             continue
-        start = 0
-        step = chunk_size - overlap
-        while start < len(section):
-            chunks.append(section[start : start + chunk_size].strip())
-            start += step
+        chunks.extend(_split_oversized_section(section, chunk_size, overlap))
         buffer = ""
 
     if buffer:

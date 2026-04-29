@@ -8,9 +8,9 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_SYSTEM_PROMPT = """You are a grounded question-answering assistant. Answer only from the provided context and cite the supporting sources.
-If the context is insufficient, say so explicitly.
-When you cite evidence, use the provided citation labels such as [C1] or [C2]."""
+DEFAULT_SYSTEM_PROMPT = """你是一个基于证据回答问题的助手。只能根据提供的上下文回答，并引用真正支撑结论的来源。
+如果上下文不足以回答，必须明确说明信息不足。
+引用证据时使用提供的标签，例如 [C1] 或 [C2]。"""
 
 # Media types that can be sent inline to a vision-capable LLM.
 _VISION_MIME_PREFIXES = ("image/",)
@@ -39,14 +39,16 @@ class PromptBuilder:
             f"Question: {query}\n\n"
             f"{conflict_notice}"
             f"Available context:\n{context_text}\n\n"
-            "Answer using only the context above and cite the evidence with the provided labels, for example [C1].\n\n"
-            "Return the result in this format:\n"
+            "只根据上面的上下文回答，并使用提供的标签引用证据，例如 [C1]。\n"
+            "优先引用同时包含问题核心实体和答案值的最小证据。不要引用只包含单位、表头、残缺行或泛化说明的片段，除非它们是唯一可用证据。\n"
+            "如果表格行已经包含地区、等级和价格，直接回答该行对应的价格，不要因为相邻片段不完整而拒答。\n\n"
+            "按以下格式返回：\n"
             "Final Answer:\n"
-            "<your answer with citations>\n\n"
+            "<带引用的答案>\n\n"
             "Supporting Claims:\n"
-            "- [factual|conditional|conflict|insufficiency] <claim 1> [C#]\n"
-            "- [factual|conditional|conflict|insufficiency] <claim 2> [C#]\n"
-            "If there are no strong supporting claims, return `- None`."
+            "- [factual|conditional|conflict|insufficiency] <证据支撑点 1> [C#]\n"
+            "- [factual|conditional|conflict|insufficiency] <证据支撑点 2> [C#]\n"
+            "如果没有强支撑点，返回 `- None`。"
         )
 
         media_parts = list(self._collect_media_parts(contexts))

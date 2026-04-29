@@ -4,10 +4,11 @@ from app.core.config import AppConfig
 from app.core.tracing import TraceStore, TracingManager
 from app.model_client.embeddings import EmbeddingClient
 from app.model_client.rerank import RerankClient
+from app.retrieval.context_builder import build_contexts
 from app.retrieval.pipeline import RetrievalPipeline
 from app.schemas.chunk import Chunk
 from app.schemas.document import Document
-from app.vectorstore.repository import InMemoryVectorRepository
+from app.vectorstore.repository import InMemoryVectorRepository, SearchHit
 
 
 class FakeEmbeddingClient(EmbeddingClient):
@@ -232,6 +233,33 @@ async def test_retrieval_pipeline_promotes_parent_section_context() -> None:
     assert contexts[0]["text"] == parent_text
     assert contexts[0]["title"] == "Policy > Leave Policy"
     assert contexts[0]["supporting_chunk_id"] in {"c1", "c2"}
+
+
+def test_context_builder_uses_child_text_when_parent_preview_is_truncated() -> None:
+    hit = SearchHit(
+        chunk=Chunk(
+            chunk_id="table:8",
+            doc_id="doc-table",
+            chunk_index=8,
+            text="| 中卫市 | 中宁县 | Ⅲ | 31800 | 喊叫水乡、徐套乡 |",
+            source_path="/tmp/table.pdf",
+            title="Price Table",
+            metadata={
+                "kb_id": "default",
+                "parent_chunk_id": "doc-table:parent:1",
+                "parent_text": "| 银川市 | ...",
+                "section_path": ["Attachment", "Price Table"],
+                "chunk_kind": "child",
+                "child_chunk_index": 8,
+            },
+        ),
+        score=0.9,
+    )
+
+    contexts = build_contexts([hit], limit=1)
+
+    assert contexts[0]["text"] == "| 中卫市 | 中宁县 | Ⅲ | 31800 | 喊叫水乡、徐套乡 |"
+    assert "_dedupe_key" not in contexts[0]
 
 
 @pytest.mark.asyncio

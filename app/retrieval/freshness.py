@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from app.retrieval.filters import parse_date
 from app.vectorstore.repository import SearchHit
 
+
 @dataclass(frozen=True)
 class FreshnessPolicy:
     enabled: bool = True
@@ -72,7 +73,14 @@ def _group_key(hit: SearchHit) -> str | None:
             section = " > ".join(str(item) for item in section_path if str(item).strip())
         else:
             section = hit.chunk.title or ""
-    return f"{metadata.get('wiki_kind') or 'raw'}|{source_key}|{section.strip().lower()}"
+    key = f"{metadata.get('wiki_kind') or 'raw'}|{source_key}|{section.strip().lower()}"
+    if metadata.get("chunk_kind") == "child" and not metadata.get("wiki_kind"):
+        child_index = metadata.get("child_chunk_index")
+        if child_index is not None:
+            return f"{key}|child:{child_index}"
+        return f"{key}|chunk:{hit.chunk.chunk_id}"
+    return key
+
 
 def _freshness_sort_key(hit: SearchHit) -> tuple[int, object, tuple[int, ...], float]:
     metadata = hit.chunk.metadata or {}

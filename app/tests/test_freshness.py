@@ -81,3 +81,33 @@ def test_prioritize_fresh_hits_prefers_higher_version_when_dates_match() -> None
     ranked = prioritize_fresh_hits(hits, FreshnessPolicy(enabled=True))
 
     assert [hit.chunk.chunk_id for hit in ranked] == ["v2"]
+
+
+def test_prioritize_fresh_hits_keeps_distinct_raw_child_chunks() -> None:
+    hits = [
+        _hit(
+            "table:7",
+            2.0,
+            metadata={
+                "source_key": "price table",
+                "section_path_text": "Attachment > Price Table",
+                "chunk_kind": "child",
+                "child_chunk_index": 7,
+            },
+        ),
+        _hit(
+            "table:8",
+            1.9,
+            metadata={
+                "source_key": "price table",
+                "section_path_text": "Attachment > Price Table",
+                "chunk_kind": "child",
+                "child_chunk_index": 8,
+            },
+        ),
+    ]
+
+    ranked = prioritize_fresh_hits(hits, FreshnessPolicy(enabled=True))
+
+    assert [hit.chunk.chunk_id for hit in ranked] == ["table:7", "table:8"]
+    assert all(hit.chunk.metadata["freshness_tier"] == "primary" for hit in ranked)

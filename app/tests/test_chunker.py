@@ -52,3 +52,25 @@ def test_build_chunks_adds_section_and_parent_metadata() -> None:
         "Leave Policy",
         "Expense Rules",
     ]
+
+
+def test_split_text_keeps_markdown_table_rows_intact_and_repeats_header() -> None:
+    text = "\n".join(
+        [
+            "| 地级市 | 县（市、区） | 区片编号 | 区片综合地价 | 区片范围 |",
+            "| :--- | :--- | :--- | :--- | :--- |",
+            "| 中卫市 | 中宁县 | Ⅰ | 41200 | 宁安镇、新堡镇、石空镇 |",
+            "| 中卫市 | 中宁县 | Ⅱ | 36300 | 鸣沙镇、恩和镇、大战场镇、舟塔乡、白马乡、余丁乡、太阳梁乡 |",
+            "| 中卫市 | 中宁县 | Ⅲ | 31800 | 喊叫水乡、徐套乡 |",
+            "| 中卫市 | 海原县 | Ⅰ | 29500 | 海城镇、三河镇 |",
+        ]
+    )
+
+    chunks = split_text(text, chunk_size=170, overlap=20)
+
+    assert len(chunks) > 1
+    assert all(chunk.startswith("| 地级市 | 县（市、区） |") for chunk in chunks)
+    assert any(
+        "| 中卫市 | 中宁县 | Ⅲ | 31800 | 喊叫水乡、徐套乡 |" in chunk
+        for chunk in chunks
+    )

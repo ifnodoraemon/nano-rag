@@ -10,7 +10,6 @@ def test_answer_formatter_adds_citation_if_missing() -> None:
     )
 
     assert "[C1]" in response.answer
-    assert "Supporting evidence: [C1]" in response.answer
     assert len(response.citations) == 1
     assert response.citations[0].citation_label == "C1"
     assert response.citations[0].span_text == "ctx"
@@ -53,17 +52,14 @@ def test_answer_formatter_prioritizes_primary_citations_and_reorders_contexts() 
     )
 
     assert response.citations[0].chunk_id == "c-primary"
+    assert len(response.citations) == 1
     assert [context["chunk_id"] for context in response.contexts] == [
         "c-primary",
         "c-support",
         "c-conflict",
     ]
     assert "[C1]" in response.answer
-    assert "Primary evidence: [C1]" in response.answer
-    assert "Supporting evidence: [C2]" in response.answer
-    assert "Conflicting evidence: [C3]" in response.answer
     assert response.citations[0].evidence_role == "primary"
-    assert response.citations[-1].evidence_role == "conflicting"
     assert response.citations[0].span_text == "primary"
 
 
@@ -95,7 +91,7 @@ def test_answer_formatter_adds_conflict_notice_when_conflicting_evidence_exists(
 
     assert "available evidence is conflicting" in response.answer
     assert "[C1]" in response.answer
-    assert "Conflicting evidence: [C2]" in response.answer
+    assert "Conflicting evidence" not in response.answer
 
 
 def test_answer_formatter_does_not_duplicate_conflict_notice() -> None:
@@ -222,8 +218,44 @@ def test_answer_formatter_only_returns_explicitly_cited_labels() -> None:
     )
 
     assert [citation.citation_label for citation in response.citations] == ["C1"]
-    assert "Primary evidence: [C1]" in response.answer
     assert "[C2]" not in response.answer
+
+
+def test_answer_formatter_drops_numeric_citations_without_answer_value() -> None:
+    formatter = AnswerFormatter()
+    response = formatter.format(
+        answer="中宁县徐套乡的价格为 31,800 元/亩 [C1, C2, C3]。",
+        contexts=[
+            {
+                "chunk_id": "fragment",
+                "citation_label": "C1",
+                "source": "/tmp/doc.md",
+                "score": 0.9,
+                "text": "| 0 | 喊叫水乡、徐套乡 |",
+                "evidence_role": "primary",
+            },
+            {
+                "chunk_id": "unit",
+                "citation_label": "C2",
+                "source": "/tmp/doc.md",
+                "score": 0.8,
+                "text": "单位：元/亩",
+                "evidence_role": "primary",
+            },
+            {
+                "chunk_id": "row",
+                "citation_label": "C3",
+                "source": "/tmp/doc.md",
+                "score": 0.7,
+                "text": "| 中卫市 | 中宁县 | III | 31800 | 喊叫水乡、徐套乡 |",
+                "evidence_role": "primary",
+            },
+        ],
+        trace_id="t1",
+    )
+
+    assert response.answer == "中宁县徐套乡的价格为 31,800 元/亩 [C3]。"
+    assert [citation.citation_label for citation in response.citations] == ["C3"]
 
 
 def test_answer_formatter_extracts_structured_answer_plan_and_supporting_claims() -> None:

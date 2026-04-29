@@ -21,6 +21,8 @@ MAX_SPAN_TEXT_CHARS = 180
 SENTENCE_SPLIT_RE = re.compile(r"(?<=[\.\!\?。！？；;])\s+|\n+")
 TOKEN_RE = re.compile(r"[A-Za-z0-9_]+")
 CITATION_LABEL_RE = re.compile(r"\[(C\d+)\]")
+CITATION_GROUP_RE = re.compile(r"\[((?:C\d+\s*,\s*)*C\d+)\]")
+NUMBER_RE = re.compile(r"\d[\d,]*(?:\.\d+)?")
 FINAL_ANSWER_SECTION_RE = re.compile(
     r"(?:^|\n)(?:#{1,6}\s*)?(?:Final Answer|Answer)\s*:\s*\n?(.*?)(?=\n(?:#{1,6}\s*)?Supporting Claims\s*:|\Z)",
     re.IGNORECASE | re.DOTALL,
@@ -82,6 +84,7 @@ class AnswerFormatter:
         )
         citations_by_chunk: dict[str, Citation] = {}
         citations_by_label: dict[str, Citation] = {}
+        context_text_by_label: dict[str, str] = {}
         for context in ordered_contexts:
             chunk_id = str(context["chunk_id"])
             if chunk_id not in citations_by_chunk:
@@ -109,6 +112,9 @@ class AnswerFormatter:
                 citations_by_chunk[chunk_id] = citation
                 if citation.citation_label:
                     citations_by_label[citation.citation_label] = citation
+                    context_text_by_label[citation.citation_label] = str(
+                        context.get("text", "") or ""
+                    )
         normalized_answer = answer_body
         if self._has_conflicting_evidence(ordered_contexts) and not self._mentions_conflict(
             normalized_answer
@@ -116,6 +122,14 @@ class AnswerFormatter:
             normalized_answer = (
                 f"{normalized_answer}\n\nNote: the available evidence is conflicting, so the conclusion may depend on source or version differences."
             ).strip()
+        cited_labels = self._extract_cited_labels(normalized_answer)
+        cited_labels = self._filter_cited_labels(
+            normalized_answer,
+            cited_labels,
+            citations_by_label,
+            context_text_by_label,
+        )
+        normalized_answer = self._rewrite_citation_markers(normalized_answer, cited_labels)
         cited_labels = self._extract_cited_labels(normalized_answer)
         ordered_citations = self._ordered_citations(
             citations_by_chunk,
@@ -125,10 +139,6 @@ class AnswerFormatter:
         if ordered_citations and not cited_labels:
             first_label = ordered_citations[0].citation_label or ordered_citations[0].chunk_id
             normalized_answer = f"{normalized_answer} [{first_label}]"
-        normalized_answer = self._append_evidence_summary(
-            normalized_answer,
-            ordered_citations,
-        )
         return ChatResponse(
             answer=normalized_answer,
             citations=ordered_citations,
@@ -179,12 +189,67 @@ class AnswerFormatter:
     def _extract_cited_labels(self, answer: str) -> list[str]:
         seen: set[str] = set()
         ordered: list[str] = []
-        for match in CITATION_LABEL_RE.findall(answer):
-            if match in seen:
-                continue
-            ordered.append(match)
-            seen.add(match)
+        for group in CITATION_GROUP_RE.findall(answer):
+            for match in [label.strip() for label in group.split(",") if label.strip()]:
+                if match in seen:
+                    continue
+                ordered.append(match)
+                seen.add(match)
         return ordered
+
+    def _filter_cited_labels(
+        self,
+        answer: str,
+        cited_labels: list[str],
+        citations_by_label: dict[str, Citation],
+        context_text_by_label: dict[str, str],
+    ) -> list[str]:
+        labels = [label for label in cited_labels if label in citations_by_label]
+        if len(labels) <= 1:
+            return labels
+
+        answer_numbers = {
+            self._normalize_number(number) for number in NUMBER_RE.findall(answer)
+        }
+        if not answer_numbers:
+            return labels
+
+        number_supported_labels = [
+            label
+            for label in labels
+            if any(
+                number in self._normalize_number_text(context_text_by_label.get(label, ""))
+                for number in answer_numbers
+            )
+        ]
+        return number_supported_labels or labels
+
+    def _normalize_number(self, value: str) -> str:
+        return value.replace(",", "")
+
+    def _normalize_number_text(self, value: str) -> str:
+        return "".join(
+            self._normalize_number(match) for match in NUMBER_RE.findall(value)
+        )
+
+    def _rewrite_citation_markers(self, answer: str, allowed_labels: list[str]) -> str:
+        allowed = set(allowed_labels)
+
+        def replace_group(match: re.Match[str]) -> str:
+            labels = [
+                label.strip()
+                for label in match.group(1).split(",")
+                if label.strip() in allowed
+            ]
+            if not labels:
+                return ""
+            return "[" + ", ".join(labels) + "]"
+
+        rewritten = CITATION_GROUP_RE.sub(replace_group, answer)
+        rewritten = re.sub(r"\s+([。！？；;,.])", r"\1", rewritten)
+        rewritten = re.sub(r"[ \t]{2,}", " ", rewritten)
+        rewritten = re.sub(r"\n{3,}", "\n\n", rewritten)
+        return rewritten.strip()
 
     def _ordered_citations(
         self,
@@ -202,7 +267,8 @@ class AnswerFormatter:
                 ordered.append(citation)
                 used_chunks.add(citation.chunk_id)
             return ordered
-        return list(citations_by_chunk.values())
+        citations = list(citations_by_chunk.values())
+        return citations[:1]
 
     def _extract_answer_plan(
         self,

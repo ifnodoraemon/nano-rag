@@ -40,8 +40,24 @@ def _order_contexts_by_evidence(contexts: list[dict[str, object]]) -> list[dict[
 def _with_citation_labels(contexts: list[dict[str, object]]) -> list[dict[str, object]]:
     labeled: list[dict[str, object]] = []
     for index, context in enumerate(contexts, start=1):
-        labeled.append({**context, "citation_label": f"C{index}"})
+        public_context = {
+            key: value for key, value in context.items() if key != "_dedupe_key"
+        }
+        labeled.append({**public_context, "citation_label": f"C{index}"})
     return labeled
+
+
+def _is_truncated_parent_text(value: object) -> bool:
+    return isinstance(value, str) and value.rstrip().endswith("...")
+
+
+def _context_text_and_dedupe_key(hit: SearchHit) -> tuple[str, str]:
+    metadata = hit.chunk.metadata or {}
+    parent_chunk_id = metadata.get("parent_chunk_id")
+    parent_text = metadata.get("parent_text")
+    if isinstance(parent_text, str) and parent_text and not _is_truncated_parent_text(parent_text):
+        return parent_text, str(parent_chunk_id or hit.chunk.chunk_id)
+    return hit.chunk.text, hit.chunk.chunk_id
 
 
 def build_contexts(
@@ -55,8 +71,7 @@ def build_contexts(
     for hit in hits:
         metadata = hit.chunk.metadata or {}
         parent_chunk_id = metadata.get("parent_chunk_id")
-        parent_text = metadata.get("parent_text")
-        dedupe_key = str(parent_chunk_id or hit.chunk.chunk_id)
+        context_text, dedupe_key = _context_text_and_dedupe_key(hit)
         if dedupe_key in seen_keys:
             continue
         seen_keys.add(dedupe_key)
@@ -68,7 +83,8 @@ def build_contexts(
         )
         context_entry: dict[str, object] = {
             "chunk_id": hit.chunk.chunk_id,
-            "text": parent_text or hit.chunk.text,
+            "_dedupe_key": dedupe_key,
+            "text": context_text,
             "source": hit.chunk.source_path,
             "title": section_path_text or hit.chunk.title,
             "score": round(hit.score, 6),
@@ -128,10 +144,15 @@ def build_contexts(
 
     if len(selected) < limit:
         selected_keys = {
-            str(item.get("parent_chunk_id") or item.get("chunk_id")) for item in selected
+            str(item.get("_dedupe_key") or item.get("parent_chunk_id") or item.get("chunk_id"))
+            for item in selected
         }
         for context in [*contexts, *extras]:
-            dedupe_key = str(context.get("parent_chunk_id") or context.get("chunk_id"))
+            dedupe_key = str(
+                context.get("_dedupe_key")
+                or context.get("parent_chunk_id")
+                or context.get("chunk_id")
+            )
             if dedupe_key in selected_keys:
                 continue
             selected.append(context)
