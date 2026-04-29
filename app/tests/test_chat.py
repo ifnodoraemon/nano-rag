@@ -144,6 +144,73 @@ async def test_health_route(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
+async def test_health_detail_uses_cache_for_repeated_probes(monkeypatch) -> None:
+    monkeypatch.delenv("RAG_AUTH_DISABLED", raising=False)
+    fake_trace_list = SimpleNamespace(total=0, items=[])
+    fake_container = SimpleNamespace(
+        config=SimpleNamespace(
+            gateway_models_probe_paths=("/v1/models", "/models"),
+            gateway_mode="live",
+            gateway_for=lambda capability: {  # noqa: ARG005
+                "base_url": "http://gateway.local",
+                "api_key": "secret",
+            },
+            langfuse_ui_endpoint="",
+            langfuse_otel_endpoint="",
+            document_parser_configured={
+                "enabled": True,
+                "provider": "gemini",
+                "model": "gemini-3.1-pro-preview",
+                "base_url": "https://generativelanguage.googleapis.com",
+                "configured": True,
+                "missing": [],
+            },
+            parsed_dir="/tmp/parsed",
+            rerank_enabled=False,
+            business_api_keys=set(),
+        ),
+        repository=SimpleNamespace(
+            stats=lambda: {"backend": "memory", "documents": 0, "chunks": 0}
+        ),
+        trace_store=SimpleNamespace(list=lambda: fake_trace_list),
+    )
+    request = SimpleNamespace(
+        query_params={},
+        app=SimpleNamespace(state=SimpleNamespace(container=fake_container)),
+    )
+    calls = {"get": 0}
+
+    class FakeResponse:
+        status_code = 200
+        text = ""
+
+    class FakeAsyncClient:
+        def __init__(self, *args, **kwargs):  # noqa: ANN002, ANN003, ARG002
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):  # noqa: ANN001, ARG002
+            return None
+
+        async def get(self, url, headers=None):  # noqa: ANN001, ARG002
+            calls["get"] += 1
+            return FakeResponse()
+
+    with patch("app.main.httpx.AsyncClient", FakeAsyncClient):
+        first = await health_detail(request)
+        second = await health_detail(request)
+        request.query_params = {"refresh": "true"}
+        third = await health_detail(request)
+
+    assert first["cached"] is False
+    assert second["cached"] is True
+    assert third["cached"] is False
+    assert calls["get"] == 4
+
+
+@pytest.mark.asyncio
 async def test_health_route_marks_gateway_4xx_as_degraded(monkeypatch) -> None:
     monkeypatch.delenv("RAG_AUTH_DISABLED", raising=False)
     fake_trace_list = SimpleNamespace(total=0, items=[])

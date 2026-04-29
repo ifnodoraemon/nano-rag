@@ -2,6 +2,7 @@ from contextlib import asynccontextmanager
 
 import logging
 import os
+import time
 from pathlib import Path
 
 import httpx
@@ -266,6 +267,33 @@ def _auth_state(config) -> dict[str, object]:  # noqa: ANN001
 @app.get("/health/detail", dependencies=[Depends(require_api_key)])
 async def health_detail(request: Request) -> dict[str, object]:
     container = request.app.state.container
+    cache_ttl_seconds = max(0.0, float(os.getenv("HEALTH_DETAIL_CACHE_SECONDS", "300")))
+    query_params = getattr(request, "query_params", {})
+    force_refresh = str(query_params.get("refresh", "")).lower() in {"1", "true", "yes"}
+    cache = getattr(request.app.state, "health_detail_cache", None)
+    now = time.monotonic()
+    if (
+        cache_ttl_seconds > 0
+        and not force_refresh
+        and cache
+        and now - cache["created_at"] < cache_ttl_seconds
+    ):
+        return {
+            **cache["payload"],
+            "cached": True,
+            "cache_age_seconds": round(now - cache["created_at"], 3),
+        }
+
+    payload = await _build_health_detail(container)
+    if cache_ttl_seconds > 0:
+        request.app.state.health_detail_cache = {
+            "created_at": now,
+            "payload": payload,
+        }
+    return {**payload, "cached": False, "cache_age_seconds": 0}
+
+
+async def _build_health_detail(container) -> dict[str, object]:  # noqa: ANN001
     config = container.config
     auth_state = _auth_state(config)
     capability_gateways: dict[str, dict[str, object]] = {}

@@ -261,6 +261,54 @@ def test_context_builder_uses_child_text_when_parent_preview_is_truncated() -> N
     assert "_dedupe_key" not in contexts[0]
 
 
+def test_context_builder_promotes_context_covering_missing_query_term() -> None:
+    hits = [
+        SearchHit(
+            chunk=Chunk(
+                chunk_id=f"land-{index}",
+                doc_id="land",
+                chunk_index=index,
+                text=text,
+                source_path="/tmp/land.pdf",
+                title="征收农用地区片综合地价表",
+                metadata={"kb_id": "default"},
+            ),
+            score=1.0 - index * 0.01,
+        )
+        for index, text in enumerate(
+            [
+                "中宁县居民生活必需品价格监测报表",
+                "宁夏回族自治区征收农用地区片综合地价表",
+                "中宁县 III 31800 喊叫水乡、徐套乡",
+                "沙坡头区 I 41700 迎水桥镇",
+            ]
+        )
+    ]
+    hits.append(
+        SearchHit(
+            chunk=Chunk(
+                chunk_id="tomato",
+                doc_id="prices",
+                chunk_index=4,
+                text="| 西红柿 | 新鲜一级 | 元/500克 | 4.98 | 4.98 | 0.0 | |",
+                source_path="/tmp/prices.pdf",
+                title="中宁县居民生活必需品价格监测报表",
+                metadata={"kb_id": "default"},
+            ),
+            score=0.5,
+        )
+    )
+
+    contexts = build_contexts(
+        hits,
+        limit=4,
+        quotas={"raw": 4},
+        query="中宁县徐套乡西红柿价格",
+    )
+
+    assert "tomato" in [context["chunk_id"] for context in contexts]
+
+
 @pytest.mark.asyncio
 async def test_retrieval_pipeline_applies_explicit_metadata_filters() -> None:
     repository = InMemoryVectorRepository()

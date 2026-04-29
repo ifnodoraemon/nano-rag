@@ -258,6 +258,54 @@ def test_answer_formatter_drops_numeric_citations_without_answer_value() -> None
     assert [citation.citation_label for citation in response.citations] == ["C3"]
 
 
+def test_answer_formatter_prefers_matching_table_row_for_citation_span() -> None:
+    formatter = AnswerFormatter()
+    response = formatter.format(
+        answer="中宁县新鲜一级西红柿的今日价格和上一周价格均为 4.98元/500克 [C1]。",
+        contexts=[
+            {
+                "chunk_id": "price-row",
+                "citation_label": "C1",
+                "source": "/tmp/prices.pdf",
+                "score": 0.9,
+                "text": (
+                    "| 品种 | 规格等级 | 计量单位 | 今日价格 | 上一周价格 | 同期比（±%） | 备注 |\n"
+                    "| :--- | :--- | :--- | :--- | :--- | :--- | :--- |\n"
+                    "| 茄子 | 新鲜一级 | 元/500克 | 5.18 | 4.98 | 4.0 | |\n"
+                    "| 西红柿 | 新鲜一级 | 元/500克 | 4.98 | 4.98 | 0.0 | |\n"
+                ),
+                "evidence_role": "primary",
+            }
+        ],
+        trace_id="t1",
+    )
+
+    assert response.citations[0].span_text == "| 西红柿 | 新鲜一级 | 元/500克 | 4.98 | 4.98 | 0.0 | |"
+
+
+def test_answer_formatter_ignores_citation_label_number_for_span_scoring() -> None:
+    formatter = AnswerFormatter()
+    response = formatter.format(
+        answer="徐套乡属于中宁县 [C4]。",
+        contexts=[
+            {
+                "chunk_id": "scope-row",
+                "citation_label": "C4",
+                "source": "/tmp/scope.pdf",
+                "score": 0.9,
+                "text": (
+                    "| 中卫市 | 中宁县 | Ⅰ | 41200 | 宁安镇、新堡镇、石空镇 |\n"
+                    "| 中卫市 | 中宁县 | Ⅲ | 31800 | 喊叫水乡、徐套乡 |\n"
+                ),
+                "evidence_role": "primary",
+            }
+        ],
+        trace_id="t1",
+    )
+
+    assert response.citations[0].span_text == "| 中卫市 | 中宁县 | Ⅲ | 31800 | 喊叫水乡、徐套乡 |"
+
+
 def test_answer_formatter_extracts_structured_answer_plan_and_supporting_claims() -> None:
     formatter = AnswerFormatter()
     response = formatter.format(

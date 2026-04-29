@@ -20,6 +20,7 @@ EVIDENCE_SUMMARY_TITLES = {
 MAX_SPAN_TEXT_CHARS = 180
 SENTENCE_SPLIT_RE = re.compile(r"(?<=[\.\!\?。！？；;])\s+|\n+")
 TOKEN_RE = re.compile(r"[A-Za-z0-9_]+")
+CJK_SEQUENCE_RE = re.compile(r"[\u4e00-\u9fff\u3400-\u4dbf\uf900-\ufaff]+")
 CITATION_LABEL_RE = re.compile(r"\[(C\d+)\]")
 CITATION_GROUP_RE = re.compile(r"\[((?:C\d+\s*,\s*)*C\d+)\]")
 NUMBER_RE = re.compile(r"\d[\d,]*(?:\.\d+)?")
@@ -339,33 +340,93 @@ class AnswerFormatter:
         text = context_text.strip()
         if not text:
             return None, None, None
-        sentences = [
-            sentence.strip()
-            for sentence in SENTENCE_SPLIT_RE.split(text)
-            if sentence.strip()
-        ]
-        if not sentences:
-            sentences = [text]
-        answer_tokens = self._tokenize(answer)
-        best_sentence = sentences[0]
-        best_score = -1
-        for sentence in sentences:
-            sentence_tokens = self._tokenize(sentence)
-            overlap_score = len(answer_tokens & sentence_tokens)
-            if overlap_score > best_score or (
-                overlap_score == best_score and len(sentence) < len(best_sentence)
+        scoring_answer = CITATION_GROUP_RE.sub("", answer)
+        candidates = self._span_candidates(text)
+        if not candidates:
+            candidates = [(text, 0, len(text), False)]
+        answer_tokens = self._tokenize(scoring_answer)
+        answer_terms = self._cjk_terms(scoring_answer)
+        answer_numbers = {
+            self._normalize_number(number) for number in NUMBER_RE.findall(scoring_answer)
+        }
+        best_candidate, best_start, best_end, _ = candidates[0]
+        best_score = float("-inf")
+        for candidate, start, end, is_table_row in candidates:
+            candidate_tokens = self._tokenize(candidate)
+            token_score = len(answer_tokens & candidate_tokens)
+            term_score = sum(len(term) for term in answer_terms if term in candidate)
+            number_text = self._normalize_number_text(candidate)
+            number_score = sum(1 for number in answer_numbers if number in number_text)
+            if is_table_row and answer_numbers and number_score == 0:
+                continue
+            table_bonus = 2 if is_table_row else 0
+            score = token_score + term_score * 2 + number_score + table_bonus
+            if score > best_score or (
+                score == best_score and len(candidate) < len(best_candidate)
             ):
-                best_sentence = sentence
-                best_score = overlap_score
-        span_start = text.find(best_sentence)
-        if span_start < 0:
-            span_start = 0
-        span_end = span_start + len(best_sentence)
-        span_text = self._preview(best_sentence, MAX_SPAN_TEXT_CHARS)
-        return span_text, span_start, span_end
+                best_candidate = candidate
+                best_start = start
+                best_end = end
+                best_score = score
+        span_text = self._preview(best_candidate, MAX_SPAN_TEXT_CHARS)
+        return span_text, best_start, best_end
+
+    def _span_candidates(self, text: str) -> list[tuple[str, int, int, bool]]:
+        candidates: list[tuple[str, int, int, bool]] = []
+        offset = 0
+        for line in text.splitlines(keepends=True):
+            stripped = line.strip()
+            line_body = line.rstrip("\r\n")
+            line_start = offset + len(line) - len(line.lstrip())
+            line_end = offset + len(line_body)
+            offset += len(line)
+            if not self._is_table_content_row(stripped):
+                continue
+            candidates.append((stripped, line_start, line_end, True))
+
+        search_start = 0
+        for sentence in SENTENCE_SPLIT_RE.split(text):
+            stripped = sentence.strip()
+            if not stripped:
+                continue
+            if stripped.startswith("|") and stripped.count("|") >= 3:
+                continue
+            start = text.find(stripped, search_start)
+            if start < 0:
+                start = text.find(stripped)
+            if start < 0:
+                start = 0
+            end = start + len(stripped)
+            search_start = end
+            candidates.append((stripped, start, end, False))
+        return candidates
+
+    def _is_table_content_row(self, value: str) -> bool:
+        if not value.startswith("|") or value.count("|") < 3:
+            return False
+        cells = [cell.strip() for cell in value.strip("|").split("|")]
+        if not any(cells):
+            return False
+        return not all(re.fullmatch(r":?-{3,}:?", cell or "") for cell in cells)
+
+    def _cjk_terms(self, value: str) -> set[str]:
+        terms: set[str] = set()
+        for match in CJK_SEQUENCE_RE.finditer(value):
+            chars = match.group()
+            for size in range(2, min(7, len(chars) + 1)):
+                for index in range(0, len(chars) - size + 1):
+                    terms.add(chars[index : index + size])
+        return terms
 
     def _tokenize(self, value: str) -> set[str]:
-        return {token.lower() for token in TOKEN_RE.findall(value)}
+        tokens = {token.lower() for token in TOKEN_RE.findall(value)}
+        for match in CJK_SEQUENCE_RE.finditer(value):
+            chars = match.group()
+            tokens.update(chars)
+            for size in range(2, min(5, len(chars) + 1)):
+                for index in range(0, len(chars) - size + 1):
+                    tokens.add(chars[index : index + size])
+        return tokens
 
     def _preview(self, text: str, limit: int) -> str:
         normalized = " ".join(text.split())

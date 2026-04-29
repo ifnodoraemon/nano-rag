@@ -51,7 +51,7 @@ services:
       RERANK_API_BASE_URL: ${COMPOSE_RERANK_API_BASE_URL:-}
       RERANK_API_KEY: ${COMPOSE_RERANK_API_KEY:-}
       RERANK_API_PATH: ${COMPOSE_RERANK_API_PATH:-}
-      DISABLE_RERANK: ${COMPOSE_DISABLE_RERANK:-}
+      DISABLE_RERANK: ${COMPOSE_DISABLE_RERANK:-true}
     volumes:
       - ../configs:/workspace/configs:ro
       - ../data/raw:/workspace/data/raw:ro

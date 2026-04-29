@@ -107,7 +107,7 @@ class RetrievalPipeline:
                 reranked = await self.reranker.rerank(query, retrieved, rerank_top_k)
                 rerank_seconds = round(perf_counter() - rerank_started, 4)
             else:
-                reranked = retrieved[:rerank_top_k]
+                reranked = retrieved
             freshness_ranked = prioritize_fresh_hits(reranked, freshness_policy)
             retrieved_contexts = build_contexts(retrieved, requested_top_k)
             reranked_contexts = build_contexts(reranked, rerank_top_k)
@@ -115,6 +115,7 @@ class RetrievalPipeline:
                 freshness_ranked,
                 final_contexts_limit,
                 quotas=context_quotas,
+                query=query,
             )
             trace.record("query", query)
             trace.record("kb_id", kb_id)
