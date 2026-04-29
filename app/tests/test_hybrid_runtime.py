@@ -173,7 +173,7 @@ def test_hybrid_retriever_bootstraps_from_parsed_artifacts(monkeypatch, tmp_path
             "source_path": "data/raw/guide.md",
             "title": "Guide",
             "content": "...",
-            "metadata": {"kb_id": "kb-a", "tenant_id": "tenant-a"},
+            "metadata": {"kb_id": "kb-a"},
         },
         "chunks": [
             {
@@ -183,7 +183,7 @@ def test_hybrid_retriever_bootstraps_from_parsed_artifacts(monkeypatch, tmp_path
                 "text": "vacation and reimbursement policy",
                 "source_path": "data/raw/guide.md",
                 "title": "Guide",
-                "metadata": {"kb_id": "kb-a", "tenant_id": "tenant-a"},
+                "metadata": {"kb_id": "kb-a"},
             }
         ],
     }
@@ -205,7 +205,7 @@ def test_hybrid_retriever_bootstraps_from_parsed_artifacts(monkeypatch, tmp_path
 
 
 @pytest.mark.asyncio
-async def test_hybrid_retriever_respects_kb_and_tenant_scope(
+async def test_hybrid_retriever_respects_kb_scope(
     monkeypatch, tmp_path
 ) -> None:
     monkeypatch.setenv("RAG_HYBRID_SEARCH_ENABLED", "true")
@@ -216,7 +216,7 @@ async def test_hybrid_retriever_respects_kb_and_tenant_scope(
             source_path="data/raw/a.md",
             title="A",
             content="...",
-            metadata={"kb_id": "kb-a", "tenant_id": "tenant-a"},
+            metadata={"kb_id": "kb-a"},
         ),
         [
             Chunk(
@@ -226,7 +226,7 @@ async def test_hybrid_retriever_respects_kb_and_tenant_scope(
                 text="PTO carryover rule",
                 source_path="data/raw/a.md",
                 title="A",
-                metadata={"kb_id": "kb-a", "tenant_id": "tenant-a"},
+                metadata={"kb_id": "kb-a"},
             )
         ],
         [[0.0, 0.0]],
@@ -237,7 +237,7 @@ async def test_hybrid_retriever_respects_kb_and_tenant_scope(
             source_path="data/raw/b.md",
             title="B",
             content="...",
-            metadata={"kb_id": "kb-b", "tenant_id": "tenant-b"},
+            metadata={"kb_id": "kb-b"},
         ),
         [
             Chunk(
@@ -247,7 +247,7 @@ async def test_hybrid_retriever_respects_kb_and_tenant_scope(
                 text="PTO carryover rule",
                 source_path="data/raw/b.md",
                 title="B",
-                metadata={"kb_id": "kb-b", "tenant_id": "tenant-b"},
+                metadata={"kb_id": "kb-b"},
             )
         ],
         [[0.0, 0.0]],
@@ -265,7 +265,7 @@ async def test_hybrid_retriever_respects_kb_and_tenant_scope(
                 text="PTO carryover rule",
                 source_path="data/raw/a.md",
                 title="A",
-                metadata={"kb_id": "kb-a", "tenant_id": "tenant-a"},
+                metadata={"kb_id": "kb-a"},
             ),
             Chunk(
                 chunk_id="chunk-b",
@@ -274,7 +274,7 @@ async def test_hybrid_retriever_respects_kb_and_tenant_scope(
                 text="PTO carryover rule",
                 source_path="data/raw/b.md",
                 title="B",
-                metadata={"kb_id": "kb-b", "tenant_id": "tenant-b"},
+                metadata={"kb_id": "kb-b"},
             ),
         ]
     )
@@ -292,7 +292,6 @@ async def test_hybrid_retriever_respects_kb_and_tenant_scope(
         "pto carryover",
         2,
         kb_id="kb-a",
-        tenant_id="tenant-a",
     )
 
     assert [context["chunk_id"] for context in contexts] == ["chunk-a"]

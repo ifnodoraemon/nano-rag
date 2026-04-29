@@ -17,15 +17,13 @@ def test_trace_store_saves_and_lists_latest_first() -> None:
 
 def test_trace_store_lists_by_scope() -> None:
     store = TraceStore()
-    store.save_raw({"trace_id": "t1", "query": "q1", "kb_id": "kb-a", "tenant_id": "tenant-a"})
-    store.save_raw({"trace_id": "t2", "query": "q2", "kb_id": "kb-b", "tenant_id": "tenant-b"})
-    store.save_raw({"trace_id": "t3", "query": "q3", "kb_id": "kb-a", "tenant_id": "tenant-b"})
+    store.save_raw({"trace_id": "t1", "query": "q1", "kb_id": "kb-a"})
+    store.save_raw({"trace_id": "t2", "query": "q2", "kb_id": "kb-b"})
+    store.save_raw({"trace_id": "t3", "query": "q3", "kb_id": "kb-a"})
 
     kb_result = store.list(kb_id="kb-a")
-    tenant_result = store.list(kb_id="kb-a", tenant_id="tenant-a")
 
     assert [item.trace_id for item in kb_result.items] == ["t3", "t1"]
-    assert [item.trace_id for item in tenant_result.items] == ["t1"]
 
 
 def test_trace_store_loads_persisted_records(tmp_path) -> None:

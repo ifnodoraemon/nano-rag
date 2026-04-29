@@ -48,59 +48,55 @@ def _config(tmp_path) -> AppConfig:
     )
 
 
-def test_wiki_search_shared_scope_does_not_return_tenant_pages(tmp_path) -> None:
+def test_wiki_search_filters_pages_by_kb(tmp_path) -> None:
     wiki_compiler = WikiCompiler(tmp_path / "wiki")
     wiki_compiler.upsert_document(
         Document(
-            doc_id="shared",
-            source_path="uploads/default/__shared__/policy.md",
-            title="Shared Policy",
-            content="# Policy\n\nShared vacation rules.",
-            metadata={"kb_id": "default", "tenant_id": None},
+            doc_id="default-doc",
+            source_path="uploads/default/policy.md",
+            title="Default Policy",
+            content="# Policy\n\nDefault vacation rules.",
+            metadata={"kb_id": "default"},
         ),
         [
             Chunk(
-                chunk_id="shared:0",
-                doc_id="shared",
+                chunk_id="default:0",
+                doc_id="default-doc",
                 chunk_index=0,
-                text="Shared vacation rules.",
-                source_path="uploads/default/__shared__/policy.md",
-                metadata={"kb_id": "default", "tenant_id": None},
+                text="Default vacation rules.",
+                source_path="uploads/default/policy.md",
+                metadata={"kb_id": "default"},
             )
         ],
     )
     wiki_compiler.upsert_document(
         Document(
-            doc_id="tenant",
-            source_path="uploads/default/tenant-a/policy.md",
-            title="Tenant Policy",
-            content="# Policy\n\nTenant vacation rules.",
-            metadata={"kb_id": "default", "tenant_id": "tenant-a"},
+            doc_id="other-doc",
+            source_path="uploads/other/policy.md",
+            title="Other Policy",
+            content="# Policy\n\nOther vacation rules.",
+            metadata={"kb_id": "other"},
         ),
         [
             Chunk(
-                chunk_id="tenant:0",
-                doc_id="tenant",
+                chunk_id="other:0",
+                doc_id="other-doc",
                 chunk_index=0,
-                text="Tenant vacation rules.",
-                source_path="uploads/default/tenant-a/policy.md",
-                metadata={"kb_id": "default", "tenant_id": "tenant-a"},
+                text="Other vacation rules.",
+                source_path="uploads/other/policy.md",
+                metadata={"kb_id": "other"},
             )
         ],
     )
     wiki_searcher = WikiSearcher(tmp_path / "wiki")
 
-    shared_hits = wiki_searcher.search("vacation", top_k=10, kb_id="default")
-    tenant_hits = wiki_searcher.search(
-        "vacation", top_k=10, kb_id="default", tenant_id="tenant-a"
-    )
+    default_hits = wiki_searcher.search("vacation", top_k=10, kb_id="default")
+    other_hits = wiki_searcher.search("vacation", top_k=10, kb_id="other")
 
-    assert shared_hits
-    assert tenant_hits
-    assert all(hit.chunk.metadata.get("tenant_id") is None for hit in shared_hits)
-    assert all(
-        hit.chunk.metadata.get("tenant_id") == "tenant-a" for hit in tenant_hits
-    )
+    assert default_hits
+    assert other_hits
+    assert all(hit.chunk.metadata.get("kb_id") == "default" for hit in default_hits)
+    assert all(hit.chunk.metadata.get("kb_id") == "other" for hit in other_hits)
 
 
 @pytest.mark.asyncio

@@ -41,7 +41,6 @@ class GenerationService:
                 payload.query,
                 payload.top_k,
                 kb_id=payload.kb_id or "default",
-                tenant_id=payload.tenant_id,
                 session_id=payload.session_id,
                 sample_id=payload.sample_id,
                 metadata_filters=payload.metadata_filters,
@@ -70,7 +69,6 @@ class GenerationService:
                         ],
                         "model_alias": self.generation_client.alias,
                         "kb_id": payload.kb_id or record.kb_id,
-                        "tenant_id": payload.tenant_id or record.tenant_id,
                         "session_id": payload.session_id or record.session_id,
                         "sample_id": payload.sample_id or record.sample_id,
                         "prompt_version": str(

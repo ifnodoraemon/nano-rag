@@ -112,10 +112,10 @@ async def test_retrieval_pipeline_skips_rerank_when_disabled(monkeypatch) -> Non
 
 
 @pytest.mark.asyncio
-async def test_retrieval_pipeline_scopes_results_by_kb_and_tenant() -> None:
+async def test_retrieval_pipeline_scopes_results_by_kb() -> None:
     repository = InMemoryVectorRepository()
     repository.upsert(
-        Document(doc_id="doc-a", source_path="/tmp/a.txt", title="A", content="...", metadata={"kb_id": "kb-a", "tenant_id": "tenant-a"}),
+        Document(doc_id="doc-a", source_path="/tmp/a.txt", title="A", content="...", metadata={"kb_id": "kb-a"}),
         [
             Chunk(
                 chunk_id="c1",
@@ -124,13 +124,13 @@ async def test_retrieval_pipeline_scopes_results_by_kb_and_tenant() -> None:
                 text="aaa",
                 source_path="/tmp/a.txt",
                 title="A",
-                metadata={"kb_id": "kb-a", "tenant_id": "tenant-a"},
+                metadata={"kb_id": "kb-a"},
             )
         ],
         [[3.0, 4.0]],
     )
     repository.upsert(
-        Document(doc_id="doc-b", source_path="/tmp/b.txt", title="B", content="...", metadata={"kb_id": "kb-b", "tenant_id": "tenant-b"}),
+        Document(doc_id="doc-b", source_path="/tmp/b.txt", title="B", content="...", metadata={"kb_id": "kb-b"}),
         [
             Chunk(
                 chunk_id="c2",
@@ -139,7 +139,7 @@ async def test_retrieval_pipeline_scopes_results_by_kb_and_tenant() -> None:
                 text="aaaaaa",
                 source_path="/tmp/b.txt",
                 title="B",
-                metadata={"kb_id": "kb-b", "tenant_id": "tenant-b"},
+                metadata={"kb_id": "kb-b"},
             )
         ],
         [[6.0, 7.0]],
@@ -159,12 +159,11 @@ async def test_retrieval_pipeline_scopes_results_by_kb_and_tenant() -> None:
         TracingManager("test-service", ""),
     )
 
-    contexts, trace = await pipeline.run("aaa", 2, kb_id="kb-a", tenant_id="tenant-a")
+    contexts, trace = await pipeline.run("aaa", 2, kb_id="kb-a")
 
     assert len(contexts) == 1
     assert contexts[0]["chunk_id"] == "c1"
     assert trace["kb_id"] == "kb-a"
-    assert trace["tenant_id"] == "tenant-a"
 
 
 @pytest.mark.asyncio

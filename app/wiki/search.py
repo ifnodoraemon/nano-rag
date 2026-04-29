@@ -6,7 +6,7 @@ from pathlib import Path
 from app.retrieval.bm25 import BM25Index
 from app.retrieval.filters import match_metadata_filters
 from app.schemas.chunk import Chunk
-from app.vectorstore.repository import SearchHit, _tenant_matches
+from app.vectorstore.repository import SearchHit
 from app.wiki.compiler import WikiCompiler
 
 MAX_WIKI_CONTEXT_CHARS = 2200
@@ -18,7 +18,6 @@ class WikiDocument:
     title: str
     source_path: str
     kb_id: str
-    tenant_id: str | None
     page_path: str
     body: str
     kind: str
@@ -53,15 +52,13 @@ class WikiSearcher:
         query: str,
         top_k: int,
         kb_id: str = "default",
-        tenant_id: str | None = None,
         metadata_filters: dict[str, object] | None = None,
     ) -> list[SearchHit]:
-        scope_id = WikiCompiler.scope_id(kb_id=kb_id, tenant_id=tenant_id)
+        scope_id = WikiCompiler.scope_id(kb_id=kb_id)
         allowed_doc_ids = {
             doc_id
             for doc_id, document in self.documents.items()
             if document.kb_id == kb_id
-            and _tenant_matches(document.tenant_id, tenant_id)
             and match_metadata_filters(document.metadata, metadata_filters)
             and (
                 document.kind in {"topic", "source"}
@@ -97,7 +94,6 @@ class WikiSearcher:
                         title=document.title,
                         metadata={
                             "kb_id": document.kb_id,
-                            "tenant_id": document.tenant_id,
                             "wiki_kind": document.kind,
                             "wiki_status": document.metadata.get("status"),
                             "original_source_path": document.source_path,
@@ -118,7 +114,6 @@ class WikiSearcher:
         for page_path in sorted(self.topics_dir.glob("*.md")):
             metadata, body = WikiCompiler.read_frontmatter(page_path)
             kb_id = str(metadata.get("kb_id", "default"))
-            tenant_id = metadata.get("tenant_id")
             topic_name = str(metadata.get("topic", page_path.stem))
             doc_id = f"wiki:topic:{page_path.stem}"
             self.documents[doc_id] = WikiDocument(
@@ -126,7 +121,6 @@ class WikiSearcher:
                 title=topic_name,
                 source_path=str(page_path.relative_to(self.root_dir.parent)),
                 kb_id=kb_id,
-                tenant_id=str(tenant_id) if tenant_id not in (None, "") else None,
                 page_path=str(page_path.relative_to(self.root_dir.parent)),
                 body=body,
                 kind="topic",
@@ -139,7 +133,7 @@ class WikiSearcher:
             return
         for index_path in sorted(self.indexes_dir.glob("*.md")):
             scope_id = index_path.stem
-            kb_id, tenant_id = self._parse_scope_id(scope_id)
+            kb_id = self._parse_scope_id(scope_id)
             body = index_path.read_text(encoding="utf-8")
             doc_id = f"wiki:index:{scope_id}"
             self.documents[doc_id] = WikiDocument(
@@ -147,7 +141,6 @@ class WikiSearcher:
                 title=f"Wiki Index {scope_id}",
                 source_path=str(index_path.relative_to(self.root_dir.parent)),
                 kb_id=kb_id,
-                tenant_id=tenant_id,
                 page_path=str(index_path.relative_to(self.root_dir.parent)),
                 body=body,
                 kind="index",
@@ -161,14 +154,12 @@ class WikiSearcher:
         for page_path in sorted(self.sources_dir.glob("*.md")):
             metadata, body = WikiCompiler.read_frontmatter(page_path)
             kb_id = str(metadata.get("kb_id", "default"))
-            tenant_id = metadata.get("tenant_id")
             doc_id = f"wiki:source:{metadata.get('doc_id', page_path.stem)}"
             self.documents[doc_id] = WikiDocument(
                 doc_id=str(metadata.get("doc_id", page_path.stem)),
                 title=str(metadata.get("title", page_path.stem)),
                 source_path=str(metadata.get("source_path", "")),
                 kb_id=kb_id,
-                tenant_id=str(tenant_id) if tenant_id not in (None, "") else None,
                 page_path=str(page_path.relative_to(self.root_dir.parent)),
                 body=body,
                 kind="source",
@@ -176,11 +167,8 @@ class WikiSearcher:
             )
             self.index.add_document(doc_id, body)
 
-    def _parse_scope_id(self, scope_id: str) -> tuple[str, str | None]:
-        if "__" not in scope_id:
-            return scope_id, None
-        kb_id, tenant_id = scope_id.split("__", 1)
-        return kb_id, tenant_id or None
+    def _parse_scope_id(self, scope_id: str) -> str:
+        return scope_id.split("__", 1)[0]
 
     def _limit_body(self, body: str) -> str:
         normalized = body.strip()

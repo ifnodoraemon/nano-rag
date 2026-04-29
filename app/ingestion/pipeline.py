@@ -127,7 +127,6 @@ class IngestionPipeline:
         self,
         path: str,
         kb_id: str = "default",
-        tenant_id: str | None = None,
         source_path_overrides: dict[str, str] | None = None,
     ) -> IngestResponse:
         with self.tracing_manager.span(
@@ -135,7 +134,6 @@ class IngestionPipeline:
             {
                 "ingestion.path": path,
                 "ingestion.kb_id": kb_id,
-                "ingestion.tenant_id": tenant_id or "",
             },
         ):
             files = discover_files(path)
@@ -151,7 +149,6 @@ class IngestionPipeline:
                     prepared = await self._prepare_document(
                         file_path,
                         kb_id=kb_id,
-                        tenant_id=tenant_id,
                         source_path_overrides=source_path_overrides,
                     )
                     prepared_documents.append(prepared)
@@ -168,12 +165,12 @@ class IngestionPipeline:
                         (
                             prepared,
                             self._load_parsed_artifact(
-                                prepared.source_path, prepared.doc_id, kb_id, tenant_id
+                                prepared.source_path, prepared.doc_id, kb_id
                             ),
                         )
                     )
                     self._delete_committed_state(
-                        prepared.source_path, prepared.doc_id, kb_id, tenant_id
+                        prepared.source_path, prepared.doc_id, kb_id
                     )
                     self.repository.upsert(
                         prepared.document,
@@ -190,7 +187,7 @@ class IngestionPipeline:
                         wiki_updated = True
             except Exception:
                 await self._rollback_applied_documents(
-                    applied_snapshots, kb_id=kb_id, tenant_id=tenant_id
+                    applied_snapshots, kb_id=kb_id
                 )
                 raise
 
@@ -202,11 +199,10 @@ class IngestionPipeline:
         self,
         file_path: Path,
         kb_id: str,
-        tenant_id: str | None = None,
         source_path_overrides: dict[str, str] | None = None,
     ) -> PreparedDocument:
         source_path = self._resolve_source_path(file_path, source_path_overrides)
-        doc_id = self._stable_doc_id(source_path, kb_id, tenant_id)
+        doc_id = self._stable_doc_id(source_path, kb_id)
         suffix = file_path.suffix.lower()
         if suffix in MEDIA_SUFFIXES:
             return await self._prepare_media_document(
@@ -214,7 +210,6 @@ class IngestionPipeline:
                 source_path=source_path,
                 doc_id=doc_id,
                 kb_id=kb_id,
-                tenant_id=tenant_id,
             )
         text = normalize_text(await parse_document(file_path, self.document_parser))
         if not text:
@@ -227,7 +222,6 @@ class IngestionPipeline:
             title=Path(file_path).stem,
             text=text,
             kb_id=kb_id,
-            tenant_id=tenant_id,
         )
         document = Document(
             doc_id=doc_id,
@@ -274,7 +268,6 @@ class IngestionPipeline:
                     "metadata": {
                         **chunk.metadata,
                         "kb_id": kb_id,
-                        "tenant_id": tenant_id,
                     }
                 }
             )
@@ -310,7 +303,6 @@ class IngestionPipeline:
         source_path: str,
         doc_id: str,
         kb_id: str,
-        tenant_id: str | None,
     ) -> PreparedDocument:
         suffix = file_path.suffix.lower()
         modality = _modality_for_suffix(suffix)
@@ -318,7 +310,6 @@ class IngestionPipeline:
         title = file_path.stem
         document_metadata = {
             "kb_id": kb_id,
-            "tenant_id": tenant_id,
             "doc_type": modality,
             "modality": modality,
             "mime_type": mime_type,
@@ -343,7 +334,6 @@ class IngestionPipeline:
             title=title,
             metadata={
                 "kb_id": kb_id,
-                "tenant_id": tenant_id,
                 "modality": modality,
                 "mime_type": mime_type,
                 "media_uri": document_metadata["media_uri"],
@@ -417,7 +407,6 @@ class IngestionPipeline:
         self,
         applied_snapshots: list[tuple[PreparedDocument, ParsedArtifactSnapshot | None]],
         kb_id: str,
-        tenant_id: str | None = None,
     ) -> None:
         wiki_needs_refresh = False
         for prepared, snapshot in reversed(applied_snapshots):
@@ -425,7 +414,7 @@ class IngestionPipeline:
                 if self.wiki_compiler:
                     wiki_needs_refresh = True
                 self._delete_committed_state(
-                    prepared.source_path, prepared.doc_id, kb_id, tenant_id
+                    prepared.source_path, prepared.doc_id, kb_id
                 )
                 if snapshot is None:
                     continue
@@ -484,9 +473,9 @@ class IngestionPipeline:
         return str(file_path.resolve())
 
     def _stable_doc_id(
-        self, source_path: str, kb_id: str, tenant_id: str | None = None
+        self, source_path: str, kb_id: str
     ) -> str:
-        identity = "|".join([kb_id, tenant_id or "", source_path])
+        identity = "|".join([kb_id, source_path])
         digest = hashlib.sha256(identity.encode("utf-8")).hexdigest()
         return f"doc-{digest[:24]}"
 
@@ -495,7 +484,6 @@ class IngestionPipeline:
         source_path: str,
         active_doc_id: str,
         kb_id: str,
-        tenant_id: str | None = None,
         remove_active_doc: bool = False,
     ) -> None:
         if not self.config.parsed_dir.exists():
@@ -515,7 +503,6 @@ class IngestionPipeline:
                 isinstance(document, dict)
                 and document.get("source_path") == source_path
                 and metadata.get("kb_id", "default") == kb_id
-                and metadata.get("tenant_id") == tenant_id
             ):
                 artifact.unlink(missing_ok=True)
 
@@ -524,18 +511,16 @@ class IngestionPipeline:
         source_path: str,
         doc_id: str,
         kb_id: str,
-        tenant_id: str | None = None,
     ) -> None:
         if self.hybrid_retriever:
             self.hybrid_retriever.remove_by_source(
-                source_path, kb_id=kb_id, tenant_id=tenant_id
+                source_path, kb_id=kb_id
             )
-        self.repository.delete_by_source(source_path, kb_id=kb_id, tenant_id=tenant_id)
+        self.repository.delete_by_source(source_path, kb_id=kb_id)
         self._cleanup_parsed_artifacts(
             source_path,
             doc_id,
             kb_id,
-            tenant_id,
             remove_active_doc=True,
         )
         if self.wiki_compiler:
@@ -546,7 +531,6 @@ class IngestionPipeline:
         source_path: str,
         doc_id: str,
         kb_id: str,
-        tenant_id: str | None = None,
     ) -> ParsedArtifactSnapshot | None:
         if not self.config.parsed_dir.exists():
             return None
@@ -554,13 +538,13 @@ class IngestionPipeline:
         if primary_artifact.exists():
             snapshot = self._read_parsed_artifact(primary_artifact)
             if snapshot and self._snapshot_matches_scope(
-                snapshot, source_path, kb_id, tenant_id
+                snapshot, source_path, kb_id
             ):
                 return snapshot
         for artifact in sorted(self.config.parsed_dir.glob("*.json")):
             snapshot = self._read_parsed_artifact(artifact)
             if snapshot and self._snapshot_matches_scope(
-                snapshot, source_path, kb_id, tenant_id
+                snapshot, source_path, kb_id
             ):
                 return snapshot
         return None
@@ -570,12 +554,10 @@ class IngestionPipeline:
         snapshot: ParsedArtifactSnapshot,
         source_path: str,
         kb_id: str,
-        tenant_id: str | None = None,
     ) -> bool:
         return (
             snapshot.document.source_path == source_path
             and snapshot.document.metadata.get("kb_id", "default") == kb_id
-            and snapshot.document.metadata.get("tenant_id") == tenant_id
         )
 
     def _read_parsed_artifact(self, artifact: Path) -> ParsedArtifactSnapshot | None:

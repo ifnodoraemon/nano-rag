@@ -67,7 +67,6 @@ class WikiCompiler:
             "title": document.title,
             "source_path": document.source_path,
             "kb_id": document.metadata.get("kb_id", "default"),
-            "tenant_id": document.metadata.get("tenant_id"),
             "doc_type": document.metadata.get("doc_type"),
             "source_key": document.metadata.get("source_key"),
             "effective_date": document.metadata.get("effective_date"),
@@ -106,9 +105,6 @@ class WikiCompiler:
             f"- source_path: `{document.source_path}`",
             f"- kb_id: `{metadata['kb_id']}`",
         ]
-        tenant_id = metadata.get("tenant_id")
-        if tenant_id:
-            lines.append(f"- tenant_id: `{tenant_id}`")
         lines.extend(
             [
                 f"- chunk_count: `{metadata['chunk_count']}`",
@@ -156,10 +152,7 @@ class WikiCompiler:
         for page_path in source_pages:
             metadata, body = self._read_frontmatter(page_path)
             kb_id = str(metadata.get("kb_id", "default"))
-            scope_id = self.scope_id(
-                kb_id=kb_id,
-                tenant_id=metadata.get("tenant_id"),
-            )
+            scope_id = self.scope_id(kb_id=kb_id)
             grouped.setdefault(kb_id, []).append((metadata, body))
             scoped_groups.setdefault(scope_id, []).append((metadata, body))
             source_records.append((metadata, body))
@@ -210,14 +203,9 @@ class WikiCompiler:
     def _write_topic_pages(
         self, source_records: list[tuple[dict[str, object], str]]
     ) -> list[dict[str, str]]:
-        grouped_topics: dict[tuple[str, str | None, str], list[dict[str, str]]] = {}
+        grouped_topics: dict[tuple[str, str], list[dict[str, str]]] = {}
         for metadata, body in source_records:
             kb_id = str(metadata.get("kb_id", "default"))
-            tenant_id = (
-                str(metadata.get("tenant_id"))
-                if metadata.get("tenant_id") not in (None, "")
-                else None
-            )
             doc_id = str(metadata.get("doc_id", "unknown"))
             title = str(metadata.get("title", doc_id))
             summary = str(metadata.get("summary", "")) or self._extract_summary(body)
@@ -228,7 +216,7 @@ class WikiCompiler:
                 if str(item).strip()
             ]
             for topic_name in self._extract_topic_names(title, headings):
-                grouped_topics.setdefault((kb_id, tenant_id, topic_name), []).append(
+                grouped_topics.setdefault((kb_id, topic_name), []).append(
                     {
                         "doc_id": doc_id,
                         "title": title,
@@ -243,11 +231,11 @@ class WikiCompiler:
             existing.unlink(missing_ok=True)
 
         written_topics: list[dict[str, str]] = []
-        for (kb_id, tenant_id, topic_name), entries in sorted(
+        for (kb_id, topic_name), entries in sorted(
             grouped_topics.items(),
-            key=lambda item: (item[0][0], item[0][1] or "", item[0][2]),
+            key=lambda item: (item[0][0], item[0][1]),
         ):
-            slug = self._topic_slug(kb_id, tenant_id, topic_name)
+            slug = self._topic_slug(kb_id, topic_name)
             summary = self._preview(
                 " ".join(entry["summary"] for entry in entries if entry["summary"]),
                 MAX_SUMMARY_CHARS,
@@ -256,7 +244,6 @@ class WikiCompiler:
                 self._render_topic_page(
                     topic_name=topic_name,
                     kb_id=kb_id,
-                    tenant_id=tenant_id,
                     entries=entries,
                     summary=summary,
                 ),
@@ -265,7 +252,6 @@ class WikiCompiler:
             written_topics.append(
                 {
                     "kb_id": kb_id,
-                    "tenant_id": tenant_id or "",
                     "slug": slug,
                     "title": topic_name,
                     "summary": self._preview(summary, MAX_INDEX_SUMMARY_CHARS),
@@ -277,7 +263,6 @@ class WikiCompiler:
         self,
         topic_name: str,
         kb_id: str,
-        tenant_id: str | None,
         entries: list[dict[str, str]],
         summary: str,
     ) -> str:
@@ -288,7 +273,6 @@ class WikiCompiler:
             {
                 "topic": topic_name,
                 "kb_id": kb_id,
-                "tenant_id": tenant_id,
                 "doc_types": sorted(
                     {
                         entry["doc_type"]
@@ -389,9 +373,8 @@ class WikiCompiler:
             )
 
     @staticmethod
-    def scope_id(kb_id: str, tenant_id: object | None = None) -> str:
-        raw_scope = kb_id if tenant_id in (None, "", "null") else f"{kb_id}__{tenant_id}"
-        return re.sub(r"[^a-zA-Z0-9._-]+", "-", str(raw_scope)).strip("-") or "default"
+    def scope_id(kb_id: str) -> str:
+        return re.sub(r"[^a-zA-Z0-9._-]+", "-", str(kb_id)).strip("-") or "default"
 
     @staticmethod
     def read_frontmatter(path: Path) -> tuple[dict[str, object], str]:
@@ -447,8 +430,8 @@ class WikiCompiler:
             unique_topics.append(topic_name.strip())
         return unique_topics[:8]
 
-    def _topic_slug(self, kb_id: str, tenant_id: str | None, topic_name: str) -> str:
-        scope = self.scope_id(kb_id=kb_id, tenant_id=tenant_id)
+    def _topic_slug(self, kb_id: str, topic_name: str) -> str:
+        scope = self.scope_id(kb_id=kb_id)
         topic_part = re.sub(r"[^a-zA-Z0-9._-]+", "-", topic_name.lower()).strip("-")
         return f"{scope}--{topic_part or 'topic'}"
 

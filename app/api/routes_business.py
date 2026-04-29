@@ -10,7 +10,7 @@ from uuid import uuid4
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, UploadFile
 
-from app.api.auth import require_api_key
+from app.api.auth import RequestContext, require_api_key
 from app.ingestion.loader import IngestPathError, SUPPORTED_EXTENSIONS, list_allowed_ingest_sources
 from app.ingestion.pipeline import ChunkConfigurationError
 from app.schemas.benchmark import BenchmarkRunRequest, BenchmarkRunResponse
@@ -23,10 +23,10 @@ from app.schemas.business import (
     FeedbackRequest,
     FeedbackResponse,
     IngestSourceSummary,
-    WorkspaceSummary,
+    KnowledgeBaseCreateRequest,
+    KnowledgeBaseSummary,
 )
 from app.schemas.chat import ChatRequest
-from app.schemas.chat import normalize_optional_scope
 from app.schemas.trace import TraceRecord
 from app.eval.dataset import (
     get_benchmark_report_dir,
@@ -58,19 +58,10 @@ def _safe_upload_filename(original_name: str) -> str:
     return _safe_path_component(Path(original_name or "upload.txt").name, "upload.txt")
 
 
-def _upload_tenant_scope(tenant_id: str | None = None) -> str:
-    if tenant_id is None:
-        return "__shared__"
-    return _safe_path_component(tenant_id, "__shared__")
-
-
-def _build_upload_source_path(
-    original_name: str, kb_id: str, tenant_id: str | None = None
-) -> str:
+def _build_upload_source_path(original_name: str, kb_id: str) -> str:
     return (
         Path("uploads")
         / _safe_path_component(kb_id, "default")
-        / _upload_tenant_scope(tenant_id)
         / _safe_upload_filename(original_name)
     ).as_posix()
 
@@ -82,21 +73,13 @@ def _upload_storage_path(upload_dir: Path, source_path: str) -> Path:
     return upload_dir.joinpath(*path.parts[1:])
 
 
-def _get_supported_kb_ids() -> set[str]:
-    raw = os.getenv("RAG_SUPPORTED_KB_IDS", "default")
-    return {item.strip() for item in raw.split(",") if item.strip()}
-
-
-def _ensure_supported_kb_id(kb_id: str) -> None:
-    supported = _get_supported_kb_ids()
-    if kb_id not in supported:
+def _ensure_kb_access(container, kb_id: str, context: RequestContext | None = None) -> None:  # noqa: ANN001
+    if context and context.allowed_kb_ids is not None and kb_id not in context.allowed_kb_ids:
+        raise HTTPException(status_code=403, detail="knowledge base is not accessible")
+    if not container.knowledge_base_catalog.exists(kb_id):
         raise HTTPException(
-            status_code=400,
-            detail=(
-                f"kb_id '{kb_id}' is not supported. "
-                f"Supported kb_ids: {', '.join(sorted(supported))}. "
-                "Set RAG_SUPPORTED_KB_IDS env var to configure additional knowledge bases."
-            ),
+            status_code=404,
+            detail=f"knowledge base not found: {kb_id}",
         )
 
 
@@ -137,17 +120,12 @@ async def _run_eval_report(
 def _ensure_trace_scope(
     trace: TraceRecord,
     kb_id: str,
-    tenant_id: str | None = None,
     session_id: str | None = None,
 ) -> None:
     trace_kb_id = trace.kb_id or "default"
     if trace_kb_id != kb_id:
         raise HTTPException(
             status_code=403, detail="trace does not belong to the requested kb_id"
-        )
-    if (trace.tenant_id or None) != (tenant_id or None):
-        raise HTTPException(
-            status_code=403, detail="trace does not belong to the requested tenant_id"
         )
     if trace.session_id and trace.session_id != session_id:
         raise HTTPException(
@@ -156,7 +134,7 @@ def _ensure_trace_scope(
 
 
 def _list_scope_documents(
-    parsed_dir: Path, kb_id: str, tenant_id: str | None = None
+    parsed_dir: Path, kb_id: str
 ) -> list[BusinessDocumentSummary]:
     if not parsed_dir.exists():
         return []
@@ -175,8 +153,6 @@ def _list_scope_documents(
             metadata = {}
         if metadata.get("kb_id", "default") != kb_id:
             continue
-        if metadata.get("tenant_id") != tenant_id:
-            continue
         doc_id = str(document.get("doc_id", "")).strip()
         source_path = str(document.get("source_path", "")).strip()
         if not doc_id or not source_path:
@@ -188,7 +164,6 @@ def _list_scope_documents(
                 title=title,
                 source_path=source_path,
                 kb_id=kb_id,
-                tenant_id=tenant_id,
                 chunk_count=len(chunks) if isinstance(chunks, list) else 0,
                 updated_at=artifact.stat().st_mtime,
                 doc_type=(
@@ -206,32 +181,18 @@ def _list_scope_documents(
     return sorted(documents, key=lambda item: (-item.updated_at, item.title.lower()))
 
 
-def _workspace_id(kb_id: str, tenant_id: str | None) -> str:
-    return f"{kb_id}:{tenant_id or '__shared__'}"
-
-
-def _workspace_name(kb_id: str, tenant_id: str | None) -> str:
-    return f"{kb_id} / {tenant_id or '共享'}"
-
-
-def _list_workspaces(container) -> list[WorkspaceSummary]:  # noqa: ANN001
-    workspaces: dict[str, WorkspaceSummary] = {}
-
-    def ensure(kb_id: str, tenant_id: str | None) -> WorkspaceSummary:
-        workspace_id = _workspace_id(kb_id, tenant_id)
-        workspace = workspaces.get(workspace_id)
-        if workspace is None:
-            workspace = WorkspaceSummary(
-                workspace_id=workspace_id,
-                name=_workspace_name(kb_id, tenant_id),
-                kb_id=kb_id,
-                tenant_id=tenant_id,
-            )
-            workspaces[workspace_id] = workspace
-        return workspace
-
-    for kb_id in _get_supported_kb_ids():
-        ensure(kb_id, None)
+def _list_knowledge_bases(
+    container, context: RequestContext | None = None  # noqa: ANN001
+) -> list[KnowledgeBaseSummary]:
+    records = container.knowledge_base_catalog.list(
+        allowed_kb_ids=context.allowed_kb_ids if context else None
+    )
+    summaries = {
+        record.kb_id: KnowledgeBaseSummary(
+            **record.model_dump(),
+        )
+        for record in records
+    }
 
     parsed_dir = container.config.parsed_dir
     if parsed_dir.exists():
@@ -248,27 +209,26 @@ def _list_workspaces(container) -> list[WorkspaceSummary]:  # noqa: ANN001
             if not isinstance(metadata, dict):
                 metadata = {}
             kb_id = str(metadata.get("kb_id", "default"))
-            tenant_id = metadata.get("tenant_id")
-            tenant = str(tenant_id) if tenant_id is not None else None
-            workspace = ensure(kb_id, tenant)
-            workspace.document_count += 1
-            workspace.chunk_count += len(chunks) if isinstance(chunks, list) else 0
+            if kb_id not in summaries:
+                continue
+            summary = summaries[kb_id]
+            summary.document_count += 1
+            summary.chunk_count += len(chunks) if isinstance(chunks, list) else 0
             updated_at = artifact.stat().st_mtime
-            if workspace.updated_at is None or updated_at > workspace.updated_at:
-                workspace.updated_at = updated_at
+            if summary.last_activity_at is None or updated_at > summary.last_activity_at:
+                summary.last_activity_at = updated_at
 
     traces = container.trace_store.list(page=1, page_size=100)
     for trace in traces.items:
         kb_id = trace.kb_id or "default"
-        workspace = ensure(kb_id, trace.tenant_id)
-        workspace.trace_count += 1
+        if kb_id in summaries:
+            summaries[kb_id].trace_count += 1
 
     return sorted(
-        workspaces.values(),
+        summaries.values(),
         key=lambda item: (
-            -(item.updated_at or 0),
+            -(item.last_activity_at or item.updated_at or 0),
             item.kb_id,
-            item.tenant_id or "",
         ),
     )
 
@@ -276,19 +236,19 @@ def _list_workspaces(container) -> list[WorkspaceSummary]:  # noqa: ANN001
 @router.post(
     "/chat",
     response_model=BusinessChatResponse,
-    dependencies=[Depends(require_api_key)],
 )
 async def rag_chat(
-    payload: BusinessChatRequest, request: Request
+    payload: BusinessChatRequest,
+    request: Request,
+    context: RequestContext = Depends(require_api_key),
 ) -> BusinessChatResponse:
-    _ensure_supported_kb_id(payload.kb_id)
     container = request.app.state.container
+    _ensure_kb_access(container, payload.kb_id, context)
     response = await container.chat_pipeline.run(
         ChatRequest(
             query=payload.query,
             top_k=payload.top_k,
             kb_id=payload.kb_id,
-            tenant_id=payload.tenant_id,
             session_id=payload.session_id,
             metadata_filters=payload.metadata_filters,
         )
@@ -299,7 +259,6 @@ async def rag_chat(
         contexts=response.contexts,
         trace_id=response.trace_id,
         kb_id=payload.kb_id,
-        tenant_id=payload.tenant_id,
         session_id=payload.session_id,
     )
 
@@ -307,18 +266,18 @@ async def rag_chat(
 @router.post(
     "/ingest",
     response_model=BusinessIngestResponse,
-    dependencies=[Depends(require_api_key)],
 )
 async def rag_ingest(
-    payload: BusinessIngestRequest, request: Request
+    payload: BusinessIngestRequest,
+    request: Request,
+    context: RequestContext = Depends(require_api_key),
 ) -> BusinessIngestResponse:
-    _ensure_supported_kb_id(payload.kb_id)
     container = request.app.state.container
+    _ensure_kb_access(container, payload.kb_id, context)
     try:
         response = await container.ingestion_pipeline.run(
             payload.path,
             kb_id=payload.kb_id,
-            tenant_id=payload.tenant_id,
         )
     except IngestPathError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -327,20 +286,40 @@ async def rag_ingest(
     return BusinessIngestResponse(
         status="ok",
         kb_id=payload.kb_id,
-        tenant_id=payload.tenant_id,
         documents=response.documents,
         chunks=response.chunks,
         source="path",
     )
 
 
-@router.get(
-    "/workspaces",
-    response_model=list[WorkspaceSummary],
-    dependencies=[Depends(require_api_key)],
-)
-async def rag_workspaces(request: Request) -> list[WorkspaceSummary]:
-    return _list_workspaces(request.app.state.container)
+@router.get("/knowledge-bases", response_model=list[KnowledgeBaseSummary])
+async def rag_knowledge_bases(
+    request: Request,
+    context: RequestContext = Depends(require_api_key),
+) -> list[KnowledgeBaseSummary]:
+    return _list_knowledge_bases(request.app.state.container, context)
+
+
+@router.post("/knowledge-bases", response_model=KnowledgeBaseSummary)
+async def rag_create_knowledge_base(
+    payload: KnowledgeBaseCreateRequest,
+    request: Request,
+    context: RequestContext = Depends(require_api_key),
+) -> KnowledgeBaseSummary:
+    if context.allowed_kb_ids is not None and payload.kb_id not in context.allowed_kb_ids:
+        raise HTTPException(status_code=403, detail="knowledge base is not accessible")
+    try:
+        record = request.app.state.container.knowledge_base_catalog.create(
+            kb_id=payload.kb_id,
+            name=payload.name,
+            description=payload.description,
+            source=payload.source,
+            external_ref=payload.external_ref,
+            metadata=payload.metadata,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return KnowledgeBaseSummary(**record.model_dump())
 
 
 @router.get(
@@ -358,16 +337,14 @@ async def rag_ingest_sources() -> list[IngestSourceSummary]:
 @router.post(
     "/ingest/upload",
     response_model=BusinessIngestResponse,
-    dependencies=[Depends(require_api_key)],
 )
 async def rag_ingest_upload(
     request: Request,
     files: list[UploadFile] = File(...),
     kb_id: str = Form(default="default"),
-    tenant_id: str | None = Form(default=None),
+    context: RequestContext = Depends(require_api_key),
 ) -> BusinessIngestResponse:
-    tenant_id = normalize_optional_scope(tenant_id)
-    _ensure_supported_kb_id(kb_id)
+    _ensure_kb_access(request.app.state.container, kb_id, context)
     if not files:
         raise HTTPException(status_code=400, detail="at least one file is required")
     if len(files) > MAX_FILES_PER_BATCH:
@@ -402,7 +379,7 @@ async def rag_ingest_upload(
                     detail=f"unsupported file type '{extension or 'unknown'}'. Supported types: {allowed}",
                 )
             target = upload_batch_dir / f"{uuid4().hex[:8]}_{original_name}"
-            source_path = _build_upload_source_path(original_name, kb_id, tenant_id)
+            source_path = _build_upload_source_path(original_name, kb_id)
             if source_path in seen_source_paths:
                 raise HTTPException(
                     status_code=400,
@@ -431,7 +408,6 @@ async def rag_ingest_upload(
         response = await container.ingestion_pipeline.run(
             str(upload_batch_dir),
             kb_id=kb_id,
-            tenant_id=tenant_id,
             source_path_overrides=source_path_overrides,
         )
         for temporary_path, durable_path in durable_uploads:
@@ -444,7 +420,6 @@ async def rag_ingest_upload(
         return BusinessIngestResponse(
             status="ok",
             kb_id=kb_id,
-            tenant_id=tenant_id,
             documents=response.documents,
             chunks=response.chunks,
             source="upload",
@@ -462,34 +437,34 @@ async def rag_ingest_upload(
 @router.get(
     "/documents",
     response_model=list[BusinessDocumentSummary],
-    dependencies=[Depends(require_api_key)],
 )
 async def rag_documents(
     request: Request,
     kb_id: str = Query(default="default"),
-    tenant_id: str | None = Query(default=None),
+    context: RequestContext = Depends(require_api_key),
 ) -> list[BusinessDocumentSummary]:
-    _ensure_supported_kb_id(kb_id)
     container = request.app.state.container
-    return _list_scope_documents(
-        container.config.parsed_dir, kb_id=kb_id, tenant_id=tenant_id
-    )
+    _ensure_kb_access(container, kb_id, context)
+    return _list_scope_documents(container.config.parsed_dir, kb_id=kb_id)
 
 
 @router.post(
     "/feedback",
     response_model=FeedbackResponse,
-    dependencies=[Depends(require_api_key)],
 )
-async def rag_feedback(payload: FeedbackRequest, request: Request) -> FeedbackResponse:
-    _ensure_supported_kb_id(payload.kb_id)
+async def rag_feedback(
+    payload: FeedbackRequest,
+    request: Request,
+    context: RequestContext = Depends(require_api_key),
+) -> FeedbackResponse:
     container = request.app.state.container
+    _ensure_kb_access(container, payload.kb_id, context)
     trace = container.trace_store.get(payload.trace_id)
     if trace is None:
         raise HTTPException(
             status_code=404, detail=f"trace not found: {payload.trace_id}"
         )
-    _ensure_trace_scope(trace, payload.kb_id, payload.tenant_id, payload.session_id)
+    _ensure_trace_scope(trace, payload.kb_id, payload.session_id)
     feedback_id = f"fb-{uuid4().hex[:16]}"
     container.feedback_store.save_raw(
         {
@@ -497,7 +472,6 @@ async def rag_feedback(payload: FeedbackRequest, request: Request) -> FeedbackRe
             "trace_id": payload.trace_id,
             "rating": payload.rating,
             "kb_id": payload.kb_id,
-            "tenant_id": payload.tenant_id,
             "session_id": payload.session_id,
             "comment": payload.comment,
             "tags": payload.tags,
@@ -510,21 +484,20 @@ async def rag_feedback(payload: FeedbackRequest, request: Request) -> FeedbackRe
 @router.get(
     "/traces/{trace_id}",
     response_model=TraceRecord,
-    dependencies=[Depends(require_api_key)],
 )
 async def rag_trace(
     trace_id: str,
     request: Request,
     kb_id: str = Query(default="default"),
-    tenant_id: str | None = Query(default=None),
     session_id: str | None = Query(default=None),
+    context: RequestContext = Depends(require_api_key),
 ) -> TraceRecord:
-    _ensure_supported_kb_id(kb_id)
     container = request.app.state.container
+    _ensure_kb_access(container, kb_id, context)
     record = container.trace_store.get(trace_id)
     if record is None:
         raise HTTPException(status_code=404, detail=f"trace not found: {trace_id}")
-    _ensure_trace_scope(record, kb_id, tenant_id, session_id)
+    _ensure_trace_scope(record, kb_id, session_id)
     return record
 
 

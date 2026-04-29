@@ -16,12 +16,11 @@ class ChatRequest(BaseModel):
     query: str = Field(..., min_length=1, max_length=8192)
     top_k: int | None = Field(default=None, ge=1, le=100)
     kb_id: str | None = None
-    tenant_id: str | None = None
     session_id: str | None = None
     sample_id: str | None = None
     metadata_filters: dict[str, object] | None = None
 
-    @field_validator("tenant_id", "session_id", mode="before")
+    @field_validator("session_id", mode="before")
     @classmethod
     def blank_scope_values_are_none(cls, value: object) -> str | None:
         return normalize_optional_scope(value)

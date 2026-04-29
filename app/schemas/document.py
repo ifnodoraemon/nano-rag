@@ -12,7 +12,6 @@ class Document(BaseModel):
 class IngestRequest(BaseModel):
     path: str
     kb_id: str | None = None
-    tenant_id: str | None = None
 
 
 class IngestResponse(BaseModel):

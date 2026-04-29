@@ -83,7 +83,6 @@ async def retrieve_debug(
         payload.query,
         payload.top_k,
         kb_id=payload.kb_id or "default",
-        tenant_id=payload.tenant_id,
         session_id=payload.session_id,
     )
 
@@ -98,11 +97,10 @@ async def list_traces(
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=20, ge=1, le=100),
     kb_id: str | None = Query(default=None),
-    tenant_id: str | None = Query(default=None),
 ) -> PaginatedResponse[TraceSummary]:
     container = request.app.state.container
     return container.trace_store.list(
-        page=page, page_size=page_size, kb_id=kb_id, tenant_id=tenant_id
+        page=page, page_size=page_size, kb_id=kb_id
     )
 
 
@@ -115,15 +113,12 @@ async def get_trace(
     trace_id: str,
     request: Request,
     kb_id: str | None = Query(default=None),
-    tenant_id: str | None = Query(default=None),
 ) -> TraceRecord:
     container = request.app.state.container
     record = container.trace_store.get(trace_id)
     if record is None:
         raise HTTPException(status_code=404, detail=f"trace not found: {trace_id}")
     if kb_id and record.kb_id and record.kb_id != kb_id:
-        raise HTTPException(status_code=404, detail=f"trace not found: {trace_id}")
-    if tenant_id and record.tenant_id and record.tenant_id != tenant_id:
         raise HTTPException(status_code=404, detail=f"trace not found: {trace_id}")
     return record
 

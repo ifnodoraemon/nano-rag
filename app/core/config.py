@@ -29,6 +29,7 @@ from app.vectorstore.repository import (
     MilvusVectorRepository,
     VectorRepository,
 )
+from app.knowledge_bases.catalog import KnowledgeBaseCatalog
 from app.wiki.compiler import WikiCompiler
 from app.wiki.search import WikiSearcher
 
@@ -218,6 +219,24 @@ class AppConfig:
         )
 
     @property
+    def knowledge_base_catalog_path(self) -> Path:
+        return Path(
+            os.getenv(
+                "KNOWLEDGE_BASE_CATALOG_PATH",
+                self.config_dir.parent
+                / "data"
+                / "reports"
+                / "knowledge_bases"
+                / "catalog.json",
+            )
+        )
+
+    @property
+    def seed_kb_ids(self) -> set[str]:
+        raw = os.getenv("RAG_SUPPORTED_KB_IDS", "default")
+        return {item.strip() for item in raw.split(",") if item.strip()} or {"default"}
+
+    @property
     def wiki_dir(self) -> Path:
         return Path(
             os.getenv("WIKI_OUTPUT_DIR", self.config_dir.parent / "data" / "wiki")
@@ -310,6 +329,7 @@ class AppContainer:
     tracing_manager: TracingManager
     diagnosis_service: object | None
     feedback_store: FeedbackStore
+    knowledge_base_catalog: KnowledgeBaseCatalog
     query_rewriter: QueryRewriter | None = None
     semantic_chunker: SemanticChunker | None = None
     hybrid_retriever: HybridRetriever | None = None
@@ -334,6 +354,10 @@ class AppContainer:
         document_parser = DocumentParserClient(config)
         trace_store = TraceStore(persist_dir=config.trace_store_dir)
         feedback_store = FeedbackStore(persist_dir=config.feedback_store_dir)
+        knowledge_base_catalog = KnowledgeBaseCatalog(
+            config.knowledge_base_catalog_path,
+            seed_kb_ids=config.seed_kb_ids,
+        )
         tracing_manager = TracingManager(
             "nano-rag",
             config.langfuse_otel_endpoint,
@@ -414,6 +438,7 @@ class AppContainer:
             tracing_manager=tracing_manager,
             diagnosis_service=diagnosis_service,
             feedback_store=feedback_store,
+            knowledge_base_catalog=knowledge_base_catalog,
             query_rewriter=query_rewriter,
             semantic_chunker=semantic_chunker,
             hybrid_retriever=hybrid_retriever,

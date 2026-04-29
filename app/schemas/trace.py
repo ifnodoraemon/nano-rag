@@ -6,7 +6,6 @@ class TraceSummary(BaseModel):
     latency_seconds: float | None = None
     query: str | None = None
     kb_id: str | None = None
-    tenant_id: str | None = None
     session_id: str | None = None
     model_alias: str | None = None
     prompt_version: str | None = None
@@ -25,7 +24,6 @@ class TraceRecord(BaseModel):
     expanded_queries: list[str] = Field(default_factory=list)
     hyde_query: str | None = None
     kb_id: str | None = None
-    tenant_id: str | None = None
     session_id: str | None = None
     sample_id: str | None = None
     retrieved_chunk_ids: list[str] = Field(default_factory=list)

@@ -101,7 +101,6 @@ async def run_smoke(args: argparse.Namespace) -> int:
         ingest = await container.ingestion_pipeline.run(
             str(ROOT / "data/raw/employee_handbook.md"),
             kb_id="default",
-            tenant_id=args.tenant_id,
         )
         print(
             f"ingest_ok=true documents={ingest.documents} chunks={ingest.chunks}",
@@ -112,7 +111,6 @@ async def run_smoke(args: argparse.Namespace) -> int:
             ChatRequest(
                 query="差旅报销多久内提交？",
                 kb_id="default",
-                tenant_id=args.tenant_id,
                 top_k=6,
             )
         )
@@ -134,7 +132,6 @@ async def run_smoke(args: argparse.Namespace) -> int:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Run live model gateway smoke test.")
-    parser.add_argument("--tenant-id", default="live-smoke")
     parser.add_argument("--generation-model")
     parser.add_argument("--embedding-model")
     parser.add_argument("--rerank-model")

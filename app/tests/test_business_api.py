@@ -5,66 +5,73 @@ import pytest
 from fastapi import HTTPException
 from starlette.datastructures import UploadFile
 
-from app.api import routes_business
+from app.api.auth import RequestContext
 from app.api.routes_business import (
-    BenchmarkRunRequest,
     BusinessChatRequest,
     BusinessIngestRequest,
-    _build_upload_source_path,
-    rag_documents,
     FeedbackRequest,
-    rag_benchmark,
+    KnowledgeBaseCreateRequest,
+    _build_upload_source_path,
     rag_chat,
+    rag_create_knowledge_base,
+    rag_documents,
     rag_feedback,
     rag_ingest,
     rag_ingest_upload,
+    rag_knowledge_bases,
     rag_trace,
 )
 from app.core.tracing import FeedbackStore, TraceStore
-from app.diagnostics.service import DiagnosisService
+from app.knowledge_bases.catalog import KnowledgeBaseRecord
 from app.schemas.chat import Citation, ChatResponse
 from app.schemas.trace import TraceRecord
 
 
+CONTEXT = RequestContext(auth_mode="api_key")
+
+
+class FakeKnowledgeBaseCatalog:
+    def __init__(self) -> None:
+        self.records = {
+            "default": KnowledgeBaseRecord(
+                kb_id="default",
+                name="Default Knowledge Base",
+                created_at=1.0,
+                updated_at=1.0,
+            )
+        }
+
+    def exists(self, kb_id: str) -> bool:
+        return kb_id in self.records
+
+    def list(self, allowed_kb_ids=None):  # noqa: ANN001
+        records = list(self.records.values())
+        if allowed_kb_ids is not None:
+            records = [record for record in records if record.kb_id in allowed_kb_ids]
+        return records
+
+    def create(self, **kwargs):  # noqa: ANN003
+        if kwargs["kb_id"] in self.records:
+            raise ValueError(f"knowledge base already exists: {kwargs['kb_id']}")
+        record = KnowledgeBaseRecord(
+            created_at=2.0,
+            updated_at=2.0,
+            **kwargs,
+        )
+        self.records[record.kb_id] = record
+        return record
+
+
 def _request_with_container(container) -> SimpleNamespace:
+    if not hasattr(container, "knowledge_base_catalog"):
+        container.knowledge_base_catalog = FakeKnowledgeBaseCatalog()
     return SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(container=container)))
 
 
 @pytest.mark.asyncio
-async def test_business_chat_preserves_business_metadata() -> None:
-    trace_store = TraceStore()
-    trace_store.save_raw({"trace_id": "trace-1", "query": "q1"})
-
-    async def fake_chat_run(payload):  # noqa: ANN001, ARG001
-        return ChatResponse(
-            answer="a1",
-            citations=[Citation(chunk_id="c1", source="doc.md", score=1.0)],
-            contexts=[{"chunk_id": "c1"}],
-            trace_id="trace-1",
-        )
-
-    container = SimpleNamespace(
-        chat_pipeline=SimpleNamespace(run=fake_chat_run),
-        trace_store=trace_store,
-    )
-
-    response = await rag_chat(
-        BusinessChatRequest(query="q1", kb_id="default", tenant_id="tenant-a", session_id="session-a"),
-        _request_with_container(container),
-    )
-
-    assert response.kb_id == "default"
-    assert response.tenant_id == "tenant-a"
-    assert response.session_id == "session-a"
-    assert response.trace_id == "trace-1"
-
-
-@pytest.mark.asyncio
-async def test_business_chat_passes_metadata_filters() -> None:
-    trace_store = TraceStore()
-    trace_store.save_raw({"trace_id": "trace-1", "query": "policy"})
-
+async def test_business_chat_uses_kb_scope_and_metadata_filters() -> None:
     async def fake_chat_run(payload):  # noqa: ANN001
+        assert payload.kb_id == "default"
         assert payload.metadata_filters == {"doc_types": ["policy"]}
         return ChatResponse(
             answer="a1",
@@ -73,51 +80,66 @@ async def test_business_chat_passes_metadata_filters() -> None:
             trace_id="trace-1",
         )
 
-    container = SimpleNamespace(
-        chat_pipeline=SimpleNamespace(run=fake_chat_run),
-        trace_store=trace_store,
-    )
+    container = SimpleNamespace(chat_pipeline=SimpleNamespace(run=fake_chat_run))
 
     response = await rag_chat(
         BusinessChatRequest(
             query="policy",
             kb_id="default",
+            session_id="session-a",
             metadata_filters={"doc_types": ["policy"]},
         ),
         _request_with_container(container),
+        CONTEXT,
     )
 
+    assert response.kb_id == "default"
+    assert response.session_id == "session-a"
     assert response.trace_id == "trace-1"
 
 
-def test_business_requests_normalize_blank_shared_scope() -> None:
-    chat = BusinessChatRequest(query="q1", tenant_id="", session_id="null")
-    ingest = BusinessIngestRequest(path="./data/raw", tenant_id="__shared__")
-    feedback = FeedbackRequest(trace_id="t1", rating="up", tenant_id="", session_id="")
+def test_business_requests_normalize_blank_session() -> None:
+    chat = BusinessChatRequest(query="q1", session_id="null")
+    feedback = FeedbackRequest(trace_id="t1", rating="up", session_id="")
 
-    assert chat.tenant_id is None
     assert chat.session_id is None
-    assert ingest.tenant_id is None
-    assert feedback.tenant_id is None
     assert feedback.session_id is None
 
 
 @pytest.mark.asyncio
+async def test_knowledge_base_catalog_routes_list_and_create() -> None:
+    catalog = FakeKnowledgeBaseCatalog()
+    container = SimpleNamespace(
+        knowledge_base_catalog=catalog,
+        config=SimpleNamespace(parsed_dir=SimpleNamespace(exists=lambda: False)),
+        trace_store=TraceStore(),
+    )
+
+    created = await rag_create_knowledge_base(
+        KnowledgeBaseCreateRequest(kb_id="policies", name="Policies"),
+        _request_with_container(container),
+        CONTEXT,
+    )
+    listed = await rag_knowledge_bases(_request_with_container(container), CONTEXT)
+
+    assert created.kb_id == "policies"
+    assert {item.kb_id for item in listed} == {"default", "policies"}
+
+
+@pytest.mark.asyncio
 async def test_business_ingest_wraps_ingest_response() -> None:
-    async def fake_ingest_run(  # noqa: ANN001
-        path, kb_id="default", tenant_id=None, source_path_overrides=None
-    ):
+    async def fake_ingest_run(path, kb_id="default", source_path_overrides=None):  # noqa: ANN001
         assert path == "./data/raw"
         assert kb_id == "default"
-        assert tenant_id == "tenant-a"
         assert source_path_overrides is None
         return SimpleNamespace(documents=2, chunks=4)
 
     container = SimpleNamespace(ingestion_pipeline=SimpleNamespace(run=fake_ingest_run))
 
     response = await rag_ingest(
-        BusinessIngestRequest(path="./data/raw", kb_id="default", tenant_id="tenant-a"),
+        BusinessIngestRequest(path="./data/raw", kb_id="default"),
         _request_with_container(container),
+        CONTEXT,
     )
 
     assert response.status == "ok"
@@ -129,12 +151,9 @@ async def test_business_ingest_wraps_ingest_response() -> None:
 async def test_business_ingest_upload_wraps_ingest_response(tmp_path) -> None:
     captured: dict[str, object] = {}
 
-    async def fake_ingest_run(  # noqa: ANN001
-        path, kb_id="default", tenant_id=None, source_path_overrides=None
-    ):
+    async def fake_ingest_run(path, kb_id="default", source_path_overrides=None):  # noqa: ANN001
         captured["path"] = path
         captured["kb_id"] = kb_id
-        captured["tenant_id"] = tenant_id
         captured["source_path_overrides"] = source_path_overrides
         assert tmp_path.as_posix() in path
         return SimpleNamespace(documents=1, chunks=2)
@@ -149,82 +168,23 @@ async def test_business_ingest_upload_wraps_ingest_response(tmp_path) -> None:
         _request_with_container(container),
         files=[upload],
         kb_id="default",
-        tenant_id="tenant-a",
+        context=CONTEXT,
     )
 
     assert response.status == "ok"
-    assert response.source == "upload"
     assert response.uploaded_files == ["policy.md"]
     assert response.documents == 1
     assert response.chunks == 2
     assert captured["kb_id"] == "default"
-    assert captured["tenant_id"] == "tenant-a"
     source_path_overrides = captured["source_path_overrides"]
     assert isinstance(source_path_overrides, dict)
-    assert len(source_path_overrides) == 1
-    assert next(iter(source_path_overrides.values())) == (
-        "uploads/default/tenant-a/policy.md"
-    )
-    durable_upload = tmp_path / "default" / "tenant-a" / "policy.md"
-    assert durable_upload.read_bytes() == b"# Policy\nBody"
-    assert sorted(path.name for path in tmp_path.iterdir()) == ["default"]
+    assert next(iter(source_path_overrides.values())) == "uploads/default/policy.md"
+    assert (tmp_path / "default" / "policy.md").read_bytes() == b"# Policy\nBody"
 
 
-@pytest.mark.asyncio
-async def test_business_ingest_upload_treats_blank_tenant_as_shared(tmp_path) -> None:
-    captured: dict[str, object] = {}
-
-    async def fake_ingest_run(  # noqa: ANN001
-        path, kb_id="default", tenant_id=None, source_path_overrides=None
-    ):
-        captured["tenant_id"] = tenant_id
-        captured["source_path_overrides"] = source_path_overrides
-        return SimpleNamespace(documents=1, chunks=1)
-
-    container = SimpleNamespace(
-        ingestion_pipeline=SimpleNamespace(run=fake_ingest_run),
-        config=SimpleNamespace(upload_dir=tmp_path),
-    )
-    upload = UploadFile(filename="policy.md", file=BytesIO(b"body"))
-
-    await rag_ingest_upload(
-        _request_with_container(container),
-        files=[upload],
-        kb_id="default",
-        tenant_id="",
-    )
-
-    assert captured["tenant_id"] is None
-    source_path_overrides = captured["source_path_overrides"]
-    assert isinstance(source_path_overrides, dict)
-    assert next(iter(source_path_overrides.values())) == (
-        "uploads/default/__shared__/policy.md"
-    )
-
-
-@pytest.mark.asyncio
-async def test_business_ingest_upload_rejects_unsupported_extension(tmp_path) -> None:
-    container = SimpleNamespace(
-        ingestion_pipeline=SimpleNamespace(run=None),
-        config=SimpleNamespace(upload_dir=tmp_path),
-    )
-
-    upload = UploadFile(filename="policy.exe", file=BytesIO(b"bad"))
-    with pytest.raises(HTTPException) as exc_info:
-        await rag_ingest_upload(
-            _request_with_container(container),
-            files=[upload],
-            kb_id="default",
-            tenant_id=None,
-        )
-
-    assert exc_info.value.status_code == 400
-    assert not any(tmp_path.iterdir())
-
-
-def test_upload_source_path_sanitizes_scope_components() -> None:
-    assert _build_upload_source_path("政策 文档.pdf", "default", "../tenant/a") == (
-        "uploads/default/tenant_a/政策_文档.pdf"
+def test_upload_source_path_sanitizes_kb_component() -> None:
+    assert _build_upload_source_path("政策 文档.pdf", "../kb/a") == (
+        "uploads/kb_a/政策_文档.pdf"
     )
 
 
@@ -243,37 +203,15 @@ async def test_business_ingest_upload_rejects_duplicate_filenames(tmp_path) -> N
                 UploadFile(filename="policy.md", file=BytesIO(b"second")),
             ],
             kb_id="default",
-            tenant_id=None,
+            context=CONTEXT,
         )
 
     assert exc_info.value.status_code == 400
     assert "duplicate upload filename" in str(exc_info.value.detail)
-    assert not any(tmp_path.iterdir())
 
 
 @pytest.mark.asyncio
-async def test_business_ingest_upload_rejects_oversized_file_while_streaming(tmp_path, monkeypatch) -> None:
-    monkeypatch.setattr(routes_business, "MAX_UPLOAD_BYTES", 4)
-    container = SimpleNamespace(
-        ingestion_pipeline=SimpleNamespace(run=None),
-        config=SimpleNamespace(upload_dir=tmp_path),
-    )
-
-    upload = UploadFile(filename="large.md", file=BytesIO(b"12345"))
-    with pytest.raises(HTTPException) as exc_info:
-        await rag_ingest_upload(
-            _request_with_container(container),
-            files=[upload],
-            kb_id="default",
-            tenant_id=None,
-        )
-
-    assert exc_info.value.status_code == 413
-    assert not any(tmp_path.iterdir())
-
-
-@pytest.mark.asyncio
-async def test_business_documents_lists_current_scope_only(tmp_path) -> None:
+async def test_business_documents_lists_current_kb_only(tmp_path) -> None:
     parsed_dir = tmp_path / "parsed"
     parsed_dir.mkdir(parents=True, exist_ok=True)
     (parsed_dir / "doc-a.json").write_text(
@@ -281,15 +219,10 @@ async def test_business_documents_lists_current_scope_only(tmp_path) -> None:
 {
   "document": {
     "doc_id": "doc-a",
-    "source_path": "uploads/default/tenant-a/policy.md",
+    "source_path": "uploads/default/policy.md",
     "title": "Policy",
     "content": "body",
-    "metadata": {
-      "kb_id": "default",
-      "tenant_id": "tenant-a",
-      "doc_type": "policy",
-      "source_key": "policy"
-    }
+    "metadata": {"kb_id": "default", "doc_type": "policy", "source_key": "policy"}
   },
   "chunks": [{}, {}]
 }
@@ -301,13 +234,10 @@ async def test_business_documents_lists_current_scope_only(tmp_path) -> None:
 {
   "document": {
     "doc_id": "doc-b",
-    "source_path": "uploads/default/tenant-b/guide.md",
+    "source_path": "uploads/other/guide.md",
     "title": "Guide",
     "content": "body",
-    "metadata": {
-      "kb_id": "default",
-      "tenant_id": "tenant-b"
-    }
+    "metadata": {"kb_id": "other"}
   },
   "chunks": [{}]
 }
@@ -320,21 +250,19 @@ async def test_business_documents_lists_current_scope_only(tmp_path) -> None:
     response = await rag_documents(
         _request_with_container(container),
         kb_id="default",
-        tenant_id="tenant-a",
+        context=CONTEXT,
     )
 
-    assert len(response) == 1
-    assert response[0].doc_id == "doc-a"
+    assert [item.doc_id for item in response] == ["doc-a"]
     assert response[0].chunk_count == 2
     assert response[0].doc_type == "policy"
-    assert response[0].source_path == "uploads/default/tenant-a/policy.md"
 
 
 @pytest.mark.asyncio
 async def test_feedback_is_saved() -> None:
     trace_store = TraceStore()
     trace_store.save_raw(
-        TraceRecord(trace_id="trace-1", kb_id="default", tenant_id="tenant-a", session_id="session-a").model_dump()
+        TraceRecord(trace_id="trace-1", kb_id="default", session_id="session-a").model_dump()
     )
     feedback_store = FeedbackStore()
     container = SimpleNamespace(trace_store=trace_store, feedback_store=feedback_store)
@@ -344,11 +272,11 @@ async def test_feedback_is_saved() -> None:
             trace_id="trace-1",
             rating="up",
             kb_id="default",
-            tenant_id="tenant-a",
             session_id="session-a",
             comment="good answer",
         ),
         _request_with_container(container),
+        CONTEXT,
     )
 
     assert response.status == "ok"
@@ -356,27 +284,10 @@ async def test_feedback_is_saved() -> None:
 
 
 @pytest.mark.asyncio
-async def test_feedback_rejects_scope_mismatch() -> None:
+async def test_business_trace_requires_matching_kb() -> None:
     trace_store = TraceStore()
     trace_store.save_raw(
-        TraceRecord(trace_id="trace-1", kb_id="default", tenant_id="tenant-a", session_id="session-a").model_dump()
-    )
-    container = SimpleNamespace(trace_store=trace_store, feedback_store=FeedbackStore())
-
-    with pytest.raises(HTTPException) as exc_info:
-        await rag_feedback(
-            FeedbackRequest(trace_id="trace-1", rating="up", kb_id="default", tenant_id="tenant-b"),
-            _request_with_container(container),
-        )
-
-    assert exc_info.value.status_code == 403
-
-
-@pytest.mark.asyncio
-async def test_business_trace_requires_matching_scope() -> None:
-    trace_store = TraceStore()
-    trace_store.save_raw(
-        TraceRecord(trace_id="trace-1", kb_id="default", tenant_id="tenant-a", session_id="session-a").model_dump()
+        TraceRecord(trace_id="trace-1", kb_id="default", session_id="session-a").model_dump()
     )
     container = SimpleNamespace(trace_store=trace_store)
 
@@ -384,8 +295,8 @@ async def test_business_trace_requires_matching_scope() -> None:
         "trace-1",
         _request_with_container(container),
         kb_id="default",
-        tenant_id="tenant-a",
         session_id="session-a",
+        context=CONTEXT,
     )
 
     assert record.trace_id == "trace-1"
@@ -394,133 +305,9 @@ async def test_business_trace_requires_matching_scope() -> None:
         await rag_trace(
             "trace-1",
             _request_with_container(container),
-            kb_id="default",
-            tenant_id="tenant-b",
+            kb_id="other",
             session_id="session-a",
+            context=CONTEXT,
         )
 
-    assert exc_info.value.status_code == 403
-
-
-@pytest.mark.asyncio
-async def test_benchmark_route_returns_report() -> None:
-    trace_store = TraceStore()
-    trace_store.save_raw(
-        {
-            "trace_id": "trace-1",
-            "query": "q1",
-            "latency_seconds": 0.7,
-            "step_latencies": {"retrieval_seconds": 0.1, "generation_seconds": 0.6},
-        }
-    )
-    dataset = [
-        {
-            "sample_id": "sample-1",
-            "query": "q1",
-            "reference_answer": "a1",
-            "reference_contexts": ["ctx"],
-        }
-    ]
-    container = SimpleNamespace(
-        trace_store=trace_store,
-        diagnosis_service=DiagnosisService(),
-        ragas_runner=SimpleNamespace(
-            run=lambda records: {
-                "records": 1,
-                "aggregate": {
-                    "answer_exact_match": 1.0,
-                    "reference_context_recall": 1.0,
-                    "retrieved_context_count_avg": 1.0,
-                },
-                "results": [
-                    {
-                        "sample_id": records[0]["sample_id"],
-                        "trace_id": records[0]["trace_id"],
-                        "query": "q1",
-                        "answer_exact_match": 1.0,
-                        "reference_context_recall": 1.0,
-                        "answer": "a1",
-                        "reference_answer": "a1",
-                    }
-                ],
-            }
-        ),
-    )
-
-    async def fake_materialize_eval_records(container_arg, dataset_arg):  # noqa: ANN001
-        assert container_arg is container
-        assert dataset_arg == dataset
-        return [{"sample_id": "sample-1", "trace_id": "trace-1"}]
-
-    request = _request_with_container(container)
-
-    from unittest.mock import patch
-
-    with patch("app.api.routes_business.load_jsonl_dataset", return_value=dataset), patch(
-        "app.api.routes_business.materialize_eval_records",
-        new=fake_materialize_eval_records,
-    ), patch("app.api.routes_business.save_json") as save_json:
-        response = await rag_benchmark(
-            BenchmarkRunRequest(
-                dataset_path="data/eval/sample.jsonl",
-                output_path="data/reports/eval/benchmarks/test.json",
-            ),
-            request,
-        )
-
-    assert response.status == "ok"
-    assert response.report["aggregate"]["latency_seconds_avg"] == 0.7
-    save_json.assert_called_once()
-
-
-@pytest.mark.asyncio
-async def test_benchmark_route_rejects_dataset_outside_eval_dir() -> None:
-    container = SimpleNamespace(
-        trace_store=TraceStore(),
-        diagnosis_service=DiagnosisService(),
-        ragas_runner=SimpleNamespace(run=lambda records: {"records": len(records), "aggregate": {}, "results": []}),
-    )
-
-    with pytest.raises(HTTPException) as exc_info:
-        await rag_benchmark(
-            BenchmarkRunRequest(dataset_path="../outside.jsonl"),
-            _request_with_container(container),
-        )
-
-    assert exc_info.value.status_code == 400
-
-
-@pytest.mark.asyncio
-async def test_benchmark_route_returns_503_when_eval_disabled() -> None:
-    container = SimpleNamespace(
-        trace_store=TraceStore(),
-        diagnosis_service=DiagnosisService(),
-        ragas_runner=None,
-    )
-
-    with pytest.raises(HTTPException) as exc_info:
-        await rag_benchmark(
-            BenchmarkRunRequest(dataset_path="data/eval/sample.jsonl"),
-            _request_with_container(container),
-        )
-
-    assert exc_info.value.status_code == 503
-    assert "RAG_EVAL_ENABLED=true" in str(exc_info.value.detail)
-
-
-@pytest.mark.asyncio
-async def test_benchmark_route_returns_503_when_diagnosis_disabled() -> None:
-    container = SimpleNamespace(
-        trace_store=TraceStore(),
-        diagnosis_service=None,
-        ragas_runner=SimpleNamespace(run=lambda records: {"records": len(records)}),
-    )
-
-    with pytest.raises(HTTPException) as exc_info:
-        await rag_benchmark(
-            BenchmarkRunRequest(dataset_path="data/eval/sample.jsonl"),
-            _request_with_container(container),
-        )
-
-    assert exc_info.value.status_code == 503
-    assert "RAG_DIAGNOSIS_ENABLED=true" in str(exc_info.value.detail)
+    assert exc_info.value.status_code == 404

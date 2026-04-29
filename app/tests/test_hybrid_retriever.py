@@ -25,7 +25,6 @@ class NativeHybridRepository:
         query,
         top_k,
         kb_id="default",
-        tenant_id=None,
         metadata_filters=None,
         dense_weight=0.7,
         sparse_weight=0.3,
@@ -35,7 +34,6 @@ class NativeHybridRepository:
             "query": query,
             "top_k": top_k,
             "kb_id": kb_id,
-            "tenant_id": tenant_id,
             "metadata_filters": metadata_filters,
             "dense_weight": dense_weight,
             "sparse_weight": sparse_weight,
@@ -132,58 +130,54 @@ async def test_hybrid_retriever_uses_native_repository_hybrid(monkeypatch) -> No
         "policy query",
         top_k=3,
         kb_id="kb-a",
-        tenant_id="tenant-a",
         metadata_filters={"doc_types": ["policy"]},
     )
 
     assert [hit.chunk.chunk_id for hit in hits] == ["chunk-native"]
     assert repository.called_with["query"] == "policy query"
     assert repository.called_with["kb_id"] == "kb-a"
-    assert repository.called_with["tenant_id"] == "tenant-a"
 
 
 @pytest.mark.asyncio
-async def test_hybrid_retriever_shared_scope_does_not_return_tenant_bm25_hits(
+async def test_hybrid_retriever_filters_bm25_hits_by_kb(
     monkeypatch,
 ) -> None:
     monkeypatch.setenv("RAG_HYBRID_SEARCH_ENABLED", "true")
     repository = InMemoryVectorRepository()
-    shared_chunk = Chunk(
-        chunk_id="shared:0",
-        doc_id="shared",
+    default_chunk = Chunk(
+        chunk_id="default:0",
+        doc_id="default-doc",
         chunk_index=0,
         text="policy alpha",
-        source_path="uploads/default/__shared__/a.md",
-        metadata={"kb_id": "default", "tenant_id": None},
+        source_path="uploads/default/a.md",
+        metadata={"kb_id": "default"},
     )
-    tenant_chunk = Chunk(
-        chunk_id="tenant:0",
-        doc_id="tenant",
+    other_chunk = Chunk(
+        chunk_id="other:0",
+        doc_id="other-doc",
         chunk_index=0,
         text="policy alpha",
-        source_path="uploads/default/tenant-a/a.md",
-        metadata={"kb_id": "default", "tenant_id": "tenant-a"},
+        source_path="uploads/other/a.md",
+        metadata={"kb_id": "other"},
     )
     repository.upsert(
-        Document(doc_id="shared", source_path=shared_chunk.source_path, title="A", content="", metadata={"kb_id": "default", "tenant_id": None}),
-        [shared_chunk],
+        Document(doc_id="default-doc", source_path=default_chunk.source_path, title="A", content="", metadata={"kb_id": "default"}),
+        [default_chunk],
         [[1.0, 0.0]],
     )
     repository.upsert(
-        Document(doc_id="tenant", source_path=tenant_chunk.source_path, title="A", content="", metadata={"kb_id": "default", "tenant_id": "tenant-a"}),
-        [tenant_chunk],
+        Document(doc_id="other-doc", source_path=other_chunk.source_path, title="A", content="", metadata={"kb_id": "other"}),
+        [other_chunk],
         [[1.0, 0.0]],
     )
     retriever = HybridRetriever(
         repository=repository,
         embedding_client=FakeEmbeddingClient(),
     )
-    retriever.index_chunks([shared_chunk, tenant_chunk])
+    retriever.index_chunks([default_chunk, other_chunk])
 
-    shared_hits = await retriever.retrieve("policy", top_k=5, kb_id="default")
-    tenant_hits = await retriever.retrieve(
-        "policy", top_k=5, kb_id="default", tenant_id="tenant-a"
-    )
+    default_hits = await retriever.retrieve("policy", top_k=5, kb_id="default")
+    other_hits = await retriever.retrieve("policy", top_k=5, kb_id="other")
 
-    assert [hit.chunk.chunk_id for hit in shared_hits] == ["shared:0"]
-    assert [hit.chunk.chunk_id for hit in tenant_hits] == ["tenant:0"]
+    assert [hit.chunk.chunk_id for hit in default_hits] == ["default:0"]
+    assert [hit.chunk.chunk_id for hit in other_hits] == ["other:0"]

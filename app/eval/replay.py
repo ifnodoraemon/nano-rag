@@ -53,7 +53,6 @@ async def replay_trace(container: AppContainer, trace_id: str) -> ReplayResult:
         )
 
     kb_id = trace_record.kb_id or "default"
-    tenant_id = trace_record.tenant_id
     session_id = trace_record.session_id
     metadata_filters = (
         trace_record.retrieval_params.get("metadata_filters")
@@ -64,7 +63,6 @@ async def replay_trace(container: AppContainer, trace_id: str) -> ReplayResult:
     chat_request = ChatRequest(
         query=query,
         kb_id=kb_id,
-        tenant_id=tenant_id,
         session_id=session_id,
         metadata_filters=metadata_filters,
     )

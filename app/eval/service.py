@@ -46,7 +46,6 @@ async def materialize_eval_records(
         query = str(prepared.get("query", "")).strip()
         top_k = prepared.get("top_k")
         kb_id = str(prepared.get("kb_id", "default") or "default")
-        tenant_id = prepared.get("tenant_id")
         session_id = prepared.get("session_id")
         answer = str(prepared.get("answer", "")).strip()
         retrieved_contexts = prepared.get("retrieved_contexts", []) or []
@@ -66,7 +65,6 @@ async def materialize_eval_records(
                     query=query,
                     top_k=top_k,
                     kb_id=kb_id,
-                    tenant_id=tenant_id,
                     session_id=session_id,
                     sample_id=str(prepared["sample_id"]),
                 )
@@ -110,7 +108,6 @@ async def materialize_eval_records(
                 query,
                 top_k,
                 kb_id=kb_id,
-                tenant_id=tenant_id,
                 session_id=session_id,
             )
             prepared["retrieved_contexts"] = [

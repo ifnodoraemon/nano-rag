@@ -39,7 +39,6 @@ class Retriever:
         query: str,
         top_k: int,
         kb_id: str = "default",
-        tenant_id: str | None = None,
         metadata_filters: dict[str, object] | None = None,
     ) -> RetrievalResult:
         query_plan = QueryExpansionPlan(rewritten_query=None, retrieval_queries=[query])
@@ -53,7 +52,6 @@ class Retriever:
                     retrieval_query,
                     top_k,
                     kb_id=kb_id,
-                    tenant_id=tenant_id,
                     metadata_filters=metadata_filters,
                 )
             )
@@ -63,7 +61,6 @@ class Retriever:
                     query_plan.hyde_query,
                     top_k,
                     kb_id=kb_id,
-                    tenant_id=tenant_id,
                     metadata_filters=metadata_filters,
                 )
             )
@@ -75,7 +72,6 @@ class Retriever:
         query: str,
         top_k: int,
         kb_id: str = "default",
-        tenant_id: str | None = None,
         metadata_filters: dict[str, object] | None = None,
     ) -> list[SearchHit]:
         wiki_hits: list[SearchHit] = []
@@ -84,7 +80,6 @@ class Retriever:
                 query,
                 top_k=top_k,
                 kb_id=kb_id,
-                tenant_id=tenant_id,
                 metadata_filters=metadata_filters,
             )
             if len(wiki_hits) >= top_k:
@@ -94,7 +89,6 @@ class Retriever:
                 query,
                 top_k,
                 kb_id=kb_id,
-                tenant_id=tenant_id,
                 metadata_filters=metadata_filters,
             )
         else:
@@ -106,7 +100,6 @@ class Retriever:
                 vectors[0],
                 top_k,
                 kb_id=kb_id,
-                tenant_id=tenant_id,
                 metadata_filters=metadata_filters,
             )
         if not wiki_hits:

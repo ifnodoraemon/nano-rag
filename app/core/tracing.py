@@ -178,17 +178,12 @@ class TraceStore(_PersistedStore[TraceRecord]):
         page: int = 1,
         page_size: int = 20,
         kb_id: str | None = None,
-        tenant_id: str | None = None,
     ) -> PaginatedResponse[TraceSummary]:
         with self._lock:
             all_records = list(reversed(self._records.values()))
         if kb_id is not None:
             all_records = [
                 record for record in all_records if (record.kb_id or "default") == kb_id
-            ]
-        if tenant_id is not None:
-            all_records = [
-                record for record in all_records if record.tenant_id == tenant_id
             ]
         total = len(all_records)
         start = (page - 1) * page_size
@@ -224,7 +219,6 @@ class TraceStore(_PersistedStore[TraceRecord]):
                     latency_seconds=record.latency_seconds,
                     query=record.query,
                     kb_id=record.kb_id,
-                    tenant_id=record.tenant_id,
                     session_id=record.session_id,
                     model_alias=record.model_alias,
                     prompt_version=record.prompt_version,

@@ -127,7 +127,6 @@ async def test_materialize_eval_records_passes_business_context() -> None:
                 "trace_id": "trace-eval-1",
                 "query": payload.query,
                 "kb_id": payload.kb_id,
-                "tenant_id": payload.tenant_id,
                 "session_id": payload.session_id,
                 "contexts": [{"chunk_id": "c1", "wiki_status": "conflicting"}],
                 "supporting_claims": [
@@ -152,9 +151,9 @@ async def test_materialize_eval_records_passes_business_context() -> None:
             trace_id="trace-eval-1",
         )
 
-    async def fake_debug(query, top_k, kb_id="default", tenant_id=None, session_id=None):  # noqa: ANN001
+    async def fake_debug(query, top_k, kb_id="default", session_id=None):  # noqa: ANN001
         return SimpleNamespace(
-            contexts=[{"text": f"{query}:{top_k}:{kb_id}:{tenant_id}:{session_id}"}]
+            contexts=[{"text": f"{query}:{top_k}:{kb_id}:{session_id}"}]
         )
 
     container = SimpleNamespace(
@@ -172,7 +171,6 @@ async def test_materialize_eval_records_passes_business_context() -> None:
                 "reference_answer": "a1",
                 "reference_contexts": ["ctx-1"],
                 "kb_id": "kb-a",
-                "tenant_id": "tenant-a",
                 "session_id": "session-a",
             }
         ],
@@ -183,7 +181,6 @@ async def test_materialize_eval_records_passes_business_context() -> None:
     assert trace is not None
     assert trace.sample_id == "sample-kb-1"
     assert trace.kb_id == "kb-a"
-    assert trace.tenant_id == "tenant-a"
     assert trace.session_id == "session-a"
     assert records[0]["conflicting_context_count"] == 1
     assert records[0]["conflict_claim_count"] == 1

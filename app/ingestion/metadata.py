@@ -45,12 +45,10 @@ def extract_document_metadata(
     title: str,
     text: str,
     kb_id: str = "default",
-    tenant_id: str | None = None,
 ) -> dict[str, object]:
     headings = extract_headings(text)
     metadata: dict[str, object] = {
         "kb_id": kb_id,
-        "tenant_id": tenant_id,
         "doc_type": infer_doc_type(source_path, title, text),
         "source_key": build_source_key(source_path, title),
         "headings": headings,

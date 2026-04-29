@@ -59,7 +59,6 @@ class RetrievalPipeline:
         query: str,
         top_k: int | None = None,
         kb_id: str = "default",
-        tenant_id: str | None = None,
         session_id: str | None = None,
         sample_id: str | None = None,
         metadata_filters: dict[str, object] | None = None,
@@ -89,7 +88,6 @@ class RetrievalPipeline:
                 "retrieval.query": query,
                 "retrieval.top_k": requested_top_k,
                 "retrieval.kb_id": kb_id,
-                "retrieval.tenant_id": tenant_id or "",
                 "retrieval.session_id": session_id or "",
             },
         ):
@@ -99,7 +97,6 @@ class RetrievalPipeline:
                 query,
                 requested_top_k,
                 kb_id=kb_id,
-                tenant_id=tenant_id,
                 metadata_filters=effective_metadata_filters,
             )
             retrieved = retrieval_result.hits
@@ -121,7 +118,6 @@ class RetrievalPipeline:
             )
             trace.record("query", query)
             trace.record("kb_id", kb_id)
-            trace.record("tenant_id", tenant_id)
             trace.record("session_id", session_id)
             trace.record("sample_id", sample_id)
             trace.record("metadata_filters", public_metadata_filters)
@@ -186,7 +182,6 @@ class RetrievalPipeline:
         query: str,
         top_k: int | None = None,
         kb_id: str = "default",
-        tenant_id: str | None = None,
         session_id: str | None = None,
         metadata_filters: dict[str, object] | None = None,
     ) -> RetrievalDebugResponse:
@@ -194,7 +189,6 @@ class RetrievalPipeline:
             query,
             top_k,
             kb_id=kb_id,
-            tenant_id=tenant_id,
             session_id=session_id,
             metadata_filters=metadata_filters,
         )

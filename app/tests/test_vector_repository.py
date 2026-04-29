@@ -49,11 +49,11 @@ def test_in_memory_repository_delete_by_source_removes_matching_documents_and_ch
     assert remaining_hit.chunk.source_path == other_source
 
 
-def test_in_memory_repository_search_is_scoped_by_kb_and_tenant() -> None:
+def test_in_memory_repository_search_is_scoped_by_kb() -> None:
     repository = InMemoryVectorRepository()
     source_path = "data/raw/employee_handbook.md"
     repository.upsert(
-        Document(doc_id="doc-1", source_path=source_path, title="A", content="a", metadata={"kb_id": "kb-a", "tenant_id": "t1"}),
+        Document(doc_id="doc-1", source_path=source_path, title="A", content="a", metadata={"kb_id": "kb-a"}),
         [
             Chunk(
                 chunk_id="doc-1:0",
@@ -62,13 +62,13 @@ def test_in_memory_repository_search_is_scoped_by_kb_and_tenant() -> None:
                 text="alpha",
                 source_path=source_path,
                 title="A",
-                metadata={"kb_id": "kb-a", "tenant_id": "t1"},
+                metadata={"kb_id": "kb-a"},
             )
         ],
         [[1.0, 0.0]],
     )
     repository.upsert(
-        Document(doc_id="doc-2", source_path=source_path, title="A", content="b", metadata={"kb_id": "kb-b", "tenant_id": "t2"}),
+        Document(doc_id="doc-2", source_path=source_path, title="A", content="b", metadata={"kb_id": "kb-b"}),
         [
             Chunk(
                 chunk_id="doc-2:0",
@@ -77,58 +77,54 @@ def test_in_memory_repository_search_is_scoped_by_kb_and_tenant() -> None:
                 text="beta",
                 source_path=source_path,
                 title="A",
-                metadata={"kb_id": "kb-b", "tenant_id": "t2"},
+                metadata={"kb_id": "kb-b"},
             )
         ],
         [[0.0, 1.0]],
     )
 
-    hits = repository.search([1.0, 0.0], top_k=5, kb_id="kb-a", tenant_id="t1")
+    hits = repository.search([1.0, 0.0], top_k=5, kb_id="kb-a")
 
     assert len(hits) == 1
     assert hits[0].chunk.chunk_id == "doc-1:0"
 
 
-def test_in_memory_repository_shared_scope_does_not_return_tenant_chunks() -> None:
+def test_in_memory_repository_returns_all_chunks_in_kb() -> None:
     repository = InMemoryVectorRepository()
     repository.upsert(
-        Document(doc_id="shared", source_path="uploads/default/__shared__/a.md", title="A", content="shared", metadata={"kb_id": "default", "tenant_id": None}),
+        Document(doc_id="shared", source_path="uploads/default/a.md", title="A", content="shared", metadata={"kb_id": "default"}),
         [
             Chunk(
                 chunk_id="shared:0",
                 doc_id="shared",
                 chunk_index=0,
                 text="shared policy",
-                source_path="uploads/default/__shared__/a.md",
+                source_path="uploads/default/a.md",
                 title="A",
-                metadata={"kb_id": "default", "tenant_id": None},
+                metadata={"kb_id": "default"},
             )
         ],
         [[1.0, 0.0]],
     )
     repository.upsert(
-        Document(doc_id="tenant", source_path="uploads/default/tenant-a/a.md", title="A", content="tenant", metadata={"kb_id": "default", "tenant_id": "tenant-a"}),
+        Document(doc_id="other", source_path="uploads/default/b.md", title="A", content="other", metadata={"kb_id": "default"}),
         [
             Chunk(
-                chunk_id="tenant:0",
-                doc_id="tenant",
+                chunk_id="other:0",
+                doc_id="other",
                 chunk_index=0,
-                text="tenant policy",
-                source_path="uploads/default/tenant-a/a.md",
+                text="other policy",
+                source_path="uploads/default/b.md",
                 title="A",
-                metadata={"kb_id": "default", "tenant_id": "tenant-a"},
+                metadata={"kb_id": "default"},
             )
         ],
         [[1.0, 0.0]],
     )
 
-    shared_hits = repository.search([1.0, 0.0], top_k=5, kb_id="default")
-    tenant_hits = repository.search(
-        [1.0, 0.0], top_k=5, kb_id="default", tenant_id="tenant-a"
-    )
+    hits = repository.search([1.0, 0.0], top_k=5, kb_id="default")
 
-    assert [hit.chunk.chunk_id for hit in shared_hits] == ["shared:0"]
-    assert [hit.chunk.chunk_id for hit in tenant_hits] == ["tenant:0"]
+    assert [hit.chunk.chunk_id for hit in hits] == ["shared:0", "other:0"]
 
 
 def test_in_memory_repository_search_supports_metadata_filters() -> None:
@@ -337,4 +333,4 @@ def test_milvus_repository_search_specifies_dense_vector_field(monkeypatch) -> N
 
     assert hits[0].chunk.chunk_id == "doc-1:0"
     assert fake_client.search_kwargs["anns_field"] == "vector"
-    assert 'tenant_id == ""' in fake_client.search_kwargs["filter"]
+    assert fake_client.search_kwargs["filter"] == 'kb_id == "default"'

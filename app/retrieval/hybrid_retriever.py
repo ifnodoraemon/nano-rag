@@ -15,7 +15,7 @@ from app.retrieval.hybrid_fusion import (
     reciprocal_rank_fusion,
 )
 from app.schemas.chunk import Chunk
-from app.vectorstore.repository import SearchHit, VectorRepository, _tenant_matches
+from app.vectorstore.repository import SearchHit, VectorRepository
 
 if TYPE_CHECKING:
     from app.model_client.embeddings import EmbeddingClient
@@ -77,7 +77,7 @@ class HybridRetriever:
             self.bm25_index.remove_document(chunk_id)
 
     def remove_by_source(
-        self, source_path: str, kb_id: str, tenant_id: str | None = None
+        self, source_path: str, kb_id: str
     ) -> None:
         if not self._bm25_enabled or self._native_hybrid_available:
             return
@@ -87,7 +87,6 @@ class HybridRetriever:
                 for chunk_id, chunk in self._chunk_cache.items()
                 if chunk.source_path == source_path
                 and chunk.metadata.get("kb_id", "default") == kb_id
-                and _tenant_matches(chunk.metadata.get("tenant_id"), tenant_id)
             ]
             for chunk_id in removable_ids:
                 self._chunk_cache.pop(chunk_id, None)
@@ -126,7 +125,6 @@ class HybridRetriever:
         query: str,
         top_k: int,
         kb_id: str = "default",
-        tenant_id: str | None = None,
         metadata_filters: dict[str, object] | None = None,
     ) -> list[SearchHit]:
         if not self._bm25_enabled:
@@ -138,7 +136,6 @@ class HybridRetriever:
                 vectors[0],
                 top_k,
                 kb_id=kb_id,
-                tenant_id=tenant_id,
                 metadata_filters=metadata_filters,
             )
 
@@ -153,7 +150,6 @@ class HybridRetriever:
                 query,
                 top_k,
                 kb_id=kb_id,
-                tenant_id=tenant_id,
                 metadata_filters=metadata_filters,
                 dense_weight=self.hybrid_config.vector_weight,
                 sparse_weight=self.hybrid_config.bm25_weight,
@@ -163,7 +159,6 @@ class HybridRetriever:
             vectors[0],
             top_k * 2,
             kb_id=kb_id,
-            tenant_id=tenant_id,
             metadata_filters=metadata_filters,
         )
         vector_results = [(hit.chunk.chunk_id, hit.score) for hit in vector_hits]
@@ -173,7 +168,6 @@ class HybridRetriever:
             chunk_id
             for chunk_id, chunk in chunk_cache_snapshot.items()
             if chunk.metadata.get("kb_id", "default") == kb_id
-            and _tenant_matches(chunk.metadata.get("tenant_id"), tenant_id)
             and match_metadata_filters(chunk.metadata, metadata_filters)
         }
         bm25_results = self.bm25_index.search(
