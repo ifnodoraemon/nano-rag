@@ -263,6 +263,8 @@ class RagasRunner:
             context_recall = 0.0
         return {
             "sample_id": record.get("sample_id"),
+            "kb_id": str(record.get("kb_id", "default") or "default"),
+            "session_id": record.get("session_id"),
             "trace_id": record.get("trace_id"),
             "query": str(record.get("query", "")),
             "answer_exact_match": exact_match,

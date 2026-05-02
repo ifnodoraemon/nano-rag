@@ -1,4 +1,5 @@
 from io import BytesIO
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -7,6 +8,7 @@ from starlette.datastructures import UploadFile
 
 from app.api.auth import RequestContext
 from app.api.routes_business import (
+    BenchmarkRunRequest,
     BusinessChatRequest,
     BusinessIngestRequest,
     BusinessRetrieveRequest,
@@ -19,10 +21,12 @@ from app.api.routes_business import (
     rag_feedback,
     rag_ingest,
     rag_ingest_upload,
+    rag_benchmark,
     rag_knowledge_bases,
     rag_retrieve,
     rag_trace,
 )
+from app.diagnostics.service import DiagnosisService
 from app.core.tracing import FeedbackStore, TraceStore
 from app.knowledge_bases.catalog import KnowledgeBaseRecord
 from app.schemas.chat import Citation, ChatResponse
@@ -246,6 +250,96 @@ async def test_business_ingest_upload_wraps_ingest_response(tmp_path) -> None:
     assert (tmp_path / "default" / "policy.md").read_bytes() == b"# Policy\nBody"
 
 
+@pytest.mark.asyncio
+async def test_business_ingest_upload_stages_durable_copy_before_ingest(
+    monkeypatch, tmp_path
+) -> None:
+    async def fake_ingest_run(*args, **kwargs):  # noqa: ANN002, ANN003
+        raise AssertionError("ingestion should not run when durable staging fails")
+
+    def fail_copy(*args, **kwargs):  # noqa: ANN002, ANN003
+        raise OSError("disk full")
+
+    monkeypatch.setattr("app.api.routes_business.shutil.copy2", fail_copy)
+    container = SimpleNamespace(
+        ingestion_pipeline=SimpleNamespace(run=fake_ingest_run),
+        config=SimpleNamespace(upload_dir=tmp_path),
+    )
+
+    upload = UploadFile(filename="policy.md", file=BytesIO(b"# Policy\nBody"))
+    with pytest.raises(OSError):
+        await rag_ingest_upload(
+            _request_with_container(container),
+            files=[upload],
+            kb_id="default",
+            context=CONTEXT,
+        )
+
+    assert not list((tmp_path / "default").glob("*.tmp"))
+
+
+@pytest.mark.asyncio
+async def test_business_ingest_upload_restores_previous_file_when_ingest_fails(
+    tmp_path,
+) -> None:
+    durable_path = tmp_path / "default" / "policy.md"
+    durable_path.parent.mkdir(parents=True)
+    durable_path.write_bytes(b"old policy")
+
+    async def fake_ingest_run(*args, **kwargs):  # noqa: ANN002, ANN003
+        raise RuntimeError("indexing failed")
+
+    container = SimpleNamespace(
+        ingestion_pipeline=SimpleNamespace(run=fake_ingest_run),
+        config=SimpleNamespace(upload_dir=tmp_path),
+    )
+
+    upload = UploadFile(filename="policy.md", file=BytesIO(b"new policy"))
+    with pytest.raises(RuntimeError):
+        await rag_ingest_upload(
+            _request_with_container(container),
+            files=[upload],
+            kb_id="default",
+            context=CONTEXT,
+        )
+
+    assert durable_path.read_bytes() == b"old policy"
+
+
+@pytest.mark.asyncio
+async def test_business_ingest_upload_ignores_backup_cleanup_failure(
+    monkeypatch, tmp_path
+) -> None:
+    durable_path = tmp_path / "default" / "policy.md"
+    durable_path.parent.mkdir(parents=True)
+    durable_path.write_bytes(b"old policy")
+    original_unlink = Path.unlink
+
+    def flaky_unlink(self, *args, **kwargs):  # noqa: ANN001, ANN002, ANN003
+        if self.name.endswith(".bak"):
+            raise OSError("cleanup failed")
+        return original_unlink(self, *args, **kwargs)
+
+    async def fake_ingest_run(*args, **kwargs):  # noqa: ANN002, ANN003
+        return SimpleNamespace(documents=1, chunks=1)
+
+    monkeypatch.setattr(Path, "unlink", flaky_unlink)
+    container = SimpleNamespace(
+        ingestion_pipeline=SimpleNamespace(run=fake_ingest_run),
+        config=SimpleNamespace(upload_dir=tmp_path),
+    )
+
+    response = await rag_ingest_upload(
+        _request_with_container(container),
+        files=[UploadFile(filename="policy.md", file=BytesIO(b"new policy"))],
+        kb_id="default",
+        context=CONTEXT,
+    )
+
+    assert response.status == "ok"
+    assert durable_path.read_bytes() == b"new policy"
+
+
 def test_upload_source_path_sanitizes_kb_component() -> None:
     assert _build_upload_source_path("政策 文档.pdf", "../kb/a") == (
         "uploads/kb_a/政策_文档.pdf"
@@ -375,3 +469,30 @@ async def test_business_trace_requires_matching_kb() -> None:
         )
 
     assert exc_info.value.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_business_benchmark_rejects_dataset_kb_outside_context(
+    monkeypatch, tmp_path
+) -> None:
+    dataset_dir = tmp_path / "eval"
+    dataset_dir.mkdir()
+    (dataset_dir / "sample.jsonl").write_text(
+        '{"query":"q","kb_id":"other"}\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("EVAL_DATASET_DIR", str(dataset_dir))
+
+    container = SimpleNamespace(
+        ragas_runner=SimpleNamespace(run=lambda records: {"results": records}),
+        diagnosis_service=DiagnosisService(),
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        await rag_benchmark(
+            BenchmarkRunRequest(dataset_path="sample.jsonl"),
+            _request_with_container(container),
+            RequestContext(auth_mode="api_key", allowed_kb_ids={"default"}),
+        )
+
+    assert exc_info.value.status_code == 403

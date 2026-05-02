@@ -66,6 +66,8 @@ class DocumentParserClient:
             or "gemini"
         )
         provider = str(raw).strip().lower()
+        if not self.enabled:
+            return provider or "disabled"
         if provider in {"gemini", "google"}:
             return "gemini"
         if provider in {"qwen", "dashscope", "vllm", "openai-compat"}:
@@ -81,6 +83,8 @@ class DocumentParserClient:
         )
 
     def _resolve_base_url(self) -> str:
+        if not self.enabled:
+            return ""
         raw = (
             os.getenv("DOCUMENT_PARSER_API_BASE_URL")
             or self.config.models.get("document_parser", {}).get("base_url")

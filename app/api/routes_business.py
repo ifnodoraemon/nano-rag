@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import shutil
@@ -41,6 +42,7 @@ from app.eval.service import materialize_eval_records
 from app.benchmark.service import build_benchmark_report
 
 router = APIRouter(prefix="/v1/rag", tags=["rag"])
+logger = logging.getLogger(__name__)
 
 MAX_UPLOAD_BYTES = int(os.getenv("MAX_UPLOAD_BYTES", str(50 * 1024 * 1024)))
 MAX_FILES_PER_BATCH = int(os.getenv("MAX_FILES_PER_BATCH", "10"))
@@ -73,6 +75,13 @@ def _upload_storage_path(upload_dir: Path, source_path: str) -> Path:
     if not path.parts or path.parts[0] != "uploads":
         raise ValueError(f"upload source path must start with uploads/: {source_path}")
     return upload_dir.joinpath(*path.parts[1:])
+
+
+def _discard_path(path: Path) -> None:
+    try:
+        path.unlink(missing_ok=True)
+    except OSError as exc:
+        logger.warning("Failed to remove temporary upload file %s: %s", path, exc)
 
 
 def _ensure_kb_access(container, kb_id: str, context: RequestContext | None = None) -> None:  # noqa: ANN001
@@ -391,6 +400,8 @@ async def rag_ingest_upload(
     uploaded_files: list[str] = []
     source_path_overrides: dict[str, str] = {}
     durable_uploads: list[tuple[Path, Path]] = []
+    staged_uploads: list[tuple[Path, Path]] = []
+    finalized_uploads: list[tuple[Path, Path | None]] = []
     seen_upload_names: set[str] = set()
     seen_source_paths: set[str] = set()
     try:
@@ -436,18 +447,50 @@ async def rag_ingest_upload(
                 (target, _upload_storage_path(container.config.upload_dir, source_path))
             )
 
-        response = await container.ingestion_pipeline.run(
-            str(upload_batch_dir),
-            kb_id=kb_id,
-            source_path_overrides=source_path_overrides,
-        )
         for temporary_path, durable_path in durable_uploads:
             durable_path.parent.mkdir(parents=True, exist_ok=True)
             pending_path = durable_path.with_name(
                 f".{durable_path.name}.{uuid4().hex[:8]}.tmp"
             )
+            staged_uploads.append((pending_path, durable_path))
             shutil.copy2(temporary_path, pending_path)
-            pending_path.replace(durable_path)
+
+        try:
+            for pending_path, durable_path in staged_uploads:
+                backup_path: Path | None = None
+                if durable_path.exists():
+                    backup_path = durable_path.with_name(
+                        f".{durable_path.name}.{uuid4().hex[:8]}.bak"
+                    )
+                    durable_path.replace(backup_path)
+                try:
+                    pending_path.replace(durable_path)
+                except Exception:
+                    if backup_path is not None and backup_path.exists():
+                        backup_path.replace(durable_path)
+                    raise
+                finalized_uploads.append((durable_path, backup_path))
+        except Exception:
+            for durable_path, backup_path in reversed(finalized_uploads):
+                durable_path.unlink(missing_ok=True)
+                if backup_path is not None and backup_path.exists():
+                    backup_path.replace(durable_path)
+            raise
+        try:
+            response = await container.ingestion_pipeline.run(
+                str(upload_batch_dir),
+                kb_id=kb_id,
+                source_path_overrides=source_path_overrides,
+            )
+        except Exception:
+            for durable_path, backup_path in reversed(finalized_uploads):
+                durable_path.unlink(missing_ok=True)
+                if backup_path is not None and backup_path.exists():
+                    backup_path.replace(durable_path)
+            raise
+        for _, backup_path in finalized_uploads:
+            if backup_path is not None:
+                _discard_path(backup_path)
         return BusinessIngestResponse(
             status="ok",
             kb_id=kb_id,
@@ -462,6 +505,11 @@ async def rag_ingest_upload(
                 await upload.close()
             except Exception:
                 pass
+        for pending_path, _ in staged_uploads:
+            _discard_path(pending_path)
+        for _, backup_path in finalized_uploads:
+            if backup_path is not None:
+                _discard_path(backup_path)
         shutil.rmtree(upload_batch_dir, ignore_errors=True)
 
 
@@ -535,10 +583,11 @@ async def rag_trace(
 @router.post(
     "/benchmark/run",
     response_model=BenchmarkRunResponse,
-    dependencies=[Depends(require_api_key)],
 )
 async def rag_benchmark(
-    payload: BenchmarkRunRequest, request: Request
+    payload: BenchmarkRunRequest,
+    request: Request,
+    context: RequestContext = Depends(require_api_key),
 ) -> BenchmarkRunResponse:
     container = request.app.state.container
     ragas_runner = _require_eval_runner(container)
@@ -548,6 +597,9 @@ async def rag_benchmark(
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     dataset = load_jsonl_dataset(str(dataset_path))
+    for record in dataset:
+        kb_id = str(record.get("kb_id", "default") or "default")
+        _ensure_kb_access(container, kb_id, context)
     evaluated_records = await materialize_eval_records(container, dataset)
     eval_report = await _run_eval_report(
         ragas_runner, evaluated_records, payload.use_ragas_lib

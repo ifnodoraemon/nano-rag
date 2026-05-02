@@ -178,12 +178,19 @@ class TraceStore(_PersistedStore[TraceRecord]):
         page: int = 1,
         page_size: int = 20,
         kb_id: str | None = None,
+        kb_ids: set[str] | None = None,
     ) -> PaginatedResponse[TraceSummary]:
         with self._lock:
             all_records = list(reversed(self._records.values()))
         if kb_id is not None:
             all_records = [
                 record for record in all_records if (record.kb_id or "default") == kb_id
+            ]
+        elif kb_ids is not None:
+            all_records = [
+                record
+                for record in all_records
+                if (record.kb_id or "default") in kb_ids
             ]
         total = len(all_records)
         start = (page - 1) * page_size

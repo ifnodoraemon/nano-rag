@@ -97,6 +97,25 @@ def test_document_parser_base_url_strips_openai_suffix(tmp_path) -> None:
     assert client.base_url == "https://generativelanguage.googleapis.com"
 
 
+def test_document_parser_disabled_does_not_require_base_url(tmp_path) -> None:
+    config = AppConfig(
+        config_dir=tmp_path,
+        settings={"timeout": {"document_parser_seconds": 30}},
+        models={
+            "document_parser": {
+                "enabled": False,
+                "provider": "unknown-provider",
+            },
+        },
+        prompts={},
+    )
+
+    client = DocumentParserClient(config)
+
+    assert client.enabled is False
+    assert client.base_url == ""
+
+
 @pytest.mark.asyncio
 async def test_document_parser_uses_direct_resumable_upload(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("MODEL_GATEWAY_MODE", "live")

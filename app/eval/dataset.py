@@ -50,12 +50,25 @@ def _resolve_within(base_dir: Path, raw_path: str, label: str) -> Path:
     if path.is_absolute():
         target = path.resolve()
     else:
-        target = (base_dir / raw_path).resolve()
+        base_candidate = (base_dir / raw_path).resolve()
+        root_candidate = (ROOT / raw_path).resolve()
+        try:
+            root_candidate.relative_to(base)
+            target = root_candidate
+        except ValueError:
+            target = base_candidate
     try:
         target.relative_to(base)
     except ValueError as exc:
         raise ValueError(f"{label} path must be inside {base}") from exc
     return target
+
+
+def _display_path(path: Path, base_dir: Path) -> str:
+    try:
+        return str(path.relative_to(ROOT))
+    except ValueError:
+        return str(path.relative_to(base_dir.resolve()))
 
 
 def resolve_eval_dataset_path(raw_path: str) -> Path:
@@ -71,6 +84,7 @@ def resolve_benchmark_report_path(raw_path: str) -> Path:
 
 
 def summarize_jsonl_dataset(path: Path) -> dict[str, Any]:
+    dataset_dir = get_eval_dataset_dir().resolve()
     records = load_jsonl_dataset(str(path))
     sample_queries = [
         str(record.get("query", "")).strip()
@@ -79,7 +93,7 @@ def summarize_jsonl_dataset(path: Path) -> dict[str, Any]:
     ]
     return {
         "name": path.name,
-        "path": str(path.relative_to(ROOT)),
+        "path": _display_path(path.resolve(), dataset_dir),
         "records": len(records),
         "sample_queries": sample_queries,
         "updated_at": int(path.stat().st_mtime),
@@ -95,12 +109,13 @@ def list_eval_datasets() -> list[dict[str, Any]]:
     ]
 
 
-def summarize_eval_report(path: Path) -> dict[str, Any]:
+def summarize_eval_report(path: Path, base_dir: Path | None = None) -> dict[str, Any]:
+    report_dir = (base_dir or get_eval_report_dir()).resolve()
     payload = json.loads(path.read_text(encoding="utf-8"))
     aggregate = payload.get("aggregate", {}) if isinstance(payload, dict) else {}
     return {
         "name": path.name,
-        "path": str(path.relative_to(ROOT)),
+        "path": _display_path(path.resolve(), report_dir),
         "records": int(payload.get("records", 0)) if isinstance(payload, dict) else 0,
         "status": str(payload.get("status", "unknown"))
         if isinstance(payload, dict)
@@ -126,7 +141,8 @@ def list_benchmark_reports() -> list[dict[str, Any]]:
     if not report_dir.exists():
         return []
     reports = [
-        summarize_eval_report(path) for path in sorted(report_dir.glob("*.json"))
+        summarize_eval_report(path, base_dir=report_dir)
+        for path in sorted(report_dir.glob("*.json"))
     ]
     reports.sort(key=lambda item: int(item["updated_at"]), reverse=True)
     return reports

@@ -20,6 +20,7 @@ class DiagnosisResponse(BaseModel):
 
 class TraceDiagnosisRequest(BaseModel):
     trace_id: str
+    session_id: str | None = None
     include_ai: bool = False
 
 
