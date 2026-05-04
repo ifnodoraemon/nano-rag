@@ -146,6 +146,8 @@ services:
     container_name: nano-rag-frontend
     ports:
       - "3000:80"
+    environment:
+      RAG_PROXY_API_KEY: ${RAG_PROXY_API_KEY:-nano-rag-local}
     depends_on:
       app:
         condition: service_healthy

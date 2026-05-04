@@ -31,6 +31,10 @@ class RerankClient(GatewayClient):
             or ""
         )
 
+    async def close(self) -> None:
+        if hasattr(self, "provider_client"):
+            await super().close()
+
     async def rerank(
         self, query: str, documents: list[str], top_k: int
     ) -> list[RerankResult]:

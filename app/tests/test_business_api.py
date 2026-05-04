@@ -219,10 +219,16 @@ async def test_business_ingest_wraps_ingest_response() -> None:
 async def test_business_ingest_upload_wraps_ingest_response(tmp_path) -> None:
     captured: dict[str, object] = {}
 
-    async def fake_ingest_run(path, kb_id="default", source_path_overrides=None):  # noqa: ANN001
+    async def fake_ingest_run(  # noqa: ANN001
+        path,
+        kb_id="default",
+        source_path_overrides=None,
+        rollback_media_path_overrides=None,
+    ):
         captured["path"] = path
         captured["kb_id"] = kb_id
         captured["source_path_overrides"] = source_path_overrides
+        captured["rollback_media_path_overrides"] = rollback_media_path_overrides
         assert tmp_path.as_posix() in path
         return SimpleNamespace(documents=1, chunks=2)
 
@@ -247,6 +253,7 @@ async def test_business_ingest_upload_wraps_ingest_response(tmp_path) -> None:
     source_path_overrides = captured["source_path_overrides"]
     assert isinstance(source_path_overrides, dict)
     assert next(iter(source_path_overrides.values())) == "uploads/default/policy.md"
+    assert captured["rollback_media_path_overrides"] == {}
     assert (tmp_path / "default" / "policy.md").read_bytes() == b"# Policy\nBody"
 
 
@@ -286,7 +293,15 @@ async def test_business_ingest_upload_restores_previous_file_when_ingest_fails(
     durable_path.parent.mkdir(parents=True)
     durable_path.write_bytes(b"old policy")
 
+    captured: dict[str, object] = {}
+
     async def fake_ingest_run(*args, **kwargs):  # noqa: ANN002, ANN003
+        captured.update(kwargs)
+        overrides = kwargs["rollback_media_path_overrides"]
+        assert isinstance(overrides, dict)
+        backup_path = Path(overrides[str(durable_path)])
+        assert durable_path.read_bytes() == b"new policy"
+        assert backup_path.read_bytes() == b"old policy"
         raise RuntimeError("indexing failed")
 
     container = SimpleNamespace(
@@ -304,6 +319,10 @@ async def test_business_ingest_upload_restores_previous_file_when_ingest_fails(
         )
 
     assert durable_path.read_bytes() == b"old policy"
+    overrides = captured["rollback_media_path_overrides"]
+    assert isinstance(overrides, dict)
+    assert set(overrides) == {str(durable_path)}
+    assert Path(next(iter(overrides.values()))).exists() is False
 
 
 @pytest.mark.asyncio

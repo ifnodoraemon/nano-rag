@@ -128,6 +128,7 @@ class IngestionPipeline:
         path: str,
         kb_id: str = "default",
         source_path_overrides: dict[str, str] | None = None,
+        rollback_media_path_overrides: dict[str, str] | None = None,
     ) -> IngestResponse:
         with self.tracing_manager.span(
             "ingestion.run",
@@ -187,7 +188,9 @@ class IngestionPipeline:
                         wiki_updated = True
             except Exception:
                 await self._rollback_applied_documents(
-                    applied_snapshots, kb_id=kb_id
+                    applied_snapshots,
+                    kb_id=kb_id,
+                    media_path_overrides=rollback_media_path_overrides,
                 )
                 raise
 
@@ -371,7 +374,10 @@ class IngestionPipeline:
         )
 
     def _chunks_to_embed_inputs(
-        self, chunks: list[Chunk], file_path: Path | None = None
+        self,
+        chunks: list[Chunk],
+        file_path: Path | None = None,
+        media_path_overrides: dict[str, str] | None = None,
     ) -> list[list[EmbedItem]]:
         inputs: list[list[EmbedItem]] = []
         for chunk in chunks:
@@ -383,7 +389,12 @@ class IngestionPipeline:
                     else None
                 )
                 if source is None and chunk.media_uri:
-                    candidate = Path(chunk.media_uri)
+                    override = (
+                        media_path_overrides.get(chunk.media_uri)
+                        if media_path_overrides
+                        else None
+                    )
+                    candidate = Path(override or chunk.media_uri)
                     source = candidate if candidate.exists() else None
                 if source is None:
                     raise ModelGatewayError(
@@ -407,6 +418,7 @@ class IngestionPipeline:
         self,
         applied_snapshots: list[tuple[PreparedDocument, ParsedArtifactSnapshot | None]],
         kb_id: str,
+        media_path_overrides: dict[str, str] | None = None,
     ) -> None:
         wiki_needs_refresh = False
         for prepared, snapshot in reversed(applied_snapshots):
@@ -419,7 +431,10 @@ class IngestionPipeline:
                 if snapshot is None:
                     continue
                 embeddings = await self._embed_items(
-                    self._chunks_to_embed_inputs(snapshot.chunks)
+                    self._chunks_to_embed_inputs(
+                        snapshot.chunks,
+                        media_path_overrides=media_path_overrides,
+                    )
                 )
                 if len(embeddings) != len(snapshot.chunks):
                     raise ModelGatewayError(

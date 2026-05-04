@@ -33,6 +33,9 @@ class Citation(BaseModel):
     score: float | None = None
     evidence_role: str | None = None
     wiki_status: str | None = None
+    modality: str | None = None
+    media_uri: str | None = None
+    mime_type: str | None = None
     span_text: str | None = None
     span_start: int | None = None
     span_end: int | None = None

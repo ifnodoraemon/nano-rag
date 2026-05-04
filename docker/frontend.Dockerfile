@@ -9,6 +9,6 @@ RUN npm run build
 FROM nginx:1.27-alpine
 
 COPY --from=frontend-builder /frontend/dist /usr/share/nginx/html
-COPY docker/frontend/nginx.conf /etc/nginx/conf.d/default.conf
+COPY docker/frontend/nginx.conf /etc/nginx/templates/default.conf.template
 
 EXPOSE 80

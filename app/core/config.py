@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import re
 import base64
+import inspect
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -342,7 +343,9 @@ class AppContainer:
         await self.generation_client.close()
         await self.document_parser.close()
         if hasattr(self.repository, "close"):
-            await self.repository.close()
+            result = self.repository.close()
+            if inspect.isawaitable(result):
+                await result
 
     @classmethod
     def from_env(cls) -> "AppContainer":

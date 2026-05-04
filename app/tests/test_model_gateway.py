@@ -1,6 +1,7 @@
 import pytest
 
 from app.core.config import AppConfig
+from app.core.config import AppContainer
 from app.core.exceptions import ConfigurationError
 from app.model_client.base import GatewayClient
 from app.model_client.rerank import RerankClient
@@ -136,3 +137,56 @@ async def test_rerank_client_uses_configured_qwen_endpoint(monkeypatch) -> None:
         "documents": ["规则 A", "规则 B"],
         "top_n": 2,
     }
+
+
+@pytest.mark.asyncio
+async def test_disabled_rerank_client_close_is_noop(monkeypatch) -> None:
+    monkeypatch.setenv("DISABLE_RERANK", "1")
+    config = AppConfig(
+        config_dir=None,  # type: ignore[arg-type]
+        settings={"timeout": {"rerank_seconds": 5}},
+        models={
+            "model_gateway": {"base_url": "", "api_key": ""},
+            "rerank": {"default_alias": "qwen3-rerank"},
+        },
+        prompts={},
+    )
+
+    client = RerankClient(config)
+
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_app_container_close_accepts_sync_repository_close() -> None:
+    closed: list[str] = []
+
+    class AsyncClosable:
+        async def close(self) -> None:
+            closed.append("async")
+
+    class SyncRepository:
+        def close(self) -> None:
+            closed.append("repository")
+
+    container = AppContainer(
+        config=None,  # type: ignore[arg-type]
+        repository=SyncRepository(),  # type: ignore[arg-type]
+        embedding_client=AsyncClosable(),  # type: ignore[arg-type]
+        rerank_client=AsyncClosable(),  # type: ignore[arg-type]
+        generation_client=AsyncClosable(),  # type: ignore[arg-type]
+        document_parser=AsyncClosable(),  # type: ignore[arg-type]
+        ingestion_pipeline=None,  # type: ignore[arg-type]
+        retrieval_pipeline=None,  # type: ignore[arg-type]
+        chat_pipeline=None,  # type: ignore[arg-type]
+        ragas_runner=None,
+        trace_store=None,  # type: ignore[arg-type]
+        tracing_manager=None,  # type: ignore[arg-type]
+        diagnosis_service=None,
+        feedback_store=None,  # type: ignore[arg-type]
+        knowledge_base_catalog=None,  # type: ignore[arg-type]
+    )
+
+    await container.close()
+
+    assert closed == ["async", "async", "async", "async", "repository"]

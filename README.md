@@ -17,7 +17,7 @@ docker compose -f docker/docker-compose.yml up -d --build
 - 后端：`http://127.0.0.1:8000`
 - Milvus：`http://127.0.0.1:19530`
 
-浏览器端不需要配置 API key。前端 nginx 会为代理到后端的请求注入本地业务 key：`X-API-Key: nano-rag-local`。
+浏览器端不需要配置 API key。前端 nginx 会为代理到后端的请求注入业务 key；本地 Docker 默认使用 `RAG_PROXY_API_KEY=nano-rag-local`，需要和后端 `RAG_API_KEYS` 中的一个值保持一致。
 
 启动后优先检查真实运行状态：
 

@@ -17,6 +17,30 @@ def test_answer_formatter_adds_citation_if_missing() -> None:
     assert response.citations[0].span_end == 3
 
 
+def test_answer_formatter_preserves_multimodal_citation_fields() -> None:
+    formatter = AnswerFormatter()
+    response = formatter.format(
+        answer="The image evidence shows the logo. [C1]",
+        contexts=[
+            {
+                "chunk_id": "c-image",
+                "citation_label": "C1",
+                "source": "uploads/default/logo.png",
+                "score": 0.92,
+                "text": "",
+                "modality": "image",
+                "media_uri": "/workspace/data/uploads/default/logo.png",
+                "mime_type": "image/png",
+            }
+        ],
+        trace_id="t1",
+    )
+
+    assert response.citations[0].modality == "image"
+    assert response.citations[0].media_uri == "/workspace/data/uploads/default/logo.png"
+    assert response.citations[0].mime_type == "image/png"
+
+
 def test_answer_formatter_prioritizes_primary_citations_and_reorders_contexts() -> None:
     formatter = AnswerFormatter()
     response = formatter.format(

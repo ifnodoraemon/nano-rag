@@ -106,6 +106,15 @@ class AnswerFormatter:
                     wiki_status=str(context.get("wiki_status"))
                     if context.get("wiki_status") is not None
                     else None,
+                    modality=str(context.get("modality"))
+                    if context.get("modality") is not None
+                    else None,
+                    media_uri=str(context.get("media_uri"))
+                    if context.get("media_uri") is not None
+                    else None,
+                    mime_type=str(context.get("mime_type"))
+                    if context.get("mime_type") is not None
+                    else None,
                     span_text=span_text,
                     span_start=span_start,
                     span_end=span_end,

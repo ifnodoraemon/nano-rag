@@ -402,6 +402,7 @@ async def rag_ingest_upload(
     durable_uploads: list[tuple[Path, Path]] = []
     staged_uploads: list[tuple[Path, Path]] = []
     finalized_uploads: list[tuple[Path, Path | None]] = []
+    rollback_media_path_overrides: dict[str, str] = {}
     seen_upload_names: set[str] = set()
     seen_source_paths: set[str] = set()
     try:
@@ -463,6 +464,7 @@ async def rag_ingest_upload(
                         f".{durable_path.name}.{uuid4().hex[:8]}.bak"
                     )
                     durable_path.replace(backup_path)
+                    rollback_media_path_overrides[str(durable_path)] = str(backup_path)
                 try:
                     pending_path.replace(durable_path)
                 except Exception:
@@ -481,6 +483,7 @@ async def rag_ingest_upload(
                 str(upload_batch_dir),
                 kb_id=kb_id,
                 source_path_overrides=source_path_overrides,
+                rollback_media_path_overrides=rollback_media_path_overrides,
             )
         except Exception:
             for durable_path, backup_path in reversed(finalized_uploads):

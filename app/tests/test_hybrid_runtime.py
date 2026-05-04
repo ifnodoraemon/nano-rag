@@ -423,6 +423,45 @@ async def test_uploaded_media_chunks_point_to_persistent_upload_uri(
     assert chunk.media_uri == str(upload_dir / "default" / "__shared__" / "logo.png")
 
 
+def test_media_reembed_uses_rollback_override_path(tmp_path) -> None:
+    durable_path = tmp_path / "uploads" / "default" / "logo.png"
+    backup_path = durable_path.with_name(".logo.png.old.bak")
+    durable_path.parent.mkdir(parents=True)
+    durable_path.write_bytes(b"new image")
+    backup_path.write_bytes(b"old image")
+    config = AppConfig(
+        config_dir=tmp_path,
+        settings={"chunk": {"size": 200, "overlap": 20}},
+        models={"model_gateway": {"base_url": "", "api_key": ""}},
+        prompts={},
+    )
+    pipeline = IngestionPipeline(
+        config=config,
+        repository=InMemoryVectorRepository(),
+        embedding_client=FakeEmbeddingClient(),
+        tracing_manager=TracingManager("test-service", ""),
+    )
+    chunk = Chunk(
+        chunk_id="c-image",
+        doc_id="doc-image",
+        chunk_index=0,
+        text="",
+        source_path="uploads/default/logo.png",
+        title="logo",
+        metadata={"kb_id": "default"},
+        modality="image",
+        media_uri=str(durable_path),
+        mime_type="image/png",
+    )
+
+    inputs = pipeline._chunks_to_embed_inputs(  # noqa: SLF001
+        [chunk],
+        media_path_overrides={str(durable_path): str(backup_path)},
+    )
+
+    assert inputs[0][0].data == b"old image"
+
+
 @pytest.mark.asyncio
 async def test_ingestion_pipeline_does_not_write_parsed_artifact_when_embeddings_fail(
     monkeypatch, tmp_path

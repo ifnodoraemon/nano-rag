@@ -110,10 +110,3 @@ def discover_files(root: str) -> list[Path]:
         and path.suffix.lower() in SUPPORTED_EXTENSIONS
         and _is_path_allowed(path.resolve())
     )
-    if base.is_file():
-        return [base]
-    return sorted(
-        path
-        for path in base.rglob("*")
-        if path.is_file() and path.suffix.lower() in SUPPORTED_EXTENSIONS
-    )
