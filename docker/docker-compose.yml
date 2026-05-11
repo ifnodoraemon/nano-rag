@@ -94,7 +94,10 @@ services:
         "app.ingestion.tasks:celery_app",
         "worker",
         "--loglevel=INFO",
-        "--concurrency=${RAG_WORKER_CONCURRENCY:-8}",
+        "--pool=prefork",
+        "--concurrency=${RAG_WORKER_CONCURRENCY:-32}",
+        "--max-tasks-per-child=${RAG_WORKER_MAX_TASKS_PER_CHILD:-20}",
+        "--prefetch-multiplier=${RAG_WORKER_PREFETCH_MULTIPLIER:-1}",
         "-Q",
         "ingest",
       ]

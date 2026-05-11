@@ -20,7 +20,12 @@ def _build_celery_app():
     backend_url = os.getenv("RAG_RESULT_BACKEND", broker_url)
     app = Celery("nano_rag", broker=broker_url, backend=backend_url)
     app.conf.task_default_queue = "ingest"
-    app.conf.worker_prefetch_multiplier = 1
+    app.conf.worker_prefetch_multiplier = int(
+        os.getenv("RAG_WORKER_PREFETCH_MULTIPLIER", "1")
+    )
+    app.conf.worker_max_tasks_per_child = int(
+        os.getenv("RAG_WORKER_MAX_TASKS_PER_CHILD", "20")
+    )
     app.conf.task_acks_late = True
     return app
 
