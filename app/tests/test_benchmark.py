@@ -1,4 +1,3 @@
-from types import SimpleNamespace
 
 from app.benchmark.service import build_benchmark_report
 from app.core.tracing import TraceStore

@@ -1,9 +1,7 @@
-import os
 
 import pytest
 
 from app.retrieval.hybrid_retriever import HybridRetriever
-from app.retrieval.bm25 import BM25Index
 from app.schemas.chunk import Chunk
 from app.schemas.document import Document
 from app.vectorstore.repository import InMemoryVectorRepository

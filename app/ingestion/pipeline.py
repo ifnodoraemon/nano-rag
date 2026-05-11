@@ -10,6 +10,9 @@ from typing import TYPE_CHECKING
 from app.ingestion.loader import discover_files
 from app.ingestion.metadata import extract_document_metadata
 from app.ingestion.graph_extractor import GraphExtractor
+from app.vectorstore.repository import VectorRepository
+from app.wiki.compiler import WikiCompiler
+from app.wiki.search import WikiSearcher
 from app.ingestion.structured_parser import StructuredDocumentParser
 from app.core.exceptions import ModelGatewayError, ParsingError
 from app.model_client.embeddings import EmbeddingClient
@@ -68,9 +71,6 @@ def _mime_type_for_suffix(suffix: str) -> str:
         raise ParsingError(f"mime type is not configured for media suffix {suffix}")
     return mime_type
 
-from app.vectorstore.repository import VectorRepository
-from app.wiki.compiler import WikiCompiler
-from app.wiki.search import WikiSearcher
 
 if TYPE_CHECKING:
     from app.core.config import AppConfig
