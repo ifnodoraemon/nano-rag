@@ -123,4 +123,5 @@ async def test_agent_runs_corrective_retrieval_and_records_state() -> None:
     assert record is not None
     assert record.contexts[0]["citation_label"] == "C1"
     assert record.retrieval_params["agent"]["retrieval_queries"] == retrieval.queries
+    assert "graph_expanded_node_ids" in record.retrieval_params["agent"]
     assert record.retrieval_params["agent"]["verification"]["sufficient"] is True

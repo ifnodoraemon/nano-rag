@@ -135,6 +135,11 @@ class PromptBuilder:
             for item in agent_state.get("retrieval_queries", [])
             if str(item).strip()
         ]
+        graph_expanded = [
+            str(item)
+            for item in agent_state.get("graph_expanded_node_ids", [])
+            if str(item).strip()
+        ]
         missing_terms = [
             str(item)
             for item in verification_text.get("missing_terms", [])
@@ -144,6 +149,7 @@ class PromptBuilder:
             "Agent evidence check:\n"
             f"- subqueries: {'; '.join(subqueries) or 'n/a'}\n"
             f"- retrieval_queries: {'; '.join(retrieval_queries) or 'n/a'}\n"
+            f"- graph_expanded_node_ids: {', '.join(graph_expanded) or 'none'}\n"
             f"- evidence_sufficient: {verification_text.get('sufficient')}\n"
             f"- missing_terms: {', '.join(missing_terms) or 'none'}\n"
             "如果 evidence_sufficient 为 false，最终答案必须明确说明现有证据不足，并列出还缺少哪些信息。\n\n"

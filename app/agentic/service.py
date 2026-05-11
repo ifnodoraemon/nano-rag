@@ -69,12 +69,14 @@ class AgenticReasoningService:
             contexts, trace = await self._retrieve(payload, payload.query)
             trace_id = str(trace["trace_id"])
             retrieval_queries = [payload.query]
+            graph_expanded_contexts = self.graph_expander.expand(
+                contexts,
+                kb_id=payload.kb_id or "default",
+            )
+            graph_expanded_node_ids = self._node_ids(graph_expanded_contexts)
             contexts = self._merge_contexts(
                 contexts,
-                self.graph_expander.expand(
-                    contexts,
-                    kb_id=payload.kb_id or "default",
-                ),
+                graph_expanded_contexts,
             )
             check = await self._verify(payload.query, subqueries, contexts)
 
@@ -85,19 +87,29 @@ class AgenticReasoningService:
                     continue
                 more_contexts, _ = await self._retrieve(payload, query)
                 retrieval_queries.append(query)
+                more_graph_contexts = self.graph_expander.expand(
+                    more_contexts,
+                    kb_id=payload.kb_id or "default",
+                )
+                graph_expanded_node_ids.extend(self._node_ids(more_graph_contexts))
                 contexts = self._merge_contexts(
                     contexts,
                     more_contexts,
-                    self.graph_expander.expand(
-                        more_contexts,
-                        kb_id=payload.kb_id or "default",
-                    ),
+                    more_graph_contexts,
                 )
                 check = await self._verify(payload.query, subqueries, contexts)
 
             agent_state = {
+                "workflow_nodes": [
+                    "intent_decomposition",
+                    "initial_recall",
+                    "graph_expansion",
+                    "verification_loop",
+                    "answer_synthesis",
+                ],
                 "subqueries": subqueries,
                 "retrieval_queries": retrieval_queries,
+                "graph_expanded_node_ids": self._dedupe(graph_expanded_node_ids),
                 "verification": check.as_dict(),
             }
             messages = self.prompt_builder.build_messages(
@@ -253,6 +265,13 @@ class AgenticReasoningService:
         for index, context in enumerate(merged, start=1):
             context["citation_label"] = f"C{index}"
         return merged
+
+    def _node_ids(self, contexts: list[dict[str, object]]) -> list[str]:
+        return [
+            str(context.get("node_id") or context.get("chunk_id"))
+            for context in contexts
+            if context.get("node_id") or context.get("chunk_id")
+        ]
 
     def _has_conflicts(self, contexts: list[dict[str, object]]) -> bool:
         return any(
