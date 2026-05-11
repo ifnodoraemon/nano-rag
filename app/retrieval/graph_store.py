@@ -61,6 +61,7 @@ class Neo4jGraphStore:
         if not node_ids:
             return []
         neighbors: list[tuple[str, str]] = []
+        entity_neighbors: list[tuple[str, str]] = []
         with self.driver.session() as session:
             result = session.run(
                 """
@@ -98,7 +99,35 @@ class Neo4jGraphStore:
                     target_id = item.get("id")
                     relation = item.get("relation")
                     if target_id and relation:
-                        neighbors.append((str(target_id), str(relation)))
+                        target = str(target_id)
+                        if target.startswith("entity:"):
+                            entity_neighbors.append((target, str(relation)))
+                        else:
+                            neighbors.append((target, str(relation)))
+            if entity_neighbors:
+                entity_ids = [entity_id for entity_id, _ in entity_neighbors]
+                relation_by_entity = {
+                    entity_id: relation for entity_id, relation in entity_neighbors
+                }
+                entity_result = session.run(
+                    """
+                    MATCH (e:Entity)<-[:MENTIONS]-(n:DocNode)
+                    WHERE e.entity_id IN $entity_ids
+                      AND n.kb_id = $kb_id
+                      AND NOT n.node_id IN $seed_node_ids
+                    RETURN e.entity_id AS entity_id, collect(DISTINCT n.node_id) AS node_ids
+                    """,
+                    entity_ids=entity_ids,
+                    kb_id=kb_id,
+                    seed_node_ids=list(node_ids),
+                )
+                for row in entity_result:
+                    relation = relation_by_entity.get(str(row.get("entity_id")), "RELATED")
+                    neighbors.extend(
+                        (node_id, relation)
+                        for node_id in row.get("node_ids", [])
+                        if node_id
+                    )
         return self._dedupe_neighbors(neighbors, limit=max_neighbors)
 
     def stats(self) -> dict[str, object]:

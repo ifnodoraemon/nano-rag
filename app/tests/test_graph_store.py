@@ -31,3 +31,21 @@ def test_neo4j_graph_store_delete_query_handles_documents_without_nodes() -> Non
     statement, params = tx.calls[0]
     assert "FOREACH" in statement
     assert params == {"doc_id": "doc-a", "kb_id": "default"}
+
+
+def test_neo4j_graph_store_neighbor_dedupe_keeps_doc_node_ids_only() -> None:
+    store = object.__new__(Neo4jGraphStore)
+
+    neighbors = store._dedupe_neighbors(  # noqa: SLF001
+        [
+            ("doc-b:node:1", "SHARES_ENTITY"),
+            ("doc-b:node:1", "ABOUT"),
+            ("doc-c:node:1", "ABOUT"),
+        ],
+        limit=5,
+    )
+
+    assert neighbors == [
+        ("doc-b:node:1", "SHARES_ENTITY"),
+        ("doc-c:node:1", "ABOUT"),
+    ]
