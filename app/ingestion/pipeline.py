@@ -26,7 +26,7 @@ from app.retrieval.hybrid_retriever import HybridRetriever
 from app.retrieval.graph_store import GraphStore
 from app.schemas.chunk import Chunk
 from app.schemas.document import Document, IngestResponse
-from app.schemas.structured import NodeType, StructuredDocument
+from app.schemas.structured import KnowledgeGraph, NodeType, StructuredDocument
 
 IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp"}
 AUDIO_SUFFIXES = {".mp3", ".wav", ".m4a", ".aac", ".ogg", ".flac"}
@@ -196,7 +196,16 @@ class IngestionPipeline:
             kb_id=kb_id,
             source_path=source_path,
         )
-        structured_document.graph = await self.graph_extractor.extract(structured_document)
+        try:
+            structured_document.graph = await self.graph_extractor.extract(structured_document)
+            structured_document.metadata["graph_extraction"] = {"status": "ok"}
+        except Exception as exc:
+            structured_document.graph = KnowledgeGraph()
+            structured_document.metadata["graph_extraction"] = {
+                "status": "failed",
+                "error_type": exc.__class__.__name__,
+                "error": str(exc)[:500],
+            }
         text = self._structured_document_text(structured_document)
         if not text:
             raise ParsingError(

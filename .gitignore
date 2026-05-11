@@ -14,6 +14,7 @@ data/samples/eval_report_api.json
 data/reports/traces/*
 data/reports/feedback/*
 data/reports/knowledge_bases/*
+data/reports/pressure/*
 data/reports/eval/*.json
 data/reports/eval/benchmarks/*.json
 !data/raw/.gitkeep
@@ -21,5 +22,6 @@ data/reports/eval/benchmarks/*.json
 !data/parsed/.gitkeep
 !data/reports/traces/.gitkeep
 !data/reports/feedback/.gitkeep
+!data/reports/pressure/.gitkeep
 !data/reports/eval/.gitkeep
 !data/reports/eval/benchmarks/.gitkeep

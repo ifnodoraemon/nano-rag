@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 
-from app.core.exceptions import ParsingError
+from app.core.exceptions import ModelGatewayError, ParsingError
 from app.ingestion.parser_docling import parse_document
 from app.ingestion.pipeline import IngestionPipeline
 from app.model_client.document_parser import DocumentParserClient
@@ -44,6 +44,11 @@ class FakeGenerationClient:
         return {"content": '{"entities": [], "relations": []}'}
 
 
+class FailingGenerationClient:
+    async def generate(self, messages):  # noqa: ANN001, ARG002
+        raise ModelGatewayError("graph extraction timeout")
+
+
 @pytest.mark.asyncio
 async def test_parse_document_uses_model_parser_for_pdf(tmp_path) -> None:
     pdf_path = tmp_path / "notice.pdf"
@@ -58,6 +63,7 @@ async def test_parse_document_uses_model_parser_for_pdf(tmp_path) -> None:
 async def test_ingestion_pipeline_rejects_empty_parsed_content(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("RAG_INGEST_ALLOWED_DIRS", str(tmp_path))
     monkeypatch.setenv("PARSED_OUTPUT_DIR", str(tmp_path / "parsed"))
+    monkeypatch.setattr("app.ingestion.loader._cached_allowed_dirs", None)
 
     pdf_path = tmp_path / "notice.pdf"
     pdf_path.write_bytes(b"%PDF-1.4 fake")
@@ -81,6 +87,38 @@ async def test_ingestion_pipeline_rejects_empty_parsed_content(monkeypatch, tmp_
         await pipeline.run(str(pdf_path), kb_id="default")
 
     assert "returned empty content" in str(exc_info.value)
+
+
+@pytest.mark.asyncio
+async def test_ingestion_pipeline_keeps_document_when_graph_extraction_fails(
+    monkeypatch, tmp_path
+) -> None:
+    monkeypatch.setenv("RAG_INGEST_ALLOWED_DIRS", str(tmp_path))
+    monkeypatch.setenv("PARSED_OUTPUT_DIR", str(tmp_path / "parsed"))
+    monkeypatch.setattr("app.ingestion.loader._cached_allowed_dirs", None)
+    doc_path = tmp_path / "matrix.md"
+    doc_path.write_text("# Matrix\n\n| ID | Value |\n| --- | --- |\n| A-02 | pass |", encoding="utf-8")
+
+    config = AppConfig(
+        config_dir=tmp_path,
+        settings={"timeout": {"document_parser_seconds": 30}},
+        models={"model_gateway": {"base_url": "", "api_key": ""}},
+        prompts={},
+    )
+    repository = InMemoryVectorRepository()
+    pipeline = IngestionPipeline(
+        config=config,
+        repository=repository,
+        embedding_client=FakeEmbeddingClient(),
+        generation_client=FailingGenerationClient(),
+        tracing_manager=TracingManager("test-service", ""),
+    )
+
+    response = await pipeline.run(str(doc_path), kb_id="default")
+
+    assert response.documents == 1
+    assert response.chunks == 1
+    assert repository.stats()["chunks"] == 1
 
 
 def test_document_parser_base_url_strips_openai_suffix(tmp_path) -> None:

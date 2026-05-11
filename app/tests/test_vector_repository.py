@@ -334,3 +334,69 @@ def test_milvus_repository_search_specifies_dense_vector_field(monkeypatch) -> N
     assert hits[0].chunk.chunk_id == "doc-1:0"
     assert fake_client.search_kwargs["anns_field"] == "vector"
     assert fake_client.search_kwargs["filter"] == 'kb_id == "default"'
+
+
+def test_milvus_repository_batches_upserts(monkeypatch) -> None:
+    import types
+
+    fake_pymilvus = types.ModuleType("pymilvus")
+    fake_pymilvus.DataType = type(
+        "DataType",
+        (),
+        {
+            "VARCHAR": "VARCHAR",
+            "FLOAT_VECTOR": "FLOAT_VECTOR",
+            "SPARSE_FLOAT_VECTOR": "SPARSE_FLOAT_VECTOR",
+        },
+    )
+    monkeypatch.setitem(__import__("sys").modules, "pymilvus", fake_pymilvus)
+    monkeypatch.setenv("MILVUS_UPSERT_BATCH_SIZE", "2")
+
+    class FakeMilvusClient:
+        def __init__(self) -> None:
+            self.upsert_batches = []
+
+        def has_collection(self, collection_name):  # noqa: ANN001, ARG002
+            return True
+
+        def describe_collection(self, collection_name):  # noqa: ANN001, ARG002
+            return {
+                "fields": [
+                    {"name": "vector", "params": {"dim": 3}},
+                    {"name": "text"},
+                    {"name": "sparse"},
+                ]
+            }
+
+        def upsert(self, collection_name, data):  # noqa: ANN001, ARG002
+            self.upsert_batches.append(data)
+
+    fake_client = FakeMilvusClient()
+    monkeypatch.setattr("app.vectorstore.repository.create_milvus_client", lambda: fake_client)
+    repository = MilvusVectorRepository(dimension=3)
+    chunks = [
+        Chunk(
+            chunk_id=f"doc-1:{index}",
+            doc_id="doc-1",
+            chunk_index=index,
+            text=f"text {index}",
+            source_path="data/raw/a.md",
+            title="A",
+            metadata={"kb_id": "default"},
+        )
+        for index in range(5)
+    ]
+
+    repository.upsert(
+        Document(
+            doc_id="doc-1",
+            source_path="data/raw/a.md",
+            title="A",
+            content="text",
+            metadata={"kb_id": "default"},
+        ),
+        chunks,
+        [[0.1, 0.2, 0.3] for _ in chunks],
+    )
+
+    assert [len(batch) for batch in fake_client.upsert_batches] == [2, 2, 1]

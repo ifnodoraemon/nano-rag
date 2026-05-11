@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import os
 import re
 import threading
 from abc import ABC, abstractmethod
@@ -24,6 +25,14 @@ def _escape_milvus_string(value: str) -> str:
     escaped = escaped.replace("'", "\\'")
     escaped = re.sub(r"[\x00-\x1f]", lambda m: f"\\x{ord(m.group()):02x}", escaped)
     return escaped
+
+
+def _milvus_upsert_batch_size() -> int:
+    raw = os.getenv("MILVUS_UPSERT_BATCH_SIZE", "64")
+    try:
+        return max(1, int(raw))
+    except ValueError:
+        return 64
 
 
 @dataclass
@@ -128,6 +137,7 @@ class MilvusVectorRepository(VectorRepository):
     def __init__(self, dimension: int = 1536) -> None:
         self.client = create_milvus_client()
         self.dimension = dimension
+        self.upsert_batch_size = _milvus_upsert_batch_size()
         self._ensure_collection()
 
     @classmethod
@@ -238,7 +248,11 @@ class MilvusVectorRepository(VectorRepository):
                     "mime_type": chunk.mime_type or "",
                 }
             )
-        self.client.upsert(collection_name=CHUNKS_COLLECTION, data=rows)
+        for start in range(0, len(rows), self.upsert_batch_size):
+            self.client.upsert(
+                collection_name=CHUNKS_COLLECTION,
+                data=rows[start : start + self.upsert_batch_size],
+            )
 
     def delete_by_source(
         self, source_path: str, kb_id: str
