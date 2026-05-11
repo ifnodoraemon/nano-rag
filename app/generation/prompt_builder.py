@@ -26,7 +26,10 @@ class PromptBuilder:
         )
 
     def build_messages(
-        self, query: str, contexts: list[dict[str, object]]
+        self,
+        query: str,
+        contexts: list[dict[str, object]],
+        agent_state: dict[str, object] | None = None,
     ) -> list[dict[str, Any]]:
         conflict_notice = ""
         if any(item.get("wiki_status") == "conflicting" for item in contexts):
@@ -38,6 +41,7 @@ class PromptBuilder:
         instruction = (
             f"Question: {query}\n\n"
             f"{conflict_notice}"
+            f"{self._render_agent_state(agent_state)}"
             f"Available context:\n{context_text}\n\n"
             "只根据上面的上下文回答，并使用提供的标签引用证据，例如 [C1]。\n"
             "优先引用同时包含问题核心实体和答案值的最小证据。不要引用只包含单位、表头、残缺行或泛化说明的片段，除非它们是唯一可用证据。\n"
@@ -115,6 +119,35 @@ class PromptBuilder:
             media_uri,
         )
         return None
+
+    def _render_agent_state(self, agent_state: dict[str, object] | None) -> str:
+        if not agent_state:
+            return ""
+        verification = agent_state.get("verification")
+        verification_text = verification if isinstance(verification, dict) else {}
+        subqueries = [
+            str(item)
+            for item in agent_state.get("subqueries", [])
+            if str(item).strip()
+        ]
+        retrieval_queries = [
+            str(item)
+            for item in agent_state.get("retrieval_queries", [])
+            if str(item).strip()
+        ]
+        missing_terms = [
+            str(item)
+            for item in verification_text.get("missing_terms", [])
+            if str(item).strip()
+        ]
+        return (
+            "Agent evidence check:\n"
+            f"- subqueries: {'; '.join(subqueries) or 'n/a'}\n"
+            f"- retrieval_queries: {'; '.join(retrieval_queries) or 'n/a'}\n"
+            f"- evidence_sufficient: {verification_text.get('sufficient')}\n"
+            f"- missing_terms: {', '.join(missing_terms) or 'none'}\n"
+            "如果 evidence_sufficient 为 false，最终答案必须明确说明现有证据不足，并列出还缺少哪些信息。\n\n"
+        )
 
     def _render_evidence_sections(self, contexts: list[dict[str, object]]) -> str:
         role_titles = {

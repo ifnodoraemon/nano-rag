@@ -12,9 +12,9 @@ import yaml
 
 from app.core.exceptions import ConfigurationError
 from app.core.tracing import FeedbackStore, TraceStore, TracingManager
+from app.agentic import AgenticReasoningService
 from app.generation.answer_formatter import AnswerFormatter
 from app.generation.prompt_builder import PromptBuilder
-from app.generation.service import GenerationService
 from app.ingestion.pipeline import IngestionPipeline
 from app.ingestion.jobs import IngestJobStore
 from app.model_client.document_parser import DocumentParserClient
@@ -337,7 +337,7 @@ class AppContainer:
     document_parser: DocumentParserClient
     ingestion_pipeline: IngestionPipeline
     retrieval_pipeline: RetrievalPipeline
-    chat_pipeline: GenerationService
+    chat_pipeline: AgenticReasoningService
     ragas_runner: object | None
     trace_store: TraceStore
     tracing_manager: TracingManager
@@ -417,7 +417,7 @@ class AppContainer:
             hybrid_retriever=hybrid_retriever,
             wiki_searcher=wiki_searcher,
         )
-        chat_pipeline = GenerationService(
+        chat_pipeline = AgenticReasoningService(
             config=config,
             retrieval_pipeline=retrieval_pipeline,
             generation_client=generation_client,
@@ -437,6 +437,7 @@ class AppContainer:
                 config,
                 repository,
                 embedding_client,
+                generation_client,
                 tracing_manager,
                 document_parser=document_parser,
                 hybrid_retriever=hybrid_retriever,

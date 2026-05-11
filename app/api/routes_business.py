@@ -32,7 +32,7 @@ from app.schemas.business import (
     KnowledgeBaseSummary,
 )
 from app.schemas.chat import ChatRequest
-from app.schemas.structured import DocumentNode, StructuredDocument
+from app.schemas.structured import DocumentNode, GraphEntity, StructuredDocument
 from app.schemas.trace import TraceRecord
 from app.eval.dataset import (
     get_benchmark_report_dir,
@@ -266,6 +266,16 @@ def _node_summary(node: DocumentNode) -> dict[str, object]:
         "text": node.text[:240],
         "page_number": node.provenance.page_number,
         "hierarchy_path": node.provenance.hierarchy_path,
+    }
+
+
+def _entity_summary(entity: GraphEntity) -> dict[str, object]:
+    return {
+        "entity_id": entity.entity_id,
+        "name": entity.name,
+        "entity_type": entity.entity_type,
+        "source_node_ids": entity.source_node_ids,
+        "metadata": entity.metadata,
     }
 
 
@@ -620,15 +630,38 @@ async def rag_graph_neighborhood(
     if node is None:
         raise HTTPException(status_code=404, detail=f"node not found: {node_id}")
 
+    entity_by_id = {entity.entity_id: entity for entity in document.graph.entities}
     neighbors: list[dict[str, object]] = []
-    if node.parent_id and node.parent_id in by_id:
-        neighbors.append({"relation": "PART_OF", "direction": "out", "node": _node_summary(by_id[node.parent_id])})
-    for child in node.children:
-        neighbors.append({"relation": "PART_OF", "direction": "in", "node": _node_summary(child)})
+    seen: set[tuple[str, str, str]] = set()
+
+    def add_neighbor(relation: str, direction: str, target: dict[str, object]) -> None:
+        target_id = str(target.get("node_id") or target.get("entity_id") or "")
+        key = (relation, direction, target_id)
+        if not target_id or key in seen:
+            return
+        seen.add(key)
+        neighbors.append({"relation": relation, "direction": direction, "target": target})
+
+    for relation in document.graph.relations:
+        if relation.source_id == node_id:
+            target_node = by_id.get(relation.target_id)
+            target_entity = entity_by_id.get(relation.target_id)
+            if target_node:
+                add_neighbor(relation.relation_type, "out", _node_summary(target_node))
+            elif target_entity:
+                add_neighbor(relation.relation_type, "out", _entity_summary(target_entity))
+        if relation.target_id == node_id:
+            source_node = by_id.get(relation.source_id)
+            source_entity = entity_by_id.get(relation.source_id)
+            if source_node:
+                add_neighbor(relation.relation_type, "in", _node_summary(source_node))
+            elif source_entity:
+                add_neighbor(relation.relation_type, "in", _entity_summary(source_entity))
+
     if node.parent_id and node.parent_id in by_id:
         for sibling in by_id[node.parent_id].children:
             if sibling.node_id != node.node_id:
-                neighbors.append({"relation": "SIBLING_OF", "direction": "both", "node": _node_summary(sibling)})
+                add_neighbor("SIBLING_OF", "both", _node_summary(sibling))
 
     return {"node": _node_summary(node), "neighbors": neighbors}
 

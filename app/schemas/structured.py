@@ -52,6 +52,29 @@ class TablePayload(BaseModel):
     narrative: str | None = None
 
 
+class GraphEntity(BaseModel):
+    entity_id: str
+    name: str
+    entity_type: str = "concept"
+    source_node_ids: list[str] = Field(default_factory=list)
+    metadata: dict[str, object] = Field(default_factory=dict)
+
+
+class GraphRelation(BaseModel):
+    relation_id: str
+    source_id: str
+    target_id: str
+    relation_type: str
+    source_node_id: str | None = None
+    confidence: float = 1.0
+    metadata: dict[str, object] = Field(default_factory=dict)
+
+
+class KnowledgeGraph(BaseModel):
+    entities: list[GraphEntity] = Field(default_factory=list)
+    relations: list[GraphRelation] = Field(default_factory=list)
+
+
 class DocumentNode(BaseModel):
     node_id: str
     doc_id: str
@@ -76,6 +99,7 @@ class StructuredDocument(BaseModel):
     source_path: str
     title: str
     root: DocumentNode
+    graph: KnowledgeGraph = Field(default_factory=KnowledgeGraph)
     metadata: dict[str, object] = Field(default_factory=dict)
 
     def iter_nodes(self) -> Iterable[DocumentNode]:

@@ -321,6 +321,7 @@ async def test_ingestion_pipeline_updates_hybrid_index(monkeypatch, tmp_path) ->
         config=config,
         repository=repository,
         embedding_client=FakeEmbeddingClient(),
+        generation_client=FakeGenerationClient(),
         tracing_manager=TracingManager("test-service", ""),
         hybrid_retriever=hybrid,
         wiki_compiler=WikiCompiler(tmp_path / "wiki"),
@@ -364,6 +365,7 @@ async def test_ingestion_pipeline_routes_image_audio_video_modalities(
         config=config,
         repository=repository,
         embedding_client=FakeEmbeddingClient(),
+        generation_client=FakeGenerationClient(),
         tracing_manager=TracingManager("test-service", ""),
     )
 
@@ -403,6 +405,7 @@ async def test_uploaded_media_chunks_point_to_persistent_upload_uri(
         config=config,
         repository=repository,
         embedding_client=FakeEmbeddingClient(),
+        generation_client=FakeGenerationClient(),
         tracing_manager=TracingManager("test-service", ""),
     )
     stable_source = "uploads/default/__shared__/logo.png"
@@ -432,6 +435,7 @@ def test_media_reembed_uses_media_uri(tmp_path) -> None:
         config=config,
         repository=InMemoryVectorRepository(),
         embedding_client=FakeEmbeddingClient(),
+        generation_client=FakeGenerationClient(),
         tracing_manager=TracingManager("test-service", ""),
     )
     chunk = Chunk(
@@ -478,6 +482,7 @@ async def test_ingestion_pipeline_does_not_write_parsed_artifact_when_embeddings
         config=config,
         repository=repository,
         embedding_client=FailingEmbeddingClient(),
+        generation_client=FakeGenerationClient(),
         tracing_manager=TracingManager("test-service", ""),
         hybrid_retriever=hybrid,
         wiki_compiler=WikiCompiler(tmp_path / "wiki"),
@@ -511,6 +516,7 @@ async def test_ingestion_pipeline_uses_stable_source_path_overrides(
         config=config,
         repository=repository,
         embedding_client=FakeEmbeddingClient(),
+        generation_client=FakeGenerationClient(),
         tracing_manager=TracingManager("test-service", ""),
     )
 
@@ -571,6 +577,7 @@ async def test_ingestion_pipeline_is_atomic_before_apply(
         config=config,
         repository=repository,
         embedding_client=SelectiveFailingEmbeddingClient(),
+        generation_client=FakeGenerationClient(),
         tracing_manager=TracingManager("test-service", ""),
         hybrid_retriever=hybrid,
         wiki_compiler=WikiCompiler(tmp_path / "wiki"),

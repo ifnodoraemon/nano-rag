@@ -21,6 +21,10 @@ retrieval:
   freshness_policy:
     enabled: true
 
+agent:
+  max_retrieval_loops: 2
+  max_subqueries: 4
+
 hybrid_search:
   enabled: ${RAG_HYBRID_SEARCH_ENABLED:-true}
   dense_weight: 0.7

@@ -8,10 +8,12 @@ from typing import TYPE_CHECKING
 
 from app.ingestion.loader import discover_files
 from app.ingestion.metadata import extract_document_metadata
+from app.ingestion.graph_extractor import GraphExtractor
 from app.ingestion.structured_parser import StructuredDocumentParser
 from app.core.exceptions import ModelGatewayError, ParsingError
 from app.model_client.embeddings import EmbeddingClient
 from app.model_client.document_parser import DocumentParserClient
+from app.model_client.generation import GenerationClient
 from app.model_client.multimodal_embedding import (
     AudioItem,
     EmbedItem,
@@ -89,6 +91,7 @@ class IngestionPipeline:
         config: AppConfig,
         repository: VectorRepository,
         embedding_client: EmbeddingClient,
+        generation_client: GenerationClient,
         tracing_manager: TracingManager,
         document_parser: DocumentParserClient | None = None,
         hybrid_retriever: HybridRetriever | None = None,
@@ -98,12 +101,14 @@ class IngestionPipeline:
         self.config = config
         self.repository = repository
         self.embedding_client = embedding_client
+        self.generation_client = generation_client
         self.tracing_manager = tracing_manager
         self.document_parser = document_parser
         self.hybrid_retriever = hybrid_retriever
         self.wiki_compiler = wiki_compiler
         self.wiki_searcher = wiki_searcher
         self.structured_parser = StructuredDocumentParser(document_parser)
+        self.graph_extractor = GraphExtractor(generation_client)
 
     async def run(
         self,
@@ -182,6 +187,7 @@ class IngestionPipeline:
             kb_id=kb_id,
             source_path=source_path,
         )
+        structured_document.graph = await self.graph_extractor.extract(structured_document)
         text = self._structured_document_text(structured_document)
         if not text:
             raise ParsingError(

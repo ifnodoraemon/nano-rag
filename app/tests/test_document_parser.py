@@ -39,6 +39,11 @@ class EmptyDocumentParser:
         return ""
 
 
+class FakeGenerationClient:
+    async def generate(self, messages):  # noqa: ANN001
+        return {"content": '{"entities": [], "relations": []}'}
+
+
 @pytest.mark.asyncio
 async def test_parse_document_uses_model_parser_for_pdf(tmp_path) -> None:
     pdf_path = tmp_path / "notice.pdf"
@@ -67,6 +72,7 @@ async def test_ingestion_pipeline_rejects_empty_parsed_content(monkeypatch, tmp_
         config=config,
         repository=InMemoryVectorRepository(),
         embedding_client=FakeEmbeddingClient(),
+        generation_client=FakeGenerationClient(),
         tracing_manager=TracingManager("test-service", ""),
         document_parser=EmptyDocumentParser(),
     )
