@@ -7,15 +7,23 @@ Nano RAG 是一个真实数据优先的企业 RAG 工作台。后端负责文档
 ## 快速开始
 
 ```bash
-docker compose -f docker/docker-compose.yml up -d --build
+docker compose -f docker/docker-compose.yml up -d --build app worker
 ```
 
 访问地址：
 
-- 前端：`http://127.0.0.1:3000`
-- Langfuse：`http://127.0.0.1:3001`
 - 后端：`http://127.0.0.1:8000`
 - Milvus：`http://127.0.0.1:19530`
+
+可选前端和观测栈按需启动：
+
+```bash
+docker compose -f docker/docker-compose.yml --profile frontend up -d --build frontend
+docker compose -f docker/docker-compose.yml --profile observability up -d langfuse-web langfuse-worker
+```
+
+- 前端：`http://127.0.0.1:3000`
+- Langfuse：`http://127.0.0.1:3001`
 
 浏览器端不需要配置 API key。前端 nginx 会为代理到后端的请求注入业务 key；本地 Docker 默认使用 `RAG_PROXY_API_KEY=nano-rag-local`，需要和后端 `RAG_API_KEYS` 中的一个值保持一致。
 
@@ -84,8 +92,8 @@ RAG_API_KEYS=nano-rag-local
 RAG_DIAGNOSIS_ENABLED=true
 RAG_EVAL_ENABLED=true
 DOCUMENT_PARSER_ENABLED=true
-LANGFUSE_UI_ENDPOINT=http://langfuse-web:3000
-LANGFUSE_OTEL_ENDPOINT=http://langfuse-web:3000/api/public/otel/v1/traces
+LANGFUSE_UI_ENDPOINT=
+LANGFUSE_OTEL_ENDPOINT=
 ```
 
 后端启动时会检查 generation、embedding、document parser、Langfuse OTEL 等关键配置。缺少 `DOCUMENT_PARSER_API_KEY` 这类真实 provider 配置时，容器日志会输出 `Startup readiness` 警告，`/health/detail` 会继续显示对应能力不可用；前端只消费这些后端状态，不负责提示 Docker 配置方式。
@@ -107,7 +115,7 @@ Gemini 示例：
 ```bash
 COMPOSE_GENERATION_API_KEY=<your-gemini-key>
 COMPOSE_GENERATION_API_BASE_URL=https://generativelanguage.googleapis.com/v1beta/openai
-COMPOSE_GENERATION_MODEL_ALIAS=gemini-3.1-pro-preview
+COMPOSE_GENERATION_MODEL_ALIAS=gemini-flash-lite-latest
 
 COMPOSE_EMBEDDING_PROVIDER=gemini
 COMPOSE_EMBEDDING_API_KEY=<your-embedding-key>
@@ -116,7 +124,22 @@ COMPOSE_EMBEDDING_MODEL_ALIAS=gemini-embedding-2-preview
 
 COMPOSE_DOCUMENT_PARSER_API_KEY=<your-parser-key>
 COMPOSE_DOCUMENT_PARSER_API_BASE_URL=https://generativelanguage.googleapis.com
-COMPOSE_DOCUMENT_PARSER_MODEL=gemini-3.1-pro-preview
+COMPOSE_DOCUMENT_PARSER_MODEL=gemini-flash-lite-latest
+```
+
+## 公开 RAG 评测
+
+公开数据集用于通用 RAG 基线，规范/标准语料压测用于业务场景基线。可先抽样公开数据生成 `data/raw/public_eval/...` 和 `data/eval/*.jsonl`：
+
+```bash
+python scripts/prepare_public_rag_eval.py --dataset ragbench-delucionqa --limit 20
+python scripts/prepare_public_rag_eval.py --dataset hotpotqa --limit 20
+```
+
+然后在 Docker 栈内摄入对应 raw 目录，并复用现有评测：
+
+```bash
+docker compose -f docker/docker-compose.yml exec app python scripts/run_eval.py --dataset data/eval/ragbench-delucionqa.jsonl
 ```
 
 Qwen 示例：

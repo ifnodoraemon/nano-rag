@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import base64
+import asyncio
 import os
+import tempfile
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 import httpx
+from pypdf import PdfReader, PdfWriter
 
 from app.core.exceptions import ModelGatewayError, ParsingError
 from app.model_client.base import AsyncJsonProviderClient, ProviderConfig
@@ -133,6 +136,82 @@ class DocumentParserClient:
             return await self._parse_file_openai_compatible(path)
         if self.provider != "gemini":
             raise ParsingError(f"unsupported document parser provider: {self.provider}")
+        if path.suffix.lower() == ".pdf":
+            batched = await self._parse_pdf_in_page_batches(path)
+            if batched is not None:
+                return batched
+        return await self._parse_file_gemini_once(path)
+
+    async def _parse_pdf_in_page_batches(self, path: Path) -> str | None:
+        batch_size = self._pdf_page_batch_size()
+        if batch_size <= 0:
+            return None
+        try:
+            reader = PdfReader(str(path))
+            page_count = len(reader.pages)
+        except Exception:
+            return None
+        if page_count <= batch_size:
+            return None
+        parts: list[str] = []
+        failures: list[str] = []
+        with tempfile.TemporaryDirectory(prefix="nano-rag-pdf-") as tmp_dir:
+            batches: list[tuple[int, int, Path]] = []
+            for start in range(0, page_count, batch_size):
+                end = min(start + batch_size, page_count)
+                writer = PdfWriter()
+                for index in range(start, end):
+                    writer.add_page(reader.pages[index])
+                batch_path = Path(tmp_dir) / f"{path.stem}_pages_{start + 1}_{end}.pdf"
+                with batch_path.open("wb") as handle:
+                    writer.write(handle)
+                batches.append((start + 1, end, batch_path))
+            semaphore = asyncio.Semaphore(self._pdf_page_batch_concurrency())
+
+            async def parse_batch(batch: tuple[int, int, Path]) -> tuple[int, int, str | None, str | None]:
+                start_page, end_page, batch_path = batch
+                async with semaphore:
+                    try:
+                        text = await self._parse_file_gemini_once(batch_path)
+                        return start_page, end_page, text.strip(), None
+                    except Exception as exc:
+                        return start_page, end_page, None, f"{exc.__class__.__name__}: {str(exc)[:300]}"
+
+            for start_page, end_page, text, error in await asyncio.gather(
+                *(parse_batch(batch) for batch in batches)
+            ):
+                if text:
+                    parts.append(f"# Pages {start_page}-{end_page}\n\n{text}")
+                elif error:
+                    failures.append(f"- Pages {start_page}-{end_page}: {error}")
+        combined = "\n\n".join(parts).strip()
+        if not combined:
+            detail = "; ".join(failures[:3])
+            raise ModelGatewayError(
+                f"document parser failed for all page batches in {path.name}: {detail}"
+            )
+        if failures:
+            combined = (
+                f"{combined}\n\n# Parser warnings\n\n"
+                + "\n".join(failures)
+            )
+        return combined
+
+    def _pdf_page_batch_size(self) -> int:
+        raw = os.getenv("DOCUMENT_PARSER_PDF_PAGE_BATCH_SIZE", "3")
+        try:
+            return max(1, int(raw))
+        except ValueError:
+            return 3
+
+    def _pdf_page_batch_concurrency(self) -> int:
+        raw = os.getenv("DOCUMENT_PARSER_PDF_PAGE_BATCH_CONCURRENCY", "2")
+        try:
+            return max(1, int(raw))
+        except ValueError:
+            return 2
+
+    async def _parse_file_gemini_once(self, path: Path) -> str:
         mime_type = self._guess_content_type(path)
         file_uri = await self._upload_file(path, mime_type)
         payload = {

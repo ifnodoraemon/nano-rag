@@ -1,7 +1,9 @@
 import base64
 from pathlib import Path
 
+import httpx
 import pytest
+from pypdf import PdfWriter
 
 from app.core.exceptions import ModelGatewayError, ParsingError
 from app.ingestion.parser_docling import parse_document
@@ -251,6 +253,173 @@ async def test_document_parser_uses_direct_resumable_upload(monkeypatch, tmp_pat
     )
     assert finalize_call["headers"]["X-Goog-Upload-Command"] == "upload, finalize"
     assert finalize_call["content"] == b"%PDF-1.4 fake"
+
+
+@pytest.mark.asyncio
+async def test_document_parser_batches_large_pdf_pages(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("MODEL_GATEWAY_MODE", "live")
+    monkeypatch.setenv("DOCUMENT_PARSER_PDF_PAGE_BATCH_SIZE", "2")
+    pdf_path = tmp_path / "standard.pdf"
+    writer = PdfWriter()
+    for _ in range(3):
+        writer.add_blank_page(width=72, height=72)
+    with pdf_path.open("wb") as handle:
+        writer.write(handle)
+
+    class FakeResponse:
+        def __init__(self, payload: dict, headers: dict | None = None) -> None:
+            self._payload = payload
+            self.headers = headers or {}
+
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict:
+            return self._payload
+
+    class FakeAsyncClient:
+        def __init__(self) -> None:
+            self.calls = []
+            self.upload_count = 0
+            self.generate_count = 0
+
+        async def post(self, url: str, **kwargs):  # noqa: ANN003
+            self.calls.append({"url": url, **kwargs})
+            if url.endswith("/upload/v1beta/files"):
+                self.upload_count += 1
+                return FakeResponse(
+                    {},
+                    headers={
+                        "X-Goog-Upload-URL": (
+                            "https://generativelanguage.googleapis.com"
+                            f"/upload/v1beta/files/session-{self.upload_count}"
+                        )
+                    },
+                )
+            if "/upload/v1beta/files/session-" in url:
+                return FakeResponse({"file": {"uri": f"files/batch-{self.upload_count}"}})
+            self.generate_count += 1
+            return FakeResponse(
+                {
+                    "candidates": [
+                        {
+                            "content": {
+                                "parts": [{"text": f"batch {self.generate_count} markdown"}]
+                            }
+                        }
+                    ]
+                }
+            )
+
+    config = AppConfig(
+        config_dir=tmp_path,
+        settings={"timeout": {"document_parser_seconds": 30}},
+        models={
+            "document_parser": {
+                "enabled": True,
+                "provider": "gemini",
+                "default_alias": "gemini-3.1-pro-preview",
+                "base_url": "https://generativelanguage.googleapis.com",
+                "api_key": "parser-secret",
+            },
+        },
+        prompts={},
+    )
+    client = DocumentParserClient(config)
+    fake_http = FakeAsyncClient()
+    client._client = fake_http  # noqa: SLF001
+
+    text = await client.parse_file(pdf_path)
+
+    assert "# Pages 1-2" in text
+    assert "# Pages 3-3" in text
+    assert fake_http.upload_count == 2
+    assert fake_http.generate_count == 2
+
+
+@pytest.mark.asyncio
+async def test_document_parser_keeps_successful_pdf_batches(
+    monkeypatch, tmp_path
+) -> None:
+    monkeypatch.setenv("MODEL_GATEWAY_MODE", "live")
+    monkeypatch.setenv("DOCUMENT_PARSER_PDF_PAGE_BATCH_SIZE", "1")
+    pdf_path = tmp_path / "standard.pdf"
+    writer = PdfWriter()
+    for _ in range(2):
+        writer.add_blank_page(width=72, height=72)
+    with pdf_path.open("wb") as handle:
+        writer.write(handle)
+
+    class FakeResponse:
+        def __init__(self, payload: dict, fail: bool = False, headers: dict | None = None) -> None:
+            self._payload = payload
+            self.fail = fail
+            self.headers = headers or {}
+            self.text = "upstream timeout"
+
+        def raise_for_status(self) -> None:
+            if self.fail:
+                raise httpx.TimeoutException("timeout")
+
+        def json(self) -> dict:
+            return self._payload
+
+    class FakeAsyncClient:
+        def __init__(self) -> None:
+            self.upload_count = 0
+            self.generate_count = 0
+
+        async def post(self, url: str, **kwargs):  # noqa: ANN003, ARG002
+            if url.endswith("/upload/v1beta/files"):
+                self.upload_count += 1
+                return FakeResponse(
+                    {},
+                    headers={
+                        "X-Goog-Upload-URL": (
+                            "https://generativelanguage.googleapis.com"
+                            f"/upload/v1beta/files/session-{self.upload_count}"
+                        )
+                    },
+                )
+            if "/upload/v1beta/files/session-" in url:
+                return FakeResponse({"file": {"uri": f"files/batch-{self.upload_count}"}})
+            self.generate_count += 1
+            if self.generate_count == 2:
+                raise httpx.TimeoutException("timeout")
+            return FakeResponse(
+                {
+                    "candidates": [
+                        {
+                            "content": {
+                                "parts": [{"text": "first page markdown"}]
+                            }
+                        }
+                    ]
+                }
+            )
+
+    config = AppConfig(
+        config_dir=tmp_path,
+        settings={"timeout": {"document_parser_seconds": 30}},
+        models={
+            "document_parser": {
+                "enabled": True,
+                "provider": "gemini",
+                "default_alias": "gemini-3.1-pro-preview",
+                "base_url": "https://generativelanguage.googleapis.com",
+                "api_key": "parser-secret",
+            },
+        },
+        prompts={},
+    )
+    client = DocumentParserClient(config)
+    client._client = FakeAsyncClient()  # noqa: SLF001
+
+    text = await client.parse_file(pdf_path)
+
+    assert "first page markdown" in text
+    assert "# Parser warnings" in text
+    assert "Pages 2-2" in text
 
 
 @pytest.mark.asyncio
