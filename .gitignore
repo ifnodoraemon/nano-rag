@@ -13,6 +13,7 @@ data/samples/eval_report.json
 data/samples/eval_report_api.json
 data/reports/traces/*
 data/reports/feedback/*
+data/reports/knowledge_bases/*
 data/reports/eval/*.json
 data/reports/eval/benchmarks/*.json
 !data/raw/.gitkeep

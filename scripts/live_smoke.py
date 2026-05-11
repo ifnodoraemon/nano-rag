@@ -37,6 +37,19 @@ def read_secret_from_stdin(prompt: str) -> str:
     return sys.stdin.readline().strip()
 
 
+def normalize_provider_env() -> None:
+    gateway_key = os.getenv("MODEL_GATEWAY_API_KEY", "")
+    if gateway_key:
+        os.environ.setdefault("GENERATION_API_KEY", gateway_key)
+        os.environ.setdefault("EMBEDDING_API_KEY", gateway_key)
+        os.environ.setdefault("DOCUMENT_PARSER_API_KEY", gateway_key)
+    gateway_base_url = os.getenv("MODEL_GATEWAY_BASE_URL", "")
+    if gateway_base_url:
+        os.environ.setdefault("GENERATION_API_BASE_URL", gateway_base_url)
+    os.environ.setdefault("EMBEDDING_API_BASE_URL", "https://generativelanguage.googleapis.com")
+    os.environ.setdefault("DOCUMENT_PARSER_API_BASE_URL", "https://generativelanguage.googleapis.com")
+
+
 async def run_smoke(args: argparse.Namespace) -> int:
     load_env_file(ROOT / ".env")
     if args.api_key_stdin:
@@ -49,6 +62,7 @@ async def run_smoke(args: argparse.Namespace) -> int:
         os.environ["EMBEDDING_MODEL_ALIAS"] = args.embedding_model
     if args.rerank_model:
         os.environ["RERANK_MODEL_ALIAS"] = args.rerank_model
+    normalize_provider_env()
     os.environ["MODEL_GATEWAY_MODE"] = "live"
     if not args.use_config_vectorstore:
         os.environ["VECTORSTORE_BACKEND"] = "memory"
