@@ -31,6 +31,14 @@ class FakeDocumentParser:
         return "# Parsed PDF\n\n徐套乡区片综合地价为 62000 元/亩。"
 
 
+class EmptyDocumentParser:
+    def supports(self, path: Path) -> bool:  # noqa: ARG002
+        return True
+
+    async def parse_file(self, path: Path) -> str:  # noqa: ARG002
+        return ""
+
+
 @pytest.mark.asyncio
 async def test_parse_document_uses_model_parser_for_pdf(tmp_path) -> None:
     pdf_path = tmp_path / "notice.pdf"
@@ -49,11 +57,6 @@ async def test_ingestion_pipeline_rejects_empty_parsed_content(monkeypatch, tmp_
     pdf_path = tmp_path / "notice.pdf"
     pdf_path.write_bytes(b"%PDF-1.4 fake")
 
-    async def fake_parse_document(path, document_parser=None):  # noqa: ANN001, ARG001
-        return ""
-
-    monkeypatch.setattr("app.ingestion.pipeline.parse_document", fake_parse_document)
-
     config = AppConfig(
         config_dir=tmp_path,
         settings={"chunk": {"size": 200, "overlap": 20}, "timeout": {"document_parser_seconds": 30}},
@@ -65,6 +68,7 @@ async def test_ingestion_pipeline_rejects_empty_parsed_content(monkeypatch, tmp_
         repository=InMemoryVectorRepository(),
         embedding_client=FakeEmbeddingClient(),
         tracing_manager=TracingManager("test-service", ""),
+        document_parser=EmptyDocumentParser(),
     )
 
     with pytest.raises(ParsingError) as exc_info:

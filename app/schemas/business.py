@@ -67,10 +67,29 @@ class BusinessIngestRequest(BaseModel):
 class BusinessIngestResponse(BaseModel):
     status: str
     kb_id: str
-    documents: int
-    chunks: int
+    job_id: str | None = None
+    stage: str | None = None
+    documents: int = 0
+    chunks: int = 0
     source: str = "path"
     uploaded_files: list[str] = Field(default_factory=list)
+    error: str | None = None
+
+
+class BusinessIngestJobResponse(BaseModel):
+    job_id: str
+    kb_id: str
+    source: str
+    path: str
+    status: str
+    stage: str
+    documents: int = 0
+    chunks: int = 0
+    uploaded_files: list[str] = Field(default_factory=list)
+    error: str | None = None
+    submitted_at: float
+    started_at: float | None = None
+    completed_at: float | None = None
 
 
 class BusinessDocumentSummary(BaseModel):

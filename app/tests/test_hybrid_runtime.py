@@ -301,14 +301,10 @@ async def test_hybrid_retriever_respects_kb_scope(
 async def test_ingestion_pipeline_updates_hybrid_index(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("RAG_HYBRID_SEARCH_ENABLED", "true")
     monkeypatch.setenv("PARSED_OUTPUT_DIR", str(tmp_path / "parsed"))
+    (tmp_path / "doc.txt").write_text("PTO carryover details", encoding="utf-8")
     monkeypatch.setattr(
         "app.ingestion.pipeline.discover_files", lambda path: [tmp_path / "doc.txt"]
     )
-
-    async def fake_parse_document(path, document_parser=None):  # noqa: ANN001, ARG001
-        return "PTO carryover details"
-
-    monkeypatch.setattr("app.ingestion.pipeline.parse_document", fake_parse_document)
 
     repository = InMemoryVectorRepository()
     hybrid = HybridRetriever(
@@ -337,9 +333,8 @@ async def test_ingestion_pipeline_updates_hybrid_index(monkeypatch, tmp_path) ->
     assert (tmp_path / "wiki" / "sources").exists()
     artifact = json.loads(next((tmp_path / "parsed").glob("*.json")).read_text(encoding="utf-8"))
     assert artifact["document"]["metadata"]["doc_type"] == "document"
-    assert artifact["document"]["metadata"]["section_count"] == 1
-    assert artifact["chunks"][0]["metadata"]["parent_chunk_id"].startswith("doc-")
-    assert artifact["chunks"][0]["metadata"]["section_path"] == ["doc"]
+    assert artifact["chunks"][0]["metadata"]["node_id"].startswith("doc-")
+    assert artifact["structured_document"]["root"]["children"]
 
 
 @pytest.mark.asyncio
@@ -423,12 +418,10 @@ async def test_uploaded_media_chunks_point_to_persistent_upload_uri(
     assert chunk.media_uri == str(upload_dir / "default" / "__shared__" / "logo.png")
 
 
-def test_media_reembed_uses_rollback_override_path(tmp_path) -> None:
+def test_media_reembed_uses_media_uri(tmp_path) -> None:
     durable_path = tmp_path / "uploads" / "default" / "logo.png"
-    backup_path = durable_path.with_name(".logo.png.old.bak")
     durable_path.parent.mkdir(parents=True)
-    durable_path.write_bytes(b"new image")
-    backup_path.write_bytes(b"old image")
+    durable_path.write_bytes(b"image")
     config = AppConfig(
         config_dir=tmp_path,
         settings={"chunk": {"size": 200, "overlap": 20}},
@@ -454,12 +447,9 @@ def test_media_reembed_uses_rollback_override_path(tmp_path) -> None:
         mime_type="image/png",
     )
 
-    inputs = pipeline._chunks_to_embed_inputs(  # noqa: SLF001
-        [chunk],
-        media_path_overrides={str(durable_path): str(backup_path)},
-    )
+    inputs = pipeline._chunks_to_embed_inputs([chunk])  # noqa: SLF001
 
-    assert inputs[0][0].data == b"old image"
+    assert inputs[0][0].data == b"image"
 
 
 @pytest.mark.asyncio
@@ -468,14 +458,10 @@ async def test_ingestion_pipeline_does_not_write_parsed_artifact_when_embeddings
 ) -> None:
     monkeypatch.setenv("RAG_HYBRID_SEARCH_ENABLED", "true")
     monkeypatch.setenv("PARSED_OUTPUT_DIR", str(tmp_path / "parsed"))
+    (tmp_path / "doc.txt").write_text("PTO carryover details", encoding="utf-8")
     monkeypatch.setattr(
         "app.ingestion.pipeline.discover_files", lambda path: [tmp_path / "doc.txt"]
     )
-
-    async def fake_parse_document(path, document_parser=None):  # noqa: ANN001, ARG001
-        return "PTO carryover details"
-
-    monkeypatch.setattr("app.ingestion.pipeline.parse_document", fake_parse_document)
 
     repository = InMemoryVectorRepository()
     hybrid = HybridRetriever(
@@ -513,11 +499,6 @@ async def test_ingestion_pipeline_uses_stable_source_path_overrides(
     source_file = tmp_path / "upload-a.txt"
     source_file.write_text("first upload", encoding="utf-8")
     monkeypatch.setattr("app.ingestion.pipeline.discover_files", lambda path: [source_file])
-
-    async def fake_parse_document(path, document_parser=None):  # noqa: ANN001, ARG001
-        return Path(path).read_text(encoding="utf-8")
-
-    monkeypatch.setattr("app.ingestion.pipeline.parse_document", fake_parse_document)
 
     repository = InMemoryVectorRepository()
     config = AppConfig(
@@ -569,15 +550,11 @@ async def test_ingestion_pipeline_is_atomic_before_apply(
     monkeypatch.setenv("PARSED_OUTPUT_DIR", str(tmp_path / "parsed"))
     files = [tmp_path / "ok.txt", tmp_path / "bad.txt"]
     for file_path in files:
-        file_path.write_text(file_path.stem, encoding="utf-8")
+        file_path.write_text(
+            "FAIL_EMBED" if file_path.name == "bad.txt" else "safe content",
+            encoding="utf-8",
+        )
     monkeypatch.setattr("app.ingestion.pipeline.discover_files", lambda path: files)
-
-    async def fake_parse_document(path, document_parser=None):  # noqa: ANN001, ARG001
-        if Path(path).name == "bad.txt":
-            return "FAIL_EMBED"
-        return "safe content"
-
-    monkeypatch.setattr("app.ingestion.pipeline.parse_document", fake_parse_document)
 
     repository = InMemoryVectorRepository()
     hybrid = HybridRetriever(
@@ -607,53 +584,6 @@ async def test_ingestion_pipeline_is_atomic_before_apply(
     assert not repository.documents
     assert not repository.entries
     assert not hybrid.bm25_index.search("safe", top_k=5)
-
-
-@pytest.mark.asyncio
-async def test_ingestion_pipeline_rolls_back_apply_failures(
-    monkeypatch, tmp_path
-) -> None:
-    monkeypatch.setenv("RAG_HYBRID_SEARCH_ENABLED", "true")
-    monkeypatch.setenv("PARSED_OUTPUT_DIR", str(tmp_path / "parsed"))
-    files = [tmp_path / "one.txt", tmp_path / "two.txt"]
-    for file_path in files:
-        file_path.write_text(file_path.stem, encoding="utf-8")
-    monkeypatch.setattr("app.ingestion.pipeline.discover_files", lambda path: files)
-
-    async def fake_parse_document(path, document_parser=None):  # noqa: ANN001, ARG001
-        return f"content for {Path(path).name}"
-
-    monkeypatch.setattr("app.ingestion.pipeline.parse_document", fake_parse_document)
-
-    repository = FailingUpsertRepository(fail_on_call=2)
-    hybrid = HybridRetriever(
-        repository=repository,
-        embedding_client=FakeEmbeddingClient(),
-    )
-    config = AppConfig(
-        config_dir=tmp_path,
-        settings={"chunk": {"size": 200, "overlap": 20}},
-        models={"model_gateway": {"base_url": "", "api_key": ""}},
-        prompts={},
-    )
-    pipeline = IngestionPipeline(
-        config=config,
-        repository=repository,
-        embedding_client=FakeEmbeddingClient(),
-        tracing_manager=TracingManager("test-service", ""),
-        hybrid_retriever=hybrid,
-        wiki_compiler=WikiCompiler(tmp_path / "wiki"),
-    )
-
-    with pytest.raises(RuntimeError, match="repository upsert failed"):
-        await pipeline.run(str(tmp_path), kb_id="default")
-
-    parsed_dir = tmp_path / "parsed"
-    assert not parsed_dir.exists() or not any(parsed_dir.glob("*.json"))
-    assert not repository.documents
-    assert not repository.entries
-    assert not hybrid.bm25_index.search("content", top_k=5)
-    assert not list((tmp_path / "wiki" / "sources").glob("*.md"))
 
 
 @pytest.mark.asyncio

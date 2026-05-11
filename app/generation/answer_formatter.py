@@ -98,8 +98,20 @@ class AnswerFormatter:
                     if context.get("citation_label") is not None
                     else None,
                     chunk_id=chunk_id,
+                    node_id=str(context.get("node_id"))
+                    if context.get("node_id") is not None
+                    else chunk_id,
                     source=str(context["source"]),
                     score=float(context["score"]),
+                    page_number=int(context["page_number"])
+                    if context.get("page_number") is not None
+                    else None,
+                    hierarchy_path=[
+                        str(item) for item in context.get("hierarchy_path", []) or []
+                    ],
+                    bounding_box=context.get("bounding_box")
+                    if isinstance(context.get("bounding_box"), dict)
+                    else None,
                     evidence_role=str(context.get("evidence_role"))
                     if context.get("evidence_role") is not None
                     else None,

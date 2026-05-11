@@ -28,6 +28,7 @@ from app.api.routes_business import (
 )
 from app.diagnostics.service import DiagnosisService
 from app.core.tracing import FeedbackStore, TraceStore
+from app.ingestion.jobs import IngestJobStore
 from app.knowledge_bases.catalog import KnowledgeBaseRecord
 from app.schemas.chat import Citation, ChatResponse
 from app.schemas.trace import TraceRecord
@@ -195,46 +196,33 @@ async def test_knowledge_base_catalog_routes_list_and_create() -> None:
 
 
 @pytest.mark.asyncio
-async def test_business_ingest_wraps_ingest_response() -> None:
-    async def fake_ingest_run(path, kb_id="default", source_path_overrides=None):  # noqa: ANN001
-        assert path == "./data/raw"
-        assert kb_id == "default"
-        assert source_path_overrides is None
-        return SimpleNamespace(documents=2, chunks=4)
-
-    container = SimpleNamespace(ingestion_pipeline=SimpleNamespace(run=fake_ingest_run))
+async def test_business_ingest_returns_job(tmp_path, monkeypatch) -> None:
+    source = tmp_path / "policy.md"
+    source.write_text("# Policy\nBody", encoding="utf-8")
+    monkeypatch.setenv("RAG_INGEST_ALLOWED_DIRS", str(tmp_path))
+    container = SimpleNamespace(
+        ingestion_pipeline=SimpleNamespace(run=None),
+        ingest_job_store=IngestJobStore(tmp_path / "jobs"),
+    )
 
     response = await rag_ingest(
-        BusinessIngestRequest(path="./data/raw", kb_id="default"),
+        BusinessIngestRequest(path=str(source), kb_id="default"),
         _request_with_container(container),
         CONTEXT,
     )
 
-    assert response.status == "ok"
-    assert response.documents == 2
-    assert response.chunks == 4
+    assert response.status == "queued"
+    assert response.stage == "queued"
+    assert response.job_id
+    assert container.ingest_job_store.get(response.job_id) is not None
 
 
 @pytest.mark.asyncio
-async def test_business_ingest_upload_wraps_ingest_response(tmp_path) -> None:
-    captured: dict[str, object] = {}
-
-    async def fake_ingest_run(  # noqa: ANN001
-        path,
-        kb_id="default",
-        source_path_overrides=None,
-        rollback_media_path_overrides=None,
-    ):
-        captured["path"] = path
-        captured["kb_id"] = kb_id
-        captured["source_path_overrides"] = source_path_overrides
-        captured["rollback_media_path_overrides"] = rollback_media_path_overrides
-        assert tmp_path.as_posix() in path
-        return SimpleNamespace(documents=1, chunks=2)
-
+async def test_business_ingest_upload_returns_job(tmp_path) -> None:
     container = SimpleNamespace(
-        ingestion_pipeline=SimpleNamespace(run=fake_ingest_run),
+        ingestion_pipeline=SimpleNamespace(run=None),
         config=SimpleNamespace(upload_dir=tmp_path),
+        ingest_job_store=IngestJobStore(tmp_path / "jobs"),
     )
 
     upload = UploadFile(filename="policy.md", file=BytesIO(b"# Policy\nBody"))
@@ -245,118 +233,10 @@ async def test_business_ingest_upload_wraps_ingest_response(tmp_path) -> None:
         context=CONTEXT,
     )
 
-    assert response.status == "ok"
+    assert response.status == "queued"
+    assert response.job_id
     assert response.uploaded_files == ["policy.md"]
-    assert response.documents == 1
-    assert response.chunks == 2
-    assert captured["kb_id"] == "default"
-    source_path_overrides = captured["source_path_overrides"]
-    assert isinstance(source_path_overrides, dict)
-    assert next(iter(source_path_overrides.values())) == "uploads/default/policy.md"
-    assert captured["rollback_media_path_overrides"] == {}
     assert (tmp_path / "default" / "policy.md").read_bytes() == b"# Policy\nBody"
-
-
-@pytest.mark.asyncio
-async def test_business_ingest_upload_stages_durable_copy_before_ingest(
-    monkeypatch, tmp_path
-) -> None:
-    async def fake_ingest_run(*args, **kwargs):  # noqa: ANN002, ANN003
-        raise AssertionError("ingestion should not run when durable staging fails")
-
-    def fail_copy(*args, **kwargs):  # noqa: ANN002, ANN003
-        raise OSError("disk full")
-
-    monkeypatch.setattr("app.api.routes_business.shutil.copy2", fail_copy)
-    container = SimpleNamespace(
-        ingestion_pipeline=SimpleNamespace(run=fake_ingest_run),
-        config=SimpleNamespace(upload_dir=tmp_path),
-    )
-
-    upload = UploadFile(filename="policy.md", file=BytesIO(b"# Policy\nBody"))
-    with pytest.raises(OSError):
-        await rag_ingest_upload(
-            _request_with_container(container),
-            files=[upload],
-            kb_id="default",
-            context=CONTEXT,
-        )
-
-    assert not list((tmp_path / "default").glob("*.tmp"))
-
-
-@pytest.mark.asyncio
-async def test_business_ingest_upload_restores_previous_file_when_ingest_fails(
-    tmp_path,
-) -> None:
-    durable_path = tmp_path / "default" / "policy.md"
-    durable_path.parent.mkdir(parents=True)
-    durable_path.write_bytes(b"old policy")
-
-    captured: dict[str, object] = {}
-
-    async def fake_ingest_run(*args, **kwargs):  # noqa: ANN002, ANN003
-        captured.update(kwargs)
-        overrides = kwargs["rollback_media_path_overrides"]
-        assert isinstance(overrides, dict)
-        backup_path = Path(overrides[str(durable_path)])
-        assert durable_path.read_bytes() == b"new policy"
-        assert backup_path.read_bytes() == b"old policy"
-        raise RuntimeError("indexing failed")
-
-    container = SimpleNamespace(
-        ingestion_pipeline=SimpleNamespace(run=fake_ingest_run),
-        config=SimpleNamespace(upload_dir=tmp_path),
-    )
-
-    upload = UploadFile(filename="policy.md", file=BytesIO(b"new policy"))
-    with pytest.raises(RuntimeError):
-        await rag_ingest_upload(
-            _request_with_container(container),
-            files=[upload],
-            kb_id="default",
-            context=CONTEXT,
-        )
-
-    assert durable_path.read_bytes() == b"old policy"
-    overrides = captured["rollback_media_path_overrides"]
-    assert isinstance(overrides, dict)
-    assert set(overrides) == {str(durable_path)}
-    assert Path(next(iter(overrides.values()))).exists() is False
-
-
-@pytest.mark.asyncio
-async def test_business_ingest_upload_ignores_backup_cleanup_failure(
-    monkeypatch, tmp_path
-) -> None:
-    durable_path = tmp_path / "default" / "policy.md"
-    durable_path.parent.mkdir(parents=True)
-    durable_path.write_bytes(b"old policy")
-    original_unlink = Path.unlink
-
-    def flaky_unlink(self, *args, **kwargs):  # noqa: ANN001, ANN002, ANN003
-        if self.name.endswith(".bak"):
-            raise OSError("cleanup failed")
-        return original_unlink(self, *args, **kwargs)
-
-    async def fake_ingest_run(*args, **kwargs):  # noqa: ANN002, ANN003
-        return SimpleNamespace(documents=1, chunks=1)
-
-    monkeypatch.setattr(Path, "unlink", flaky_unlink)
-    container = SimpleNamespace(
-        ingestion_pipeline=SimpleNamespace(run=fake_ingest_run),
-        config=SimpleNamespace(upload_dir=tmp_path),
-    )
-
-    response = await rag_ingest_upload(
-        _request_with_container(container),
-        files=[UploadFile(filename="policy.md", file=BytesIO(b"new policy"))],
-        kb_id="default",
-        context=CONTEXT,
-    )
-
-    assert response.status == "ok"
-    assert durable_path.read_bytes() == b"new policy"
 
 
 def test_upload_source_path_sanitizes_kb_component() -> None:

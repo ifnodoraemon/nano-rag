@@ -2,18 +2,13 @@ from __future__ import annotations
 
 import hashlib
 import json
-import logging
-import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from app.ingestion.chunker import build_chunks
 from app.ingestion.loader import discover_files
 from app.ingestion.metadata import extract_document_metadata
-from app.ingestion.normalizer import normalize_text
-from app.ingestion.parser_docling import parse_document
-from app.ingestion.semantic_chunker import SemanticChunker
+from app.ingestion.structured_parser import StructuredDocumentParser
 from app.core.exceptions import ModelGatewayError, ParsingError
 from app.model_client.embeddings import EmbeddingClient
 from app.model_client.document_parser import DocumentParserClient
@@ -27,6 +22,7 @@ from app.model_client.multimodal_embedding import (
 from app.retrieval.hybrid_retriever import HybridRetriever
 from app.schemas.chunk import Chunk
 from app.schemas.document import Document, IngestResponse
+from app.schemas.structured import NodeType, StructuredDocument
 
 IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp"}
 AUDIO_SUFFIXES = {".mp3", ".wav", ".m4a", ".aac", ".ogg", ".flac"}
@@ -68,7 +64,6 @@ def _mime_type_for_suffix(suffix: str) -> str:
         raise ParsingError(f"mime type is not configured for media suffix {suffix}")
     return mime_type
 
-logger = logging.getLogger(__name__)
 from app.vectorstore.repository import VectorRepository
 from app.wiki.compiler import WikiCompiler
 from app.wiki.search import WikiSearcher
@@ -78,16 +73,6 @@ if TYPE_CHECKING:
     from app.core.tracing import TracingManager
 
 
-class ChunkConfigurationError(RuntimeError):
-    pass
-
-
-@dataclass
-class ParsedArtifactSnapshot:
-    document: Document
-    chunks: list[Chunk]
-
-
 @dataclass
 class PreparedDocument:
     source_path: str
@@ -95,6 +80,7 @@ class PreparedDocument:
     document: Document
     chunks: list[Chunk]
     embeddings: list[list[float]]
+    structured_document: StructuredDocument | None = None
 
 
 class IngestionPipeline:
@@ -104,7 +90,6 @@ class IngestionPipeline:
         repository: VectorRepository,
         embedding_client: EmbeddingClient,
         tracing_manager: TracingManager,
-        semantic_chunker: SemanticChunker | None = None,
         document_parser: DocumentParserClient | None = None,
         hybrid_retriever: HybridRetriever | None = None,
         wiki_compiler: WikiCompiler | None = None,
@@ -114,21 +99,17 @@ class IngestionPipeline:
         self.repository = repository
         self.embedding_client = embedding_client
         self.tracing_manager = tracing_manager
-        self.semantic_chunker = semantic_chunker
         self.document_parser = document_parser
         self.hybrid_retriever = hybrid_retriever
         self.wiki_compiler = wiki_compiler
         self.wiki_searcher = wiki_searcher
-        self._use_semantic_chunker = semantic_chunker is not None and os.getenv(
-            "RAG_SEMANTIC_CHUNKER_ENABLED", "false"
-        ).lower() in ("true", "1", "yes")
+        self.structured_parser = StructuredDocumentParser(document_parser)
 
     async def run(
         self,
         path: str,
         kb_id: str = "default",
         source_path_overrides: dict[str, str] | None = None,
-        rollback_media_path_overrides: dict[str, str] | None = None,
     ) -> IngestResponse:
         with self.tracing_manager.span(
             "ingestion.run",
@@ -157,42 +138,23 @@ class IngestionPipeline:
                     chunk_count += len(prepared.chunks)
 
             self.config.parsed_dir.mkdir(parents=True, exist_ok=True)
-            applied_snapshots: list[
-                tuple[PreparedDocument, ParsedArtifactSnapshot | None]
-            ] = []
-            try:
-                for prepared in prepared_documents:
-                    applied_snapshots.append(
-                        (
-                            prepared,
-                            self._load_parsed_artifact(
-                                prepared.source_path, prepared.doc_id, kb_id
-                            ),
-                        )
-                    )
-                    self._delete_committed_state(
-                        prepared.source_path, prepared.doc_id, kb_id
-                    )
-                    self.repository.upsert(
-                        prepared.document,
-                        prepared.chunks,
-                        prepared.embeddings,
-                    )
-                    if self.hybrid_retriever:
-                        self.hybrid_retriever.index_chunks(prepared.chunks)
-                    self._write_parsed_artifact(prepared.document, prepared.chunks)
-                    if self.wiki_compiler:
-                        self.wiki_compiler.upsert_document(
-                            prepared.document, prepared.chunks
-                        )
-                        wiki_updated = True
-            except Exception:
-                await self._rollback_applied_documents(
-                    applied_snapshots,
-                    kb_id=kb_id,
-                    media_path_overrides=rollback_media_path_overrides,
+            for prepared in prepared_documents:
+                self._delete_committed_state(prepared.source_path, prepared.doc_id, kb_id)
+                self.repository.upsert(
+                    prepared.document,
+                    prepared.chunks,
+                    prepared.embeddings,
                 )
-                raise
+                if self.hybrid_retriever:
+                    self.hybrid_retriever.index_chunks(prepared.chunks)
+                self._write_parsed_artifact(
+                    prepared.document,
+                    prepared.chunks,
+                    prepared.structured_document,
+                )
+                if self.wiki_compiler:
+                    self.wiki_compiler.upsert_document(prepared.document, prepared.chunks)
+                    wiki_updated = True
 
             if wiki_updated and self.wiki_searcher:
                 self.wiki_searcher.refresh()
@@ -214,7 +176,13 @@ class IngestionPipeline:
                 doc_id=doc_id,
                 kb_id=kb_id,
             )
-        text = normalize_text(await parse_document(file_path, self.document_parser))
+        structured_document = await self.structured_parser.parse(
+            file_path,
+            doc_id=doc_id,
+            kb_id=kb_id,
+            source_path=source_path,
+        )
+        text = self._structured_document_text(structured_document)
         if not text:
             raise ParsingError(
                 f"Document parsing returned empty content for {source_path}. "
@@ -233,36 +201,15 @@ class IngestionPipeline:
             content=text,
             metadata=document_metadata,
         )
-        chunk_size = self.config.settings["chunk"]["size"]
-        overlap = self.config.settings["chunk"]["overlap"]
-        try:
-            if self._use_semantic_chunker and self.semantic_chunker:
-                chunks = self.semantic_chunker.chunk(
-                    text,
-                    doc_id,
-                    source_path,
-                    document.title,
-                    metadata=document.metadata,
-                )
-            else:
-                chunks = build_chunks(
-                    doc_id,
-                    source_path,
-                    document.title,
-                    text,
-                    chunk_size,
-                    overlap,
-                    document.metadata,
-                )
-        except ValueError as exc:
-            raise ChunkConfigurationError(
-                f"Invalid chunk configuration for {source_path}: {exc}. "
-                f"chunk_size={chunk_size}, overlap={overlap}. "
-                "Ensure chunk_size > overlap in configs/settings.yaml"
-            ) from exc
+        chunks = self._structured_document_to_chunks(
+            structured_document,
+            source_path=source_path,
+            title=document.title,
+            metadata=document.metadata,
+        )
         if not chunks:
             raise ParsingError(
-                f"Document parsing produced no chunks for {source_path}. "
+                f"Document parsing produced no indexable structured nodes for {source_path}. "
                 "The extracted content may be empty or structurally invalid."
             )
         chunks = [
@@ -288,7 +235,69 @@ class IngestionPipeline:
             document=document,
             chunks=chunks,
             embeddings=embeddings,
+            structured_document=structured_document,
         )
+
+    def _structured_document_text(self, structured_document: StructuredDocument) -> str:
+        parts: list[str] = []
+        for node in structured_document.iter_nodes():
+            if node.node_type == NodeType.ROOT:
+                continue
+            if node.title and node.node_type == NodeType.SECTION:
+                parts.append(f"# {node.title}")
+            elif node.text.strip():
+                parts.append(node.text.strip())
+        return "\n\n".join(parts).strip()
+
+    def _structured_document_to_chunks(
+        self,
+        structured_document: StructuredDocument,
+        *,
+        source_path: str,
+        title: str,
+        metadata: dict,
+    ) -> list[Chunk]:
+        chunks: list[Chunk] = []
+        for index, node in enumerate(structured_document.iter_leaves()):
+            if node.node_type == NodeType.SECTION:
+                continue
+            text = (node.table.narrative if node.table and node.table.narrative else node.text).strip()
+            if not text and node.node_type != NodeType.IMAGE:
+                continue
+            provenance = node.provenance.model_dump()
+            table_payload = node.table.model_dump() if node.table else None
+            chunk_metadata = {
+                **metadata,
+                "kb_id": structured_document.kb_id,
+                "node_id": node.node_id,
+                "node_type": node.node_type.value,
+                "hierarchy_path": node.provenance.hierarchy_path,
+                "page_number": node.provenance.page_number,
+                "bounding_box": (
+                    node.provenance.bounding_box.model_dump()
+                    if node.provenance.bounding_box
+                    else None
+                ),
+                "source_ref": node.provenance.source_ref,
+                "content_hash": node.metadata.get("content_hash"),
+                "parser_confidence": node.metadata.get("parser_confidence"),
+                "provenance": provenance,
+            }
+            if table_payload:
+                chunk_metadata["table"] = table_payload
+            chunks.append(
+                Chunk(
+                    chunk_id=node.node_id,
+                    doc_id=structured_document.doc_id,
+                    chunk_index=index,
+                    text=text,
+                    source_path=source_path,
+                    title=" / ".join(node.provenance.hierarchy_path) or title,
+                    metadata=chunk_metadata,
+                    modality="text",
+                )
+            )
+        return chunks
 
     async def _embed_items(
         self, items: list[list[EmbedItem]]
@@ -377,7 +386,6 @@ class IngestionPipeline:
         self,
         chunks: list[Chunk],
         file_path: Path | None = None,
-        media_path_overrides: dict[str, str] | None = None,
     ) -> list[list[EmbedItem]]:
         inputs: list[list[EmbedItem]] = []
         for chunk in chunks:
@@ -389,12 +397,7 @@ class IngestionPipeline:
                     else None
                 )
                 if source is None and chunk.media_uri:
-                    override = (
-                        media_path_overrides.get(chunk.media_uri)
-                        if media_path_overrides
-                        else None
-                    )
-                    candidate = Path(override or chunk.media_uri)
+                    candidate = Path(chunk.media_uri)
                     source = candidate if candidate.exists() else None
                 if source is None:
                     raise ModelGatewayError(
@@ -413,55 +416,6 @@ class IngestionPipeline:
             else:
                 inputs.append([TextItem(chunk.text)])
         return inputs
-
-    async def _rollback_applied_documents(
-        self,
-        applied_snapshots: list[tuple[PreparedDocument, ParsedArtifactSnapshot | None]],
-        kb_id: str,
-        media_path_overrides: dict[str, str] | None = None,
-    ) -> None:
-        wiki_needs_refresh = False
-        for prepared, snapshot in reversed(applied_snapshots):
-            try:
-                if self.wiki_compiler:
-                    wiki_needs_refresh = True
-                self._delete_committed_state(
-                    prepared.source_path, prepared.doc_id, kb_id
-                )
-                if snapshot is None:
-                    continue
-                embeddings = await self._embed_items(
-                    self._chunks_to_embed_inputs(
-                        snapshot.chunks,
-                        media_path_overrides=media_path_overrides,
-                    )
-                )
-                if len(embeddings) != len(snapshot.chunks):
-                    raise ModelGatewayError(
-                        "embedding service returned an inconsistent number of vectors"
-                    )
-                self.repository.upsert(
-                    snapshot.document,
-                    snapshot.chunks,
-                    embeddings,
-                )
-                if self.hybrid_retriever:
-                    self.hybrid_retriever.index_chunks(snapshot.chunks)
-                self._write_parsed_artifact(snapshot.document, snapshot.chunks)
-                if self.wiki_compiler:
-                    self.wiki_compiler.upsert_document(
-                        snapshot.document, snapshot.chunks
-                    )
-                    wiki_needs_refresh = True
-            except Exception:
-                logger.warning(
-                    "rollback failed for document %s — manual repair may be needed",
-                    prepared.doc_id,
-                    exc_info=True,
-                )
-                continue
-        if wiki_needs_refresh and self.wiki_searcher:
-            self.wiki_searcher.refresh()
 
     def _resolve_source_path(
         self, file_path: Path, source_path_overrides: dict[str, str] | None = None
@@ -541,61 +495,19 @@ class IngestionPipeline:
         if self.wiki_compiler:
             self.wiki_compiler.remove_document(doc_id)
 
-    def _load_parsed_artifact(
+
+    def _write_parsed_artifact(
         self,
-        source_path: str,
-        doc_id: str,
-        kb_id: str,
-    ) -> ParsedArtifactSnapshot | None:
-        if not self.config.parsed_dir.exists():
-            return None
-        primary_artifact = self.config.parsed_dir / f"{doc_id}.json"
-        if primary_artifact.exists():
-            snapshot = self._read_parsed_artifact(primary_artifact)
-            if snapshot and self._snapshot_matches_scope(
-                snapshot, source_path, kb_id
-            ):
-                return snapshot
-        for artifact in sorted(self.config.parsed_dir.glob("*.json")):
-            snapshot = self._read_parsed_artifact(artifact)
-            if snapshot and self._snapshot_matches_scope(
-                snapshot, source_path, kb_id
-            ):
-                return snapshot
-        return None
-
-    def _snapshot_matches_scope(
-        self,
-        snapshot: ParsedArtifactSnapshot,
-        source_path: str,
-        kb_id: str,
-    ) -> bool:
-        return (
-            snapshot.document.source_path == source_path
-            and snapshot.document.metadata.get("kb_id", "default") == kb_id
-        )
-
-    def _read_parsed_artifact(self, artifact: Path) -> ParsedArtifactSnapshot | None:
-        try:
-            payload = json.loads(artifact.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            return None
-        document_payload = payload.get("document") if isinstance(payload, dict) else None
-        chunks_payload = payload.get("chunks") if isinstance(payload, dict) else None
-        if not isinstance(document_payload, dict) or not isinstance(chunks_payload, list):
-            return None
-        try:
-            return ParsedArtifactSnapshot(
-                document=Document.model_validate(document_payload),
-                chunks=[Chunk.model_validate(chunk) for chunk in chunks_payload],
-            )
-        except Exception:
-            return None
-
-    def _write_parsed_artifact(self, document: Document, chunks) -> None:
+        document: Document,
+        chunks,
+        structured_document: StructuredDocument | None = None,
+    ) -> None:
         artifact = {
             "document": document.model_dump(),
             "chunks": [chunk.model_dump() for chunk in chunks],
+            "structured_document": (
+                structured_document.model_dump() if structured_document else None
+            ),
         }
         target = self.config.parsed_dir / f"{document.doc_id}.json"
         target.write_text(

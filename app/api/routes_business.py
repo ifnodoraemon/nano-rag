@@ -1,24 +1,26 @@
 from __future__ import annotations
 
 import json
-import logging
 import os
 import re
-import shutil
 from pathlib import Path
 from time import time
 from uuid import uuid4
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, UploadFile
+from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, Query, Request, UploadFile
 
 from app.api.auth import RequestContext, require_api_key
-from app.ingestion.loader import IngestPathError, SUPPORTED_EXTENSIONS, list_allowed_ingest_sources
-from app.ingestion.pipeline import ChunkConfigurationError
+from app.ingestion.executor import submit_ingest_paths
+from app.ingestion.loader import (
+    SUPPORTED_EXTENSIONS,
+    list_allowed_ingest_sources,
+)
 from app.schemas.benchmark import BenchmarkRunRequest, BenchmarkRunResponse
 from app.schemas.business import (
     BusinessChatRequest,
     BusinessChatResponse,
     BusinessDocumentSummary,
+    BusinessIngestJobResponse,
     BusinessIngestRequest,
     BusinessIngestResponse,
     BusinessRetrieveRequest,
@@ -30,6 +32,7 @@ from app.schemas.business import (
     KnowledgeBaseSummary,
 )
 from app.schemas.chat import ChatRequest
+from app.schemas.structured import DocumentNode, StructuredDocument
 from app.schemas.trace import TraceRecord
 from app.eval.dataset import (
     get_benchmark_report_dir,
@@ -42,7 +45,6 @@ from app.eval.service import materialize_eval_records
 from app.benchmark.service import build_benchmark_report
 
 router = APIRouter(prefix="/v1/rag", tags=["rag"])
-logger = logging.getLogger(__name__)
 
 MAX_UPLOAD_BYTES = int(os.getenv("MAX_UPLOAD_BYTES", str(50 * 1024 * 1024)))
 MAX_FILES_PER_BATCH = int(os.getenv("MAX_FILES_PER_BATCH", "10"))
@@ -75,13 +77,6 @@ def _upload_storage_path(upload_dir: Path, source_path: str) -> Path:
     if not path.parts or path.parts[0] != "uploads":
         raise ValueError(f"upload source path must start with uploads/: {source_path}")
     return upload_dir.joinpath(*path.parts[1:])
-
-
-def _discard_path(path: Path) -> None:
-    try:
-        path.unlink(missing_ok=True)
-    except OSError as exc:
-        logger.warning("Failed to remove temporary upload file %s: %s", path, exc)
 
 
 def _ensure_kb_access(container, kb_id: str, context: RequestContext | None = None) -> None:  # noqa: ANN001
@@ -244,6 +239,36 @@ def _list_knowledge_bases(
     )
 
 
+def _load_structured_document(parsed_dir: Path, doc_id: str) -> StructuredDocument | None:
+    artifact = parsed_dir / f"{doc_id}.json"
+    if not artifact.exists():
+        return None
+    try:
+        payload = json.loads(artifact.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    raw = payload.get("structured_document") if isinstance(payload, dict) else None
+    if not isinstance(raw, dict):
+        return None
+    return StructuredDocument.model_validate(raw)
+
+
+def _find_node(document: StructuredDocument, node_id: str) -> DocumentNode | None:
+    return next((node for node in document.iter_nodes() if node.node_id == node_id), None)
+
+
+def _node_summary(node: DocumentNode) -> dict[str, object]:
+    return {
+        "node_id": node.node_id,
+        "doc_id": node.doc_id,
+        "node_type": node.node_type.value,
+        "title": node.title,
+        "text": node.text[:240],
+        "page_number": node.provenance.page_number,
+        "hierarchy_path": node.provenance.hierarchy_path,
+    }
+
+
 @router.post(
     "/chat",
     response_model=BusinessChatResponse,
@@ -311,24 +336,48 @@ async def rag_ingest(
     payload: BusinessIngestRequest,
     request: Request,
     context: RequestContext = Depends(require_api_key),
+    background_tasks: BackgroundTasks = None,
 ) -> BusinessIngestResponse:
     container = request.app.state.container
     _ensure_kb_access(container, payload.kb_id, context)
-    try:
-        response = await container.ingestion_pipeline.run(
-            payload.path,
-            kb_id=payload.kb_id,
-        )
-    except IngestPathError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    except ChunkConfigurationError as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
-    return BusinessIngestResponse(
-        status="ok",
+    job = container.ingest_job_store.create(
         kb_id=payload.kb_id,
-        documents=response.documents,
-        chunks=response.chunks,
         source="path",
+        path=payload.path,
+    )
+    if background_tasks is None:
+        background_tasks = BackgroundTasks()
+    submit_ingest_paths(
+        background_tasks=background_tasks,
+        container=container,
+        job_id=job.job_id,
+        paths=[payload.path],
+        kb_id=payload.kb_id,
+    )
+    return BusinessIngestResponse(
+        status=job.status.value,
+        stage=job.stage,
+        job_id=job.job_id,
+        kb_id=payload.kb_id,
+        source="path",
+    )
+
+
+@router.get(
+    "/ingest/jobs/{job_id}",
+    response_model=BusinessIngestJobResponse,
+)
+async def rag_ingest_job(
+    job_id: str,
+    request: Request,
+    context: RequestContext = Depends(require_api_key),
+) -> BusinessIngestJobResponse:
+    record = request.app.state.container.ingest_job_store.get(job_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail=f"ingest job not found: {job_id}")
+    _ensure_kb_access(request.app.state.container, record.kb_id, context)
+    return BusinessIngestJobResponse(
+        **record.model_dump(mode="json"),
     )
 
 
@@ -382,6 +431,7 @@ async def rag_ingest_upload(
     request: Request,
     files: list[UploadFile] = File(...),
     kb_id: str = Form(default="default"),
+    background_tasks: BackgroundTasks = None,
     context: RequestContext = Depends(require_api_key),
 ) -> BusinessIngestResponse:
     _ensure_kb_access(request.app.state.container, kb_id, context)
@@ -394,15 +444,9 @@ async def rag_ingest_upload(
         )
 
     container = request.app.state.container
-    upload_batch_dir = container.config.upload_dir / uuid4().hex[:12]
-    upload_batch_dir.mkdir(parents=True, exist_ok=True)
-
     uploaded_files: list[str] = []
-    source_path_overrides: dict[str, str] = {}
-    durable_uploads: list[tuple[Path, Path]] = []
-    staged_uploads: list[tuple[Path, Path]] = []
-    finalized_uploads: list[tuple[Path, Path | None]] = []
-    rollback_media_path_overrides: dict[str, str] = {}
+    source_paths_by_durable_path: dict[str, str] = {}
+    durable_paths: list[str] = []
     seen_upload_names: set[str] = set()
     seen_source_paths: set[str] = set()
     try:
@@ -421,7 +465,6 @@ async def rag_ingest_upload(
                     status_code=400,
                     detail=f"unsupported file type '{extension or 'unknown'}'. Supported types: {allowed}",
                 )
-            target = upload_batch_dir / f"{uuid4().hex[:8]}_{original_name}"
             source_path = _build_upload_source_path(original_name, kb_id)
             if source_path in seen_source_paths:
                 raise HTTPException(
@@ -429,8 +472,10 @@ async def rag_ingest_upload(
                     detail=f"duplicate upload source path '{source_path}' in the same request",
                 )
             seen_source_paths.add(source_path)
+            durable_path = _upload_storage_path(container.config.upload_dir, source_path)
+            durable_path.parent.mkdir(parents=True, exist_ok=True)
             total_bytes = 0
-            with target.open("wb") as output:
+            with durable_path.open("wb") as output:
                 while True:
                     chunk = await upload.read(UPLOAD_CHUNK_BYTES)
                     if not chunk:
@@ -443,62 +488,34 @@ async def rag_ingest_upload(
                         )
                     output.write(chunk)
             uploaded_files.append(original_name)
-            source_path_overrides[str(target.resolve())] = source_path
-            durable_uploads.append(
-                (target, _upload_storage_path(container.config.upload_dir, source_path))
-            )
+            source_paths_by_durable_path[str(durable_path.resolve())] = source_path
+            durable_paths.append(str(durable_path))
 
-        for temporary_path, durable_path in durable_uploads:
-            durable_path.parent.mkdir(parents=True, exist_ok=True)
-            pending_path = durable_path.with_name(
-                f".{durable_path.name}.{uuid4().hex[:8]}.tmp"
-            )
-            staged_uploads.append((pending_path, durable_path))
-            shutil.copy2(temporary_path, pending_path)
-
-        try:
-            for pending_path, durable_path in staged_uploads:
-                backup_path: Path | None = None
-                if durable_path.exists():
-                    backup_path = durable_path.with_name(
-                        f".{durable_path.name}.{uuid4().hex[:8]}.bak"
-                    )
-                    durable_path.replace(backup_path)
-                    rollback_media_path_overrides[str(durable_path)] = str(backup_path)
-                try:
-                    pending_path.replace(durable_path)
-                except Exception:
-                    if backup_path is not None and backup_path.exists():
-                        backup_path.replace(durable_path)
-                    raise
-                finalized_uploads.append((durable_path, backup_path))
-        except Exception:
-            for durable_path, backup_path in reversed(finalized_uploads):
-                durable_path.unlink(missing_ok=True)
-                if backup_path is not None and backup_path.exists():
-                    backup_path.replace(durable_path)
-            raise
-        try:
-            response = await container.ingestion_pipeline.run(
-                str(upload_batch_dir),
-                kb_id=kb_id,
-                source_path_overrides=source_path_overrides,
-                rollback_media_path_overrides=rollback_media_path_overrides,
-            )
-        except Exception:
-            for durable_path, backup_path in reversed(finalized_uploads):
-                durable_path.unlink(missing_ok=True)
-                if backup_path is not None and backup_path.exists():
-                    backup_path.replace(durable_path)
-            raise
-        for _, backup_path in finalized_uploads:
-            if backup_path is not None:
-                _discard_path(backup_path)
-        return BusinessIngestResponse(
-            status="ok",
+        durable_source_overrides = {
+            str(Path(path).resolve()): source_paths_by_durable_path[str(Path(path).resolve())]
+            for path in durable_paths
+        }
+        job = container.ingest_job_store.create(
             kb_id=kb_id,
-            documents=response.documents,
-            chunks=response.chunks,
+            source="upload",
+            path=",".join(durable_paths),
+            uploaded_files=uploaded_files,
+        )
+        if background_tasks is None:
+            background_tasks = BackgroundTasks()
+        submit_ingest_paths(
+            background_tasks=background_tasks,
+            container=container,
+            job_id=job.job_id,
+            paths=durable_paths,
+            kb_id=kb_id,
+            source_path_overrides=durable_source_overrides,
+        )
+        return BusinessIngestResponse(
+            status=job.status.value,
+            stage=job.stage,
+            job_id=job.job_id,
+            kb_id=kb_id,
             source="upload",
             uploaded_files=uploaded_files,
         )
@@ -508,12 +525,6 @@ async def rag_ingest_upload(
                 await upload.close()
             except Exception:
                 pass
-        for pending_path, _ in staged_uploads:
-            _discard_path(pending_path)
-        for _, backup_path in finalized_uploads:
-            if backup_path is not None:
-                _discard_path(backup_path)
-        shutil.rmtree(upload_batch_dir, ignore_errors=True)
 
 
 @router.get(
@@ -528,6 +539,98 @@ async def rag_documents(
     container = request.app.state.container
     _ensure_kb_access(container, kb_id, context)
     return _list_scope_documents(container.config.parsed_dir, kb_id=kb_id)
+
+
+@router.get("/documents/{doc_id}/tree")
+async def rag_document_tree(
+    doc_id: str,
+    request: Request,
+    kb_id: str = Query(default="default"),
+    context: RequestContext = Depends(require_api_key),
+) -> dict:
+    container = request.app.state.container
+    _ensure_kb_access(container, kb_id, context)
+    document = _load_structured_document(container.config.parsed_dir, doc_id)
+    if document is None or document.kb_id != kb_id:
+        raise HTTPException(status_code=404, detail=f"document tree not found: {doc_id}")
+    return document.model_dump(mode="json")
+
+
+@router.get("/nodes/{node_id}")
+async def rag_node(
+    node_id: str,
+    request: Request,
+    kb_id: str = Query(default="default"),
+    context: RequestContext = Depends(require_api_key),
+) -> dict:
+    container = request.app.state.container
+    _ensure_kb_access(container, kb_id, context)
+    doc_id = node_id.split(":node:", 1)[0] if ":node:" in node_id else node_id.split(":", 1)[0]
+    document = _load_structured_document(container.config.parsed_dir, doc_id)
+    if document is None or document.kb_id != kb_id:
+        raise HTTPException(status_code=404, detail=f"node not found: {node_id}")
+    node = _find_node(document, node_id)
+    if node is None:
+        raise HTTPException(status_code=404, detail=f"node not found: {node_id}")
+    return node.model_dump(mode="json")
+
+
+@router.get("/tables/{table_id}")
+async def rag_table(
+    table_id: str,
+    request: Request,
+    kb_id: str = Query(default="default"),
+    context: RequestContext = Depends(require_api_key),
+) -> dict:
+    container = request.app.state.container
+    _ensure_kb_access(container, kb_id, context)
+    doc_id = table_id.split(":node:", 1)[0] if ":node:" in table_id else table_id.split(":", 1)[0]
+    document = _load_structured_document(container.config.parsed_dir, doc_id)
+    if document is None or document.kb_id != kb_id:
+        raise HTTPException(status_code=404, detail=f"table not found: {table_id}")
+    node = _find_node(document, table_id)
+    if node is None or node.table is None:
+        raise HTTPException(status_code=404, detail=f"table not found: {table_id}")
+    return {
+        "table_id": table_id,
+        "doc_id": document.doc_id,
+        "source_path": document.source_path,
+        "provenance": node.provenance.model_dump(mode="json"),
+        "table": node.table.model_dump(mode="json"),
+    }
+
+
+@router.get("/graph/neighborhood")
+async def rag_graph_neighborhood(
+    request: Request,
+    node_id: str = Query(...),
+    kb_id: str = Query(default="default"),
+    context: RequestContext = Depends(require_api_key),
+) -> dict:
+    container = request.app.state.container
+    _ensure_kb_access(container, kb_id, context)
+    doc_id = node_id.split(":node:", 1)[0] if ":node:" in node_id else node_id.split(":", 1)[0]
+    document = _load_structured_document(container.config.parsed_dir, doc_id)
+    if document is None or document.kb_id != kb_id:
+        raise HTTPException(status_code=404, detail=f"node not found: {node_id}")
+
+    nodes = list(document.iter_nodes())
+    by_id = {node.node_id: node for node in nodes}
+    node = by_id.get(node_id)
+    if node is None:
+        raise HTTPException(status_code=404, detail=f"node not found: {node_id}")
+
+    neighbors: list[dict[str, object]] = []
+    if node.parent_id and node.parent_id in by_id:
+        neighbors.append({"relation": "PART_OF", "direction": "out", "node": _node_summary(by_id[node.parent_id])})
+    for child in node.children:
+        neighbors.append({"relation": "PART_OF", "direction": "in", "node": _node_summary(child)})
+    if node.parent_id and node.parent_id in by_id:
+        for sibling in by_id[node.parent_id].children:
+            if sibling.node_id != node.node_id:
+                neighbors.append({"relation": "SIBLING_OF", "direction": "both", "node": _node_summary(sibling)})
+
+    return {"node": _node_summary(node), "neighbors": neighbors}
 
 
 @router.post(

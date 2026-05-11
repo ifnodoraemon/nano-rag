@@ -195,11 +195,15 @@ def build_contexts(
         )
         context_entry: dict[str, object] = {
             "chunk_id": hit.chunk.chunk_id,
+            "node_id": metadata.get("node_id") or hit.chunk.chunk_id,
             "_dedupe_key": dedupe_key,
             "text": context_text,
             "source": hit.chunk.source_path,
             "title": section_path_text or hit.chunk.title,
             "score": round(hit.score, 6),
+            "page_number": metadata.get("page_number"),
+            "hierarchy_path": metadata.get("hierarchy_path"),
+            "bounding_box": metadata.get("bounding_box"),
             "wiki_kind": metadata.get("wiki_kind"),
             "wiki_status": metadata.get("wiki_status"),
             "original_source_path": metadata.get("original_source_path"),

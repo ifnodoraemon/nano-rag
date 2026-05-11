@@ -6,19 +6,23 @@ services:
     container_name: nano-rag-app
     ports:
       - "8000:8000"
-    environment:
+    environment: &app-env
       APP_CONFIG_DIR: /workspace/configs
       VECTORSTORE_BACKEND: ${VECTORSTORE_BACKEND:-milvus}
       MILVUS_URI: ${MILVUS_URI:-http://milvus:19530}
       HTTP_PROXY: ${HTTP_PROXY:-}
       HTTPS_PROXY: ${HTTPS_PROXY:-}
-      NO_PROXY: ${NO_PROXY:-localhost,127.0.0.1,::1},app,langfuse-web,langfuse-worker,langfuse-postgres,langfuse-clickhouse,langfuse-redis,milvus,etcd,minio
+      NO_PROXY: ${NO_PROXY:-localhost,127.0.0.1,::1},app,redis,langfuse-web,langfuse-worker,langfuse-postgres,langfuse-clickhouse,langfuse-redis,milvus,etcd,minio
       http_proxy: ${http_proxy:-}
       https_proxy: ${https_proxy:-}
-      no_proxy: ${no_proxy:-localhost,127.0.0.1,::1},app,langfuse-web,langfuse-worker,langfuse-postgres,langfuse-clickhouse,langfuse-redis,milvus,etcd,minio
+      no_proxy: ${no_proxy:-localhost,127.0.0.1,::1},app,redis,langfuse-web,langfuse-worker,langfuse-postgres,langfuse-clickhouse,langfuse-redis,milvus,etcd,minio
       ALL_PROXY: ""
       all_proxy: ""
       PARSED_OUTPUT_DIR: /workspace/data/parsed
+      INGEST_JOB_STORE_DIR: /workspace/data/reports/ingest_jobs
+      RAG_INGEST_EXECUTOR: ${RAG_INGEST_EXECUTOR:-celery}
+      RAG_BROKER_URL: ${RAG_BROKER_URL:-redis://redis:6379/0}
+      RAG_RESULT_BACKEND: ${RAG_RESULT_BACKEND:-redis://redis:6379/1}
       EVAL_REPORT_DIR: /workspace/data/reports/eval
       LANGFUSE_OTEL_ENDPOINT: ${LANGFUSE_OTEL_ENDPOINT:-http://langfuse-web:3000/api/public/otel/v1/traces}
       LANGFUSE_UI_ENDPOINT: ${LANGFUSE_UI_ENDPOINT:-http://langfuse-web:3000}
@@ -60,6 +64,8 @@ services:
       - app-report-data:/workspace/data/reports
       - app-upload-data:/workspace/data/uploads
     depends_on:
+      redis:
+        condition: service_healthy
       milvus:
         condition: service_healthy
     restart: unless-stopped
@@ -75,6 +81,49 @@ services:
       timeout: 5s
       retries: 6
       start_period: 10s
+
+  worker:
+    build:
+      context: ..
+      dockerfile: docker/app.Dockerfile
+    container_name: nano-rag-worker
+    command:
+      [
+        "celery",
+        "-A",
+        "app.ingestion.tasks:celery_app",
+        "worker",
+        "--loglevel=INFO",
+        "--concurrency=${RAG_WORKER_CONCURRENCY:-8}",
+        "-Q",
+        "ingest",
+      ]
+    environment: *app-env
+    volumes:
+      - ../configs:/workspace/configs:ro
+      - ../data/raw:/workspace/data/raw:ro
+      - ../data/eval:/workspace/data/eval:ro
+      - app-parsed-data:/workspace/data/parsed
+      - app-report-data:/workspace/data/reports
+      - app-upload-data:/workspace/data/uploads
+    depends_on:
+      redis:
+        condition: service_healthy
+      milvus:
+        condition: service_healthy
+    restart: unless-stopped
+
+  redis:
+    image: redis:7.4-alpine
+    container_name: nano-rag-redis
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 5s
 
   etcd:
     image: quay.io/coreos/etcd:v3.5.25
@@ -291,6 +340,7 @@ volumes:
   app-parsed-data:
   app-report-data:
   app-upload-data:
+  redis-data:
   etcd-data:
   minio-data:
   milvus-data:

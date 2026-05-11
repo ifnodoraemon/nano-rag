@@ -359,7 +359,7 @@ async def _build_health_detail(container) -> dict[str, object]:  # noqa: ANN001
     features = {
         "wiki": bool(getattr(config, "wiki_enabled", False)),
         "hybrid_search": bool(getattr(config, "hybrid_search_enabled", False)),
-        "semantic_chunker": bool(getattr(config, "semantic_chunker_enabled", False)),
+        "structured_ingestion": True,
         "query_rewrite": bool(getattr(config, "query_rewrite_enabled", False)),
         "diagnosis": bool(getattr(config, "diagnosis_enabled", False)),
         "eval": bool(getattr(config, "eval_enabled", False)),
@@ -401,6 +401,11 @@ async def _build_health_detail(container) -> dict[str, object]:  # noqa: ANN001
             "status": vectorstore_status,
             "error": vectorstore_error,
             "details": vectorstore_stats,
+        },
+        "ingestion": {
+            "executor": getattr(config, "ingest_executor", "background"),
+            "broker_configured": bool(getattr(config, "ingest_broker_url", "")),
+            "job_store_dir": str(getattr(config, "ingest_job_store_dir", "")),
         },
         "features": features,
         "trace_count": container.trace_store.list().total,

@@ -29,8 +29,12 @@ class ChatRequest(BaseModel):
 class Citation(BaseModel):
     citation_label: str | None = None
     chunk_id: str
+    node_id: str | None = None
     source: str
     score: float | None = None
+    page_number: int | None = None
+    hierarchy_path: list[str] = Field(default_factory=list)
+    bounding_box: dict[str, object] | None = None
     evidence_role: str | None = None
     wiki_status: str | None = None
     modality: str | None = None

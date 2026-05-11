@@ -16,7 +16,7 @@ from app.generation.answer_formatter import AnswerFormatter
 from app.generation.prompt_builder import PromptBuilder
 from app.generation.service import GenerationService
 from app.ingestion.pipeline import IngestionPipeline
-from app.ingestion.semantic_chunker import SemanticChunker, SemanticChunkerConfig
+from app.ingestion.jobs import IngestJobStore
 from app.model_client.document_parser import DocumentParserClient
 from app.model_client.embeddings import EmbeddingClient
 from app.model_client.generation import GenerationClient
@@ -220,6 +220,15 @@ class AppConfig:
         )
 
     @property
+    def ingest_job_store_dir(self) -> Path:
+        return Path(
+            os.getenv(
+                "INGEST_JOB_STORE_DIR",
+                self.config_dir.parent / "data" / "reports" / "ingest_jobs",
+            )
+        )
+
+    @property
     def knowledge_base_catalog_path(self) -> Path:
         return Path(
             os.getenv(
@@ -250,6 +259,14 @@ class AppConfig:
         )
 
     @property
+    def ingest_executor(self) -> str:
+        return os.getenv("RAG_INGEST_EXECUTOR", "background").strip().lower()
+
+    @property
+    def ingest_broker_url(self) -> str:
+        return os.getenv("RAG_BROKER_URL", "").strip()
+
+    @property
     def business_api_keys(self) -> set[str]:
         raw = os.getenv("RAG_API_KEYS", "")
         return {item.strip() for item in raw.split(",") if item.strip()}
@@ -264,10 +281,6 @@ class AppConfig:
         if raw is not None:
             return parse_bool_env(raw)
         return bool(self.settings.get("hybrid_search", {}).get("enabled", False))
-
-    @property
-    def semantic_chunker_enabled(self) -> bool:
-        return parse_bool_env(os.getenv("RAG_SEMANTIC_CHUNKER_ENABLED"))
 
     @property
     def query_rewrite_enabled(self) -> bool:
@@ -331,8 +344,8 @@ class AppContainer:
     diagnosis_service: object | None
     feedback_store: FeedbackStore
     knowledge_base_catalog: KnowledgeBaseCatalog
+    ingest_job_store: IngestJobStore | None = None
     query_rewriter: QueryRewriter | None = None
-    semantic_chunker: SemanticChunker | None = None
     hybrid_retriever: HybridRetriever | None = None
     wiki_compiler: WikiCompiler | None = None
     wiki_searcher: WikiSearcher | None = None
@@ -357,6 +370,7 @@ class AppContainer:
         document_parser = DocumentParserClient(config)
         trace_store = TraceStore(persist_dir=config.trace_store_dir)
         feedback_store = FeedbackStore(persist_dir=config.feedback_store_dir)
+        ingest_job_store = IngestJobStore(config.ingest_job_store_dir)
         knowledge_base_catalog = KnowledgeBaseCatalog(
             config.knowledge_base_catalog_path,
             seed_kb_ids=config.seed_kb_ids,
@@ -382,10 +396,6 @@ class AppContainer:
                 embedding_client=embedding_client,
             )
             hybrid_retriever.bootstrap_from_parsed_dir(config.parsed_dir)
-        semantic_chunker = None
-        if config.semantic_chunker_enabled:
-            semantic_chunker_config = SemanticChunkerConfig.from_env()
-            semantic_chunker = SemanticChunker(config=semantic_chunker_config)
         ragas_runner = None
         if config.eval_enabled:
             from app.eval.ragas_runner import RagasRunner
@@ -428,7 +438,6 @@ class AppContainer:
                 repository,
                 embedding_client,
                 tracing_manager,
-                semantic_chunker,
                 document_parser=document_parser,
                 hybrid_retriever=hybrid_retriever,
                 wiki_compiler=wiki_compiler,
@@ -441,9 +450,9 @@ class AppContainer:
             tracing_manager=tracing_manager,
             diagnosis_service=diagnosis_service,
             feedback_store=feedback_store,
+            ingest_job_store=ingest_job_store,
             knowledge_base_catalog=knowledge_base_catalog,
             query_rewriter=query_rewriter,
-            semantic_chunker=semantic_chunker,
             hybrid_retriever=hybrid_retriever,
             wiki_compiler=wiki_compiler,
             wiki_searcher=wiki_searcher,
