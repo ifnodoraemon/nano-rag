@@ -4,8 +4,8 @@ services:
       context: ..
       dockerfile: docker/app.Dockerfile
     container_name: nano-rag-app
-    ports:
-      - "8000:8000"
+    expose:
+      - "8000"
     environment: &app-env
       APP_CONFIG_DIR: /workspace/configs
       VECTORSTORE_BACKEND: ${VECTORSTORE_BACKEND:-milvus}
@@ -144,9 +144,9 @@ services:
       NEO4J_server_memory_heap_initial__size: ${NEO4J_HEAP_INITIAL_SIZE:-1G}
       NEO4J_server_memory_heap_max__size: ${NEO4J_HEAP_MAX_SIZE:-4G}
       NEO4J_server_memory_pagecache_size: ${NEO4J_PAGECACHE_SIZE:-4G}
-    ports:
-      - "127.0.0.1:7474:7474"
-      - "127.0.0.1:7687:7687"
+    expose:
+      - "7474"
+      - "7687"
     volumes:
       - neo4j-data:/data
       - neo4j-logs:/logs
@@ -190,8 +190,8 @@ services:
       MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
       MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin}
     command: minio server /minio_data
-    ports:
-      - "127.0.0.1:9000:9000"
+    expose:
+      - "9000"
     volumes:
       - minio-data:/minio_data
     healthcheck:
@@ -207,9 +207,9 @@ services:
     environment:
       ETCD_ENDPOINTS: etcd:2379
       MINIO_ADDRESS: minio:9000
-    ports:
-      - "127.0.0.1:19530:19530"
-      - "127.0.0.1:9091:9091"
+    expose:
+      - "19530"
+      - "9091"
     depends_on:
       etcd:
         condition: service_healthy
@@ -226,13 +226,12 @@ services:
       start_period: 20s
 
   frontend:
-    profiles: ["frontend"]
     build:
       context: ..
       dockerfile: docker/frontend.Dockerfile
     container_name: nano-rag-frontend
     ports:
-      - "3000:80"
+      - "${FRONTEND_PORT:-3000}:80"
     environment:
       RAG_PROXY_API_KEY: ${RAG_PROXY_API_KEY:-nano-rag-local}
     depends_on:

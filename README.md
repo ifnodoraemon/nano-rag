@@ -7,23 +7,28 @@ Nano RAG 是一个真实数据优先的企业 RAG 工作台。后端负责文档
 ## 快速开始
 
 ```bash
-docker compose -f docker/docker-compose.yml up -d --build app worker
+docker compose -f docker/docker-compose.yml up -d --build
 ```
 
 访问地址：
 
-- 后端：`http://127.0.0.1:8000`
-- Milvus：`http://127.0.0.1:19530`
+- 前端/API 统一入口：`http://127.0.0.1:3000`
 
-可选前端和观测栈按需启动：
+默认只暴露前端一个 host 端口；后端、Milvus、Neo4j、Redis、MinIO 都只在 Docker 网络内通信。观测栈按需启动：
 
 ```bash
-docker compose -f docker/docker-compose.yml --profile frontend up -d --build frontend
 docker compose -f docker/docker-compose.yml --profile observability up -d langfuse-web langfuse-worker
 ```
 
-- 前端：`http://127.0.0.1:3000`
 - Langfuse：`http://127.0.0.1:3001`
+
+如果只做本地 UI/接口验证，不需要 Milvus、Neo4j 和 Celery worker，可使用 lite 覆盖文件，只启动 `app` 和 `frontend` 两个容器：
+
+```bash
+docker compose -f docker/docker-compose.lite.yml up -d --build
+```
+
+lite 模式使用内存向量库、artifact 图扩展和 background ingest；正式规范压测仍建议使用默认生产栈。
 
 浏览器端不需要配置 API key。前端 nginx 会为代理到后端的请求注入业务 key；本地 Docker 默认使用 `RAG_PROXY_API_KEY=nano-rag-local`，需要和后端 `RAG_API_KEYS` 中的一个值保持一致。
 
@@ -219,10 +224,12 @@ docker logs --tail 120 nano-rag-app
 docker logs --tail 120 nano-rag-frontend
 ```
 
-业务接口直连后端时需要业务 API key：
+业务接口通过前端统一入口访问时由 nginx 注入业务 key。仅在容器网络内直连后端时才需要业务 API key：
 
 ```bash
-curl -sS http://127.0.0.1:8000/health/detail \
+docker compose -f docker/docker-compose.yml exec app \
+  python -c "import urllib.request; print(urllib.request.urlopen('http://127.0.0.1:8000/health').read().decode())"
+curl -sS http://127.0.0.1:3000/health/detail \
   -H 'X-API-Key: nano-rag-local'
 ```
 

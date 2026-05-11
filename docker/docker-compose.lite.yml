@@ -1,0 +1,79 @@
+services:
+  app:
+    build:
+      context: ..
+      dockerfile: docker/app.Dockerfile
+    container_name: nano-rag-app
+    expose:
+      - "8000"
+    environment:
+      APP_CONFIG_DIR: /workspace/configs
+      VECTORSTORE_BACKEND: memory
+      RAG_GRAPH_BACKEND: artifact
+      RAG_INGEST_EXECUTOR: background
+      RAG_AUTH_DISABLED: ${RAG_AUTH_DISABLED:-}
+      RAG_API_KEYS: ${RAG_API_KEYS:-nano-rag-local}
+      RAG_DIAGNOSIS_ENABLED: ${RAG_DIAGNOSIS_ENABLED:-true}
+      RAG_EVAL_ENABLED: ${RAG_EVAL_ENABLED:-true}
+      RAG_INGEST_ALLOWED_DIRS: /workspace/data/raw
+      PARSED_OUTPUT_DIR: /workspace/data/parsed
+      INGEST_JOB_STORE_DIR: /workspace/data/reports/ingest_jobs
+      EVAL_DATASET_DIR: /workspace/data/eval
+      EVAL_REPORT_DIR: /workspace/data/reports/eval
+      MODEL_GATEWAY_MODE: ${MODEL_GATEWAY_MODE:-live}
+      MODEL_GATEWAY_BASE_URL: ${COMPOSE_MODEL_GATEWAY_BASE_URL:-https://generativelanguage.googleapis.com/v1beta/openai}
+      MODEL_GATEWAY_API_KEY: ${COMPOSE_MODEL_GATEWAY_API_KEY:-}
+      GENERATION_MODEL_ALIAS: ${COMPOSE_GENERATION_MODEL_ALIAS:-gemini-flash-lite-latest}
+      GENERATION_API_BASE_URL: ${COMPOSE_GENERATION_API_BASE_URL:-https://generativelanguage.googleapis.com/v1beta/openai}
+      GENERATION_API_KEY: ${COMPOSE_GENERATION_API_KEY:-}
+      EMBEDDING_PROVIDER: ${COMPOSE_EMBEDDING_PROVIDER:-gemini}
+      EMBEDDING_MODEL_ALIAS: ${COMPOSE_EMBEDDING_MODEL_ALIAS:-gemini-embedding-2-preview}
+      EMBEDDING_API_BASE_URL: ${COMPOSE_EMBEDDING_API_BASE_URL:-https://generativelanguage.googleapis.com}
+      EMBEDDING_API_KEY: ${COMPOSE_EMBEDDING_API_KEY:-}
+      DOCUMENT_PARSER_ENABLED: ${DOCUMENT_PARSER_ENABLED:-true}
+      DOCUMENT_PARSER_PROVIDER: ${COMPOSE_DOCUMENT_PARSER_PROVIDER:-gemini}
+      DOCUMENT_PARSER_MODEL: ${COMPOSE_DOCUMENT_PARSER_MODEL:-gemini-flash-lite-latest}
+      DOCUMENT_PARSER_API_BASE_URL: ${COMPOSE_DOCUMENT_PARSER_API_BASE_URL:-https://generativelanguage.googleapis.com}
+      DOCUMENT_PARSER_API_KEY: ${COMPOSE_DOCUMENT_PARSER_API_KEY:-}
+      RERANK_MODEL_ALIAS: ${COMPOSE_RERANK_MODEL_ALIAS:-disabled}
+      RERANK_API_BASE_URL: ${COMPOSE_RERANK_API_BASE_URL:-}
+      RERANK_API_KEY: ${COMPOSE_RERANK_API_KEY:-}
+      RERANK_API_PATH: ${COMPOSE_RERANK_API_PATH:-}
+      DISABLE_RERANK: ${COMPOSE_DISABLE_RERANK:-true}
+    volumes:
+      - ../configs:/workspace/configs:ro
+      - ../data/raw:/workspace/data/raw:ro
+      - ../data/eval:/workspace/data/eval:ro
+      - app-parsed-data:/workspace/data/parsed
+      - app-report-data:/workspace/data/reports
+      - app-upload-data:/workspace/data/uploads
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=5)",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 10s
+
+  frontend:
+    build:
+      context: ..
+      dockerfile: docker/frontend.Dockerfile
+    container_name: nano-rag-frontend
+    ports:
+      - "${FRONTEND_PORT:-3000}:80"
+    environment:
+      RAG_PROXY_API_KEY: ${RAG_PROXY_API_KEY:-nano-rag-local}
+    depends_on:
+      app:
+        condition: service_healthy
+
+volumes:
+  app-parsed-data:
+  app-report-data:
+  app-upload-data:
