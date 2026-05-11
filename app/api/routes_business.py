@@ -32,8 +32,9 @@ from app.schemas.business import (
     KnowledgeBaseSummary,
 )
 from app.schemas.chat import ChatRequest
-from app.schemas.structured import DocumentNode, GraphEntity, StructuredDocument
+from app.schemas.structured import DocumentNode, StructuredDocument
 from app.schemas.trace import TraceRecord
+from app.retrieval.graph_index import GraphIndex
 from app.eval.dataset import (
     get_benchmark_report_dir,
     load_jsonl_dataset,
@@ -255,28 +256,6 @@ def _load_structured_document(parsed_dir: Path, doc_id: str) -> StructuredDocume
 
 def _find_node(document: StructuredDocument, node_id: str) -> DocumentNode | None:
     return next((node for node in document.iter_nodes() if node.node_id == node_id), None)
-
-
-def _node_summary(node: DocumentNode) -> dict[str, object]:
-    return {
-        "node_id": node.node_id,
-        "doc_id": node.doc_id,
-        "node_type": node.node_type.value,
-        "title": node.title,
-        "text": node.text[:240],
-        "page_number": node.provenance.page_number,
-        "hierarchy_path": node.provenance.hierarchy_path,
-    }
-
-
-def _entity_summary(entity: GraphEntity) -> dict[str, object]:
-    return {
-        "entity_id": entity.entity_id,
-        "name": entity.name,
-        "entity_type": entity.entity_type,
-        "source_node_ids": entity.source_node_ids,
-        "metadata": entity.metadata,
-    }
 
 
 @router.post(
@@ -619,51 +598,14 @@ async def rag_graph_neighborhood(
 ) -> dict:
     container = request.app.state.container
     _ensure_kb_access(container, kb_id, context)
-    doc_id = node_id.split(":node:", 1)[0] if ":node:" in node_id else node_id.split(":", 1)[0]
-    document = _load_structured_document(container.config.parsed_dir, doc_id)
-    if document is None or document.kb_id != kb_id:
+    neighborhood = GraphIndex(container.config.parsed_dir).neighborhood(
+        node_id,
+        kb_id=kb_id,
+    )
+    if neighborhood is None:
         raise HTTPException(status_code=404, detail=f"node not found: {node_id}")
-
-    nodes = list(document.iter_nodes())
-    by_id = {node.node_id: node for node in nodes}
-    node = by_id.get(node_id)
-    if node is None:
-        raise HTTPException(status_code=404, detail=f"node not found: {node_id}")
-
-    entity_by_id = {entity.entity_id: entity for entity in document.graph.entities}
-    neighbors: list[dict[str, object]] = []
-    seen: set[tuple[str, str, str]] = set()
-
-    def add_neighbor(relation: str, direction: str, target: dict[str, object]) -> None:
-        target_id = str(target.get("node_id") or target.get("entity_id") or "")
-        key = (relation, direction, target_id)
-        if not target_id or key in seen:
-            return
-        seen.add(key)
-        neighbors.append({"relation": relation, "direction": direction, "target": target})
-
-    for relation in document.graph.relations:
-        if relation.source_id == node_id:
-            target_node = by_id.get(relation.target_id)
-            target_entity = entity_by_id.get(relation.target_id)
-            if target_node:
-                add_neighbor(relation.relation_type, "out", _node_summary(target_node))
-            elif target_entity:
-                add_neighbor(relation.relation_type, "out", _entity_summary(target_entity))
-        if relation.target_id == node_id:
-            source_node = by_id.get(relation.source_id)
-            source_entity = entity_by_id.get(relation.source_id)
-            if source_node:
-                add_neighbor(relation.relation_type, "in", _node_summary(source_node))
-            elif source_entity:
-                add_neighbor(relation.relation_type, "in", _entity_summary(source_entity))
-
-    if node.parent_id and node.parent_id in by_id:
-        for sibling in by_id[node.parent_id].children:
-            if sibling.node_id != node.node_id:
-                add_neighbor("SIBLING_OF", "both", _node_summary(sibling))
-
-    return {"node": _node_summary(node), "neighbors": neighbors}
+    node, neighbors = neighborhood
+    return {"node": node, "neighbors": neighbors}
 
 
 @router.post(

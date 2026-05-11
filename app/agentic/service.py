@@ -69,7 +69,13 @@ class AgenticReasoningService:
             contexts, trace = await self._retrieve(payload, payload.query)
             trace_id = str(trace["trace_id"])
             retrieval_queries = [payload.query]
-            contexts = self._merge_contexts(contexts, self.graph_expander.expand(contexts))
+            contexts = self._merge_contexts(
+                contexts,
+                self.graph_expander.expand(
+                    contexts,
+                    kb_id=payload.kb_id or "default",
+                ),
+            )
             check = await self._verify(payload.query, subqueries, contexts)
 
             for query in self._next_queries(payload.query, subqueries, check):
@@ -82,7 +88,10 @@ class AgenticReasoningService:
                 contexts = self._merge_contexts(
                     contexts,
                     more_contexts,
-                    self.graph_expander.expand(more_contexts),
+                    self.graph_expander.expand(
+                        more_contexts,
+                        kb_id=payload.kb_id or "default",
+                    ),
                 )
                 check = await self._verify(payload.query, subqueries, contexts)
 
@@ -265,6 +274,7 @@ class AgenticReasoningService:
                     "title": context.get("title"),
                     "hierarchy_path": context.get("hierarchy_path"),
                     "page_number": context.get("page_number"),
+                    "graph_relation": context.get("graph_relation"),
                     "text": str(context.get("text") or "")[:1600],
                 }
             )
