@@ -356,17 +356,38 @@ async def _build_health_detail(container) -> dict[str, object]:  # noqa: ANN001
         vectorstore_status = "error"
         vectorstore_error = str(exc)
 
+    graphstore_status = "disabled"
+    graphstore_error: str | None = None
+    graph_backend = getattr(config, "graph_backend", "artifact")
+    graphstore_stats: dict[str, object] = {"backend": graph_backend}
+    graph_store = getattr(container, "graph_store", None)
+    if graph_store is not None:
+        graphstore_status = "ok"
+        try:
+            graphstore_stats = graph_store.stats()
+        except Exception as exc:  # pragma: no cover
+            graphstore_status = "error"
+            graphstore_error = str(exc)
+
     features = {
         "wiki": bool(getattr(config, "wiki_enabled", False)),
         "hybrid_search": bool(getattr(config, "hybrid_search_enabled", False)),
         "structured_ingestion": True,
+        "agent_workflow": "langgraph",
+        "graph_store": graphstore_stats.get("backend", graph_backend),
         "query_rewrite": bool(getattr(config, "query_rewrite_enabled", False)),
         "diagnosis": bool(getattr(config, "diagnosis_enabled", False)),
         "eval": bool(getattr(config, "eval_enabled", False)),
         "benchmark": bool(getattr(config, "benchmark_enabled", False)),
     }
 
-    status = "ok" if gateway_ok and vectorstore_status == "ok" else "degraded"
+    status = (
+        "ok"
+        if gateway_ok
+        and vectorstore_status == "ok"
+        and graphstore_status != "error"
+        else "degraded"
+    )
     generation_gateway = capability_gateways.get("generation", {})
     return {
         "status": status,
@@ -401,6 +422,11 @@ async def _build_health_detail(container) -> dict[str, object]:  # noqa: ANN001
             "status": vectorstore_status,
             "error": vectorstore_error,
             "details": vectorstore_stats,
+        },
+        "graphstore": {
+            "status": graphstore_status,
+            "error": graphstore_error,
+            "details": graphstore_stats,
         },
         "ingestion": {
             "executor": getattr(config, "ingest_executor", "background"),

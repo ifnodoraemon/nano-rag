@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import asyncio
 import json
 from dataclasses import dataclass
 from pathlib import Path
@@ -22,6 +23,7 @@ from app.model_client.multimodal_embedding import (
     VideoItem,
 )
 from app.retrieval.hybrid_retriever import HybridRetriever
+from app.retrieval.graph_store import GraphStore
 from app.schemas.chunk import Chunk
 from app.schemas.document import Document, IngestResponse
 from app.schemas.structured import NodeType, StructuredDocument
@@ -95,6 +97,7 @@ class IngestionPipeline:
         tracing_manager: TracingManager,
         document_parser: DocumentParserClient | None = None,
         hybrid_retriever: HybridRetriever | None = None,
+        graph_store: GraphStore | None = None,
         wiki_compiler: WikiCompiler | None = None,
         wiki_searcher: WikiSearcher | None = None,
     ) -> None:
@@ -105,6 +108,7 @@ class IngestionPipeline:
         self.tracing_manager = tracing_manager
         self.document_parser = document_parser
         self.hybrid_retriever = hybrid_retriever
+        self.graph_store = graph_store
         self.wiki_compiler = wiki_compiler
         self.wiki_searcher = wiki_searcher
         self.structured_parser = StructuredDocumentParser(document_parser)
@@ -157,6 +161,11 @@ class IngestionPipeline:
                     prepared.chunks,
                     prepared.structured_document,
                 )
+                if self.graph_store and prepared.structured_document:
+                    await asyncio.to_thread(
+                        self.graph_store.upsert_document,
+                        prepared.structured_document,
+                    )
                 if self.wiki_compiler:
                     self.wiki_compiler.upsert_document(prepared.document, prepared.chunks)
                     wiki_updated = True

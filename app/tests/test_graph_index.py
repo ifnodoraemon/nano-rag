@@ -94,3 +94,22 @@ def test_graph_neighborhood_includes_cross_document_shared_entity(tmp_path) -> N
     targets = [item["target"] for item in neighbors]
     assert any(target.get("entity_id") == "entity:shared" for target in targets)
     assert any(target.get("node_id") == "doc-b:node:1" for target in targets)
+
+
+def test_graph_expander_prefers_configured_graph_store(tmp_path) -> None:
+    class FakeGraphStore:
+        def expand_node_ids(self, node_ids, *, kb_id, max_neighbors=8):  # noqa: ANN001
+            assert node_ids == {"doc-a:node:1"}
+            assert kb_id == "default"
+            return [("doc-b:node:1", "NEO4J_PATH")]
+
+    _write_artifact(tmp_path, _document("doc-a", "a.md", "Evidence from A."))
+    _write_artifact(tmp_path, _document("doc-b", "b.md", "Evidence from B."))
+
+    expanded = GraphExpander(tmp_path, FakeGraphStore()).expand(
+        [{"node_id": "doc-a:node:1", "chunk_id": "doc-a:node:1"}],
+        kb_id="default",
+    )
+
+    assert expanded[0]["node_id"] == "doc-b:node:1"
+    assert expanded[0]["graph_relation"] == "NEO4J_PATH"

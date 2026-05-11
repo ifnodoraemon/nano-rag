@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from time import perf_counter
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, TypedDict
 
 from app.generation.answer_formatter import AnswerFormatter
 from app.generation.prompt_builder import PromptBuilder
@@ -11,10 +11,12 @@ from app.model_client.generation import GenerationClient
 from app.retrieval.graph_expander import GraphExpander
 from app.retrieval.pipeline import RetrievalPipeline
 from app.schemas.chat import ChatRequest, ChatResponse
+from langgraph.graph import END, StateGraph
 
 if TYPE_CHECKING:
     from app.core.config import AppConfig
     from app.core.tracing import TraceStore, TracingManager
+    from app.retrieval.graph_store import GraphStore
 
 
 @dataclass(frozen=True)
@@ -39,6 +41,21 @@ class EvidenceCheck:
         }
 
 
+class AgentState(TypedDict, total=False):
+    payload: ChatRequest
+    started_at: float
+    subqueries: list[str]
+    contexts: list[dict[str, object]]
+    trace_id: str
+    retrieval_queries: list[str]
+    graph_expanded_node_ids: list[str]
+    check: EvidenceCheck
+    messages: list[dict[str, object]]
+    response: ChatResponse
+    generation_result: dict[str, object]
+    generation_seconds: float
+
+
 class AgenticReasoningService:
     def __init__(
         self,
@@ -49,6 +66,7 @@ class AgenticReasoningService:
         answer_formatter: AnswerFormatter,
         trace_store: TraceStore,
         tracing_manager: TracingManager,
+        graph_store: GraphStore | None = None,
     ) -> None:
         self.config = config
         self.retrieval_pipeline = retrieval_pipeline
@@ -57,86 +75,172 @@ class AgenticReasoningService:
         self.answer_formatter = answer_formatter
         self.trace_store = trace_store
         self.tracing_manager = tracing_manager
-        self.graph_expander = GraphExpander(config.parsed_dir)
+        self.graph_expander = GraphExpander(config.parsed_dir, graph_store)
         agent_settings = config.settings.get("agent", {})
         self.max_retrieval_loops = int(agent_settings.get("max_retrieval_loops", 2))
         self.max_subqueries = int(agent_settings.get("max_subqueries", 4))
+        self.workflow = self._build_workflow()
 
     async def run(self, payload: ChatRequest) -> ChatResponse:
         with self.tracing_manager.span("agent.run", {"agent.query": payload.query}):
-            started = perf_counter()
-            subqueries = await self._decompose(payload.query)
-            contexts, trace = await self._retrieve(payload, payload.query)
-            trace_id = str(trace["trace_id"])
-            retrieval_queries = [payload.query]
-            graph_expanded_contexts = self.graph_expander.expand(
-                contexts,
-                kb_id=payload.kb_id or "default",
+            state = await self.workflow.ainvoke(
+                {"payload": payload, "started_at": perf_counter()}
             )
-            graph_expanded_node_ids = self._node_ids(graph_expanded_contexts)
-            contexts = self._merge_contexts(
-                contexts,
-                graph_expanded_contexts,
-            )
-            check = await self._verify(payload.query, subqueries, contexts)
+            return state["response"]
 
-            for query in self._next_queries(payload.query, subqueries, check):
-                if check.sufficient or len(retrieval_queries) > self.max_retrieval_loops:
-                    break
-                if query in retrieval_queries:
-                    continue
-                more_contexts, _ = await self._retrieve(payload, query)
-                retrieval_queries.append(query)
-                more_graph_contexts = self.graph_expander.expand(
-                    more_contexts,
-                    kb_id=payload.kb_id or "default",
-                )
-                graph_expanded_node_ids.extend(self._node_ids(more_graph_contexts))
-                contexts = self._merge_contexts(
-                    contexts,
-                    more_contexts,
-                    more_graph_contexts,
-                )
-                check = await self._verify(payload.query, subqueries, contexts)
+    def _build_workflow(self):
+        workflow = StateGraph(AgentState)
+        workflow.add_node("intent_decomposition", self._intent_decomposition_node)
+        workflow.add_node("initial_recall", self._initial_recall_node)
+        workflow.add_node("verification", self._verification_node)
+        workflow.add_node("corrective_recall", self._corrective_recall_node)
+        workflow.add_node("answer_synthesis", self._answer_synthesis_node)
+        workflow.set_entry_point("intent_decomposition")
+        workflow.add_edge("intent_decomposition", "initial_recall")
+        workflow.add_edge("initial_recall", "verification")
+        workflow.add_conditional_edges(
+            "verification",
+            self._route_after_verification,
+            {
+                "corrective_recall": "corrective_recall",
+                "answer_synthesis": "answer_synthesis",
+            },
+        )
+        workflow.add_edge("corrective_recall", "verification")
+        workflow.add_edge("answer_synthesis", END)
+        return workflow.compile()
 
-            agent_state = {
-                "workflow_nodes": [
-                    "intent_decomposition",
-                    "initial_recall",
-                    "graph_expansion",
-                    "verification_loop",
-                    "answer_synthesis",
-                ],
-                "subqueries": subqueries,
-                "retrieval_queries": retrieval_queries,
-                "graph_expanded_node_ids": self._dedupe(graph_expanded_node_ids),
-                "verification": check.as_dict(),
-            }
-            messages = self.prompt_builder.build_messages(
+    async def _intent_decomposition_node(self, state: AgentState) -> AgentState:
+        payload = state["payload"]
+        return {"subqueries": await self._decompose(payload.query)}
+
+    async def _initial_recall_node(self, state: AgentState) -> AgentState:
+        payload = state["payload"]
+        contexts, trace = await self._retrieve(payload, payload.query)
+        graph_contexts = self.graph_expander.expand(
+            contexts,
+            kb_id=payload.kb_id or "default",
+        )
+        return {
+            "trace_id": str(trace["trace_id"]),
+            "retrieval_queries": [payload.query],
+            "graph_expanded_node_ids": self._node_ids(graph_contexts),
+            "contexts": self._merge_contexts(contexts, graph_contexts),
+        }
+
+    async def _verification_node(self, state: AgentState) -> AgentState:
+        payload = state["payload"]
+        return {
+            "check": await self._verify(
                 payload.query,
-                contexts,
-                agent_state=agent_state,
+                state.get("subqueries", [payload.query]),
+                state.get("contexts", []),
             )
-            generation_started = perf_counter()
-            result = await self.generation_client.generate(messages)
-            generation_seconds = round(perf_counter() - generation_started, 4)
-            response = self.answer_formatter.format(
-                answer=str(result["content"]),
-                contexts=contexts,
-                trace_id=trace_id,
-            )
-            self._update_trace(
-                trace_id=trace_id,
-                payload=payload,
-                contexts=contexts,
-                messages=messages,
-                response=response,
-                result=result,
-                agent_state=agent_state,
-                generation_seconds=generation_seconds,
-                end_to_end_seconds=round(perf_counter() - started, 4),
-            )
-            return response
+        }
+
+    async def _corrective_recall_node(self, state: AgentState) -> AgentState:
+        payload = state["payload"]
+        query = self._next_query(state)
+        if query is None:
+            return {}
+        more_contexts, _ = await self._retrieve(payload, query)
+        graph_contexts = self.graph_expander.expand(
+            more_contexts,
+            kb_id=payload.kb_id or "default",
+        )
+        return {
+            "retrieval_queries": [*state.get("retrieval_queries", []), query],
+            "graph_expanded_node_ids": self._dedupe(
+                [
+                    *state.get("graph_expanded_node_ids", []),
+                    *self._node_ids(graph_contexts),
+                ]
+            ),
+            "contexts": self._merge_contexts(
+                state.get("contexts", []),
+                more_contexts,
+                graph_contexts,
+            ),
+        }
+
+    async def _answer_synthesis_node(self, state: AgentState) -> AgentState:
+        payload = state["payload"]
+        check = state["check"]
+        contexts = state.get("contexts", [])
+        agent_state = self._public_agent_state(state, check)
+        messages = self.prompt_builder.build_messages(
+            payload.query,
+            contexts,
+            agent_state=agent_state,
+        )
+        generation_started = perf_counter()
+        result = await self.generation_client.generate(messages)
+        generation_seconds = round(perf_counter() - generation_started, 4)
+        response = self.answer_formatter.format(
+            answer=str(result["content"]),
+            contexts=contexts,
+            trace_id=state.get("trace_id"),
+        )
+        self._update_trace(
+            trace_id=state["trace_id"],
+            payload=payload,
+            contexts=contexts,
+            messages=messages,
+            response=response,
+            result=result,
+            agent_state=agent_state,
+            generation_seconds=generation_seconds,
+            end_to_end_seconds=round(perf_counter() - state["started_at"], 4),
+        )
+        return {
+            "messages": messages,
+            "generation_result": result,
+            "generation_seconds": generation_seconds,
+            "response": response,
+        }
+
+    def _route_after_verification(self, state: AgentState) -> str:
+        check = state["check"]
+        if check.sufficient:
+            return "answer_synthesis"
+        if len(state.get("retrieval_queries", [])) > self.max_retrieval_loops:
+            return "answer_synthesis"
+        if self._next_query(state) is None:
+            return "answer_synthesis"
+        return "corrective_recall"
+
+    def _next_query(self, state: AgentState) -> str | None:
+        payload = state["payload"]
+        check = state["check"]
+        used = set(state.get("retrieval_queries", []))
+        for query in self._next_queries(
+            payload.query,
+            state.get("subqueries", [payload.query]),
+            check,
+        ):
+            if query not in used:
+                return query
+        return None
+
+    def _public_agent_state(
+        self, state: AgentState, check: EvidenceCheck
+    ) -> dict[str, object]:
+        return {
+            "engine": "langgraph",
+            "workflow_nodes": [
+                "intent_decomposition",
+                "initial_recall",
+                "graph_expansion",
+                "verification_loop",
+                "answer_synthesis",
+            ],
+            "subqueries": state.get("subqueries", []),
+            "retrieval_queries": state.get("retrieval_queries", []),
+            "graph_expanded_node_ids": self._dedupe(
+                state.get("graph_expanded_node_ids", [])
+            ),
+            "verification": check.as_dict(),
+        }
 
     async def _retrieve(
         self, payload: ChatRequest, query: str

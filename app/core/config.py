@@ -21,6 +21,7 @@ from app.model_client.document_parser import DocumentParserClient
 from app.model_client.embeddings import EmbeddingClient
 from app.model_client.generation import GenerationClient
 from app.model_client.rerank import RerankClient
+from app.retrieval.graph_store import GraphStore, Neo4jGraphStore
 from app.retrieval.hybrid_retriever import HybridRetriever
 from app.retrieval.pipeline import RetrievalPipeline
 from app.retrieval.query_rewriter import QueryRewriter, QueryRewriterConfig
@@ -283,6 +284,10 @@ class AppConfig:
         return bool(self.settings.get("hybrid_search", {}).get("enabled", False))
 
     @property
+    def graph_backend(self) -> str:
+        return os.getenv("RAG_GRAPH_BACKEND", "artifact").strip().lower()
+
+    @property
     def query_rewrite_enabled(self) -> bool:
         query_rewriter_config = QueryRewriterConfig.from_env()
         return (
@@ -327,6 +332,17 @@ def build_repository(config: AppConfig) -> VectorRepository:
     )
 
 
+def build_graph_store(config: AppConfig) -> GraphStore | None:
+    backend = config.graph_backend
+    if backend in {"", "artifact", "none", "disabled"}:
+        return None
+    if backend == "neo4j":
+        return Neo4jGraphStore.from_env()
+    raise ConfigurationError(
+        f"Unsupported RAG_GRAPH_BACKEND={backend!r}; expected 'artifact' or 'neo4j'."
+    )
+
+
 @dataclass
 class AppContainer:
     config: AppConfig
@@ -344,6 +360,7 @@ class AppContainer:
     diagnosis_service: object | None
     feedback_store: FeedbackStore
     knowledge_base_catalog: KnowledgeBaseCatalog
+    graph_store: GraphStore | None = None
     ingest_job_store: IngestJobStore | None = None
     query_rewriter: QueryRewriter | None = None
     hybrid_retriever: HybridRetriever | None = None
@@ -359,11 +376,14 @@ class AppContainer:
             result = self.repository.close()
             if inspect.isawaitable(result):
                 await result
+        if self.graph_store is not None:
+            self.graph_store.close()
 
     @classmethod
     def from_env(cls) -> "AppContainer":
         config = load_config()
         repository = build_repository(config)
+        graph_store = build_graph_store(config)
         embedding_client = EmbeddingClient(config)
         rerank_client = RerankClient(config)
         generation_client = GenerationClient(config)
@@ -425,6 +445,7 @@ class AppContainer:
             answer_formatter=AnswerFormatter(),
             trace_store=trace_store,
             tracing_manager=tracing_manager,
+            graph_store=graph_store,
         )
         return cls(
             config=config,
@@ -441,11 +462,13 @@ class AppContainer:
                 tracing_manager,
                 document_parser=document_parser,
                 hybrid_retriever=hybrid_retriever,
+                graph_store=graph_store,
                 wiki_compiler=wiki_compiler,
                 wiki_searcher=wiki_searcher,
             ),
             retrieval_pipeline=retrieval_pipeline,
             chat_pipeline=chat_pipeline,
+            graph_store=graph_store,
             ragas_runner=ragas_runner,
             trace_store=trace_store,
             tracing_manager=tracing_manager,
