@@ -3,18 +3,25 @@ services:
     build:
       context: ..
       dockerfile: docker/app.Dockerfile
-    container_name: nano-rag-app
+    container_name: nanorag-app
     expose:
       - "8000"
     environment:
       APP_CONFIG_DIR: /workspace/configs
+      RAG_ENV: ${RAG_ENV:-local}
       VECTORSTORE_BACKEND: memory
       RAG_GRAPH_BACKEND: artifact
       RAG_INGEST_EXECUTOR: background
       RAG_AUTH_DISABLED: ${RAG_AUTH_DISABLED:-}
       RAG_API_KEYS: ${RAG_API_KEYS:-nano-rag-local}
+      RAG_ADMIN_API_KEYS: ${RAG_ADMIN_API_KEYS:-}
+      RAG_TRUSTED_PROXY_SECRET: ${RAG_TRUSTED_PROXY_SECRET:-}
+      RAG_RATE_LIMIT_REQUESTS_PER_MINUTE: ${RAG_RATE_LIMIT_REQUESTS_PER_MINUTE:-0}
       RAG_DIAGNOSIS_ENABLED: ${RAG_DIAGNOSIS_ENABLED:-true}
       RAG_EVAL_ENABLED: ${RAG_EVAL_ENABLED:-true}
+      MODEL_PROVIDER_MAX_RETRIES: ${MODEL_PROVIDER_MAX_RETRIES:-2}
+      MODEL_PROVIDER_RETRY_BASE_SECONDS: ${MODEL_PROVIDER_RETRY_BASE_SECONDS:-0.5}
+      MODEL_PROVIDER_RETRY_MAX_SECONDS: ${MODEL_PROVIDER_RETRY_MAX_SECONDS:-8}
       RAG_INGEST_ALLOWED_DIRS: /workspace/data/raw
       PARSED_OUTPUT_DIR: /workspace/data/parsed
       INGEST_JOB_STORE_DIR: /workspace/data/reports/ingest_jobs
@@ -30,6 +37,12 @@ services:
       EMBEDDING_MODEL_ALIAS: ${COMPOSE_EMBEDDING_MODEL_ALIAS:-gemini-embedding-2-preview}
       EMBEDDING_API_BASE_URL: ${COMPOSE_EMBEDDING_API_BASE_URL:-https://generativelanguage.googleapis.com}
       EMBEDDING_API_KEY: ${COMPOSE_EMBEDDING_API_KEY:-}
+      MULTIVECTOR_PROVIDER: ${COMPOSE_MULTIVECTOR_PROVIDER:-disabled}
+      MULTIVECTOR_MODEL_ALIAS: ${COMPOSE_MULTIVECTOR_MODEL_ALIAS:-vidore/colqwen2-v1.0-hf}
+      MULTIVECTOR_MODEL_FAMILY: ${COMPOSE_MULTIVECTOR_MODEL_FAMILY:-colqwen2}
+      MULTIVECTOR_API_BASE_URL: ${COMPOSE_MULTIVECTOR_API_BASE_URL:-}
+      MULTIVECTOR_API_KEY: ${COMPOSE_MULTIVECTOR_API_KEY:-}
+      MULTIVECTOR_API_PATH: ${COMPOSE_MULTIVECTOR_API_PATH:-/embed}
       DOCUMENT_PARSER_ENABLED: ${DOCUMENT_PARSER_ENABLED:-true}
       DOCUMENT_PARSER_PROVIDER: ${COMPOSE_DOCUMENT_PARSER_PROVIDER:-gemini}
       DOCUMENT_PARSER_MODEL: ${COMPOSE_DOCUMENT_PARSER_MODEL:-gemini-flash-lite-latest}
@@ -64,7 +77,7 @@ services:
     build:
       context: ..
       dockerfile: docker/frontend.Dockerfile
-    container_name: nano-rag-frontend
+    container_name: nanorag-frontend
     ports:
       - "${FRONTEND_PORT:-3000}:80"
     environment:

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import logging
+import os
 from dataclasses import dataclass
 from time import perf_counter
 from typing import TYPE_CHECKING, TypedDict
@@ -12,6 +14,8 @@ from app.retrieval.graph_expander import GraphExpander
 from app.retrieval.pipeline import RetrievalPipeline
 from app.schemas.chat import ChatRequest, ChatResponse
 from langgraph.graph import END, StateGraph
+
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from app.core.config import AppConfig
@@ -49,6 +53,7 @@ class AgentState(TypedDict, total=False):
     trace_id: str
     retrieval_queries: list[str]
     graph_expanded_node_ids: list[str]
+    evidence_plans: list[dict[str, object]]
     check: EvidenceCheck
     messages: list[dict[str, object]]
     response: ChatResponse
@@ -79,6 +84,7 @@ class AgenticReasoningService:
         agent_settings = config.settings.get("agent", {})
         self.max_retrieval_loops = int(agent_settings.get("max_retrieval_loops", 2))
         self.max_subqueries = int(agent_settings.get("max_subqueries", 4))
+        self.graph_expansion_mode = os.getenv("RAG_GRAPH_EXPANSION_MODE", "auto").lower()
         self.workflow = self._build_workflow()
 
     async def run(self, payload: ChatRequest) -> ChatResponse:
@@ -117,14 +123,12 @@ class AgenticReasoningService:
     async def _initial_recall_node(self, state: AgentState) -> AgentState:
         payload = state["payload"]
         contexts, trace = await self._retrieve(payload, payload.query)
-        graph_contexts = self.graph_expander.expand(
-            contexts,
-            kb_id=payload.kb_id or "default",
-        )
+        graph_contexts = self._expand_graph_contexts(payload, contexts, trace)
         return {
             "trace_id": str(trace["trace_id"]),
             "retrieval_queries": [payload.query],
             "graph_expanded_node_ids": self._node_ids(graph_contexts),
+            "evidence_plans": self._evidence_plans_from_trace(trace),
             "contexts": self._merge_contexts(contexts, graph_contexts),
         }
 
@@ -143,13 +147,14 @@ class AgenticReasoningService:
         query = self._next_query(state)
         if query is None:
             return {}
-        more_contexts, _ = await self._retrieve(payload, query)
-        graph_contexts = self.graph_expander.expand(
-            more_contexts,
-            kb_id=payload.kb_id or "default",
-        )
+        more_contexts, trace = await self._retrieve(payload, query)
+        graph_contexts = self._expand_graph_contexts(payload, more_contexts, trace)
         return {
             "retrieval_queries": [*state.get("retrieval_queries", []), query],
+            "evidence_plans": [
+                *state.get("evidence_plans", []),
+                *self._evidence_plans_from_trace(trace),
+            ],
             "graph_expanded_node_ids": self._dedupe(
                 [
                     *state.get("graph_expanded_node_ids", []),
@@ -239,6 +244,7 @@ class AgenticReasoningService:
             "graph_expanded_node_ids": self._dedupe(
                 state.get("graph_expanded_node_ids", [])
             ),
+            "evidence_plan": self._latest_evidence_plan(state),
             "verification": check.as_dict(),
         }
 
@@ -254,27 +260,72 @@ class AgenticReasoningService:
             metadata_filters=payload.metadata_filters,
         )
 
-    async def _decompose(self, query: str) -> list[str]:
-        result = await self.generation_client.generate(
-            [
-                {
-                    "role": "system",
-                    "content": (
-                        "You are an AI-first RAG query planner. Return only compact JSON. "
-                        "Do not explain."
-                    ),
-                },
-                {
-                    "role": "user",
-                    "content": (
-                        "Break the user question into the minimum set of retrieval subqueries. "
-                        "Keep the original wording when useful.\n"
-                        'Return JSON: {"subqueries": ["..."]}\n\n'
-                        f"Question: {query}"
-                    ),
-                },
-            ]
+    def _evidence_plans_from_trace(self, trace: dict[str, object]) -> list[dict[str, object]]:
+        retrieval_params = trace.get("retrieval_params")
+        if not isinstance(retrieval_params, dict):
+            return []
+        plan = retrieval_params.get("evidence_plan")
+        return [plan] if isinstance(plan, dict) else []
+
+    def _latest_evidence_plan(self, state: AgentState) -> dict[str, object] | None:
+        plans = state.get("evidence_plans", [])
+        for plan in reversed(plans):
+            if isinstance(plan, dict):
+                return plan
+        return None
+
+    def _expand_graph_contexts(
+        self,
+        payload: ChatRequest,
+        contexts: list[dict[str, object]],
+        trace: dict[str, object],
+    ) -> list[dict[str, object]]:
+        mode = self.graph_expansion_mode
+        if mode in {"false", "0", "no", "off", "disabled"}:
+            return []
+        if mode not in {"always", "true", "1", "yes"}:
+            retrieval_params = trace.get("retrieval_params")
+            route = (
+                retrieval_params.get("query_route")
+                if isinstance(retrieval_params, dict)
+                else None
+            )
+            if not (
+                isinstance(route, dict)
+                and (route.get("requires_graph") is True or route.get("route") == "graph")
+            ):
+                return []
+        return self.graph_expander.expand(
+            contexts,
+            kb_id=payload.kb_id or "default",
         )
+
+    async def _decompose(self, query: str) -> list[str]:
+        try:
+            result = await self.generation_client.generate(
+                [
+                    {
+                        "role": "system",
+                        "content": (
+                            "You are an AI-first RAG query planner. Return only compact JSON. "
+                            "Do not explain."
+                        ),
+                    },
+                    {
+                        "role": "user",
+                        "content": (
+                            "Break the user question from the input JSON into the minimum set "
+                            "of retrieval subqueries. Keep the original wording when useful.\n"
+                            'Return JSON: {"subqueries": ["..."]}\n\n'
+                            "Input JSON: "
+                            f"{json.dumps({'question': query}, ensure_ascii=False)}"
+                        ),
+                    },
+                ]
+            )
+        except Exception as exc:
+            logger.warning("agent intent decomposition failed: %s", exc)
+            return [query]
         payload = self._json_object(str(result.get("content") or ""))
         raw_subqueries = payload.get("subqueries") if isinstance(payload, dict) else None
         subqueries = [
@@ -303,31 +354,47 @@ class AgenticReasoningService:
                 reason="no_contexts",
             )
         evidence = self._compact_contexts(contexts)
-        result = await self.generation_client.generate(
-            [
-                {
-                    "role": "system",
-                    "content": (
-                        "You are an evidence auditor for a RAG agent. Return only JSON. "
-                        "Judge sufficiency using the provided evidence, not outside knowledge."
-                    ),
-                },
-                {
-                    "role": "user",
-                    "content": (
-                        "Decide whether the evidence can close the user's question. "
-                        "If not, propose targeted follow-up retrieval queries.\n"
-                        "Return JSON with keys: sufficient(boolean), coverage_ratio(number 0..1), "
-                        "missing_terms(array of short strings), follow_up_queries(array), reason(string).\n\n"
-                        f"Question: {query}\n"
-                        f"Subqueries: {json.dumps(subqueries, ensure_ascii=False)}\n"
-                        f"Evidence: {json.dumps(evidence, ensure_ascii=False)}"
-                    ),
-                },
-            ]
-        )
+        auditor_input = {
+            "question": query,
+            "subqueries": subqueries,
+            "evidence": evidence,
+        }
+        try:
+            result = await self.generation_client.generate(
+                [
+                    {
+                        "role": "system",
+                        "content": (
+                            "You are an evidence auditor for a RAG agent. Return only JSON. "
+                            "Judge sufficiency using the provided evidence, not outside knowledge."
+                        ),
+                    },
+                    {
+                        "role": "user",
+                        "content": (
+                            "Decide whether the evidence can close the user's question. "
+                            "If not, propose targeted follow-up retrieval queries.\n"
+                            "Return JSON with keys: sufficient(boolean), coverage_ratio(number 0..1), "
+                            "missing_terms(array of short strings), follow_up_queries(array), reason(string).\n\n"
+                            "Input JSON: "
+                            f"{json.dumps(auditor_input, ensure_ascii=False)}"
+                        ),
+                    },
+                ]
+            )
+        except Exception as exc:
+            logger.warning("agent evidence verification failed: %s", exc)
+            return EvidenceCheck(
+                sufficient=True,
+                coverage_ratio=1.0,
+                missing_terms=[],
+                follow_up_queries=[],
+                has_contexts=True,
+                has_conflicts=self._has_conflicts(contexts),
+                reason="verifier_unavailable",
+            )
         payload = self._json_object(str(result.get("content") or ""))
-        sufficient = bool(payload.get("sufficient"))
+        sufficient = self._parse_bool(payload.get("sufficient"))
         coverage_ratio = self._float_in_range(payload.get("coverage_ratio"), 0.0, 1.0)
         missing = [
             str(item).strip()
@@ -426,6 +493,15 @@ class AgenticReasoningService:
             return minimum
         return max(minimum, min(maximum, number))
 
+    def _parse_bool(self, value: object) -> bool:
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            return value.strip().casefold() in {"true", "1", "yes"}
+        if isinstance(value, int | float):
+            return value != 0
+        return False
+
     def _dedupe(self, items: list[str]) -> list[str]:
         deduped: list[str] = []
         seen: set[str] = set()
@@ -466,7 +542,7 @@ class AgenticReasoningService:
                 "session_id": payload.session_id or record.session_id,
                 "sample_id": payload.sample_id or record.sample_id,
                 "prompt_version": str(self.config.settings["prompt"]["version"]),
-                "prompt_messages": messages,
+                "prompt_messages": messages if self._store_prompt_messages() else [],
                 "generation_finish_reason": (
                     str(result["finish_reason"])
                     if result.get("finish_reason") is not None
@@ -485,3 +561,10 @@ class AgenticReasoningService:
             }
         )
         self.trace_store.update(updated)
+
+    def _store_prompt_messages(self) -> bool:
+        return os.getenv("RAG_TRACE_STORE_PROMPTS", "false").lower() in {
+            "true",
+            "1",
+            "yes",
+        }

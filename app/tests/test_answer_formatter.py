@@ -1,7 +1,7 @@
 from app.generation.answer_formatter import AnswerFormatter
 
 
-def test_answer_formatter_adds_citation_if_missing() -> None:
+def test_answer_formatter_does_not_insert_citation_marker_if_missing() -> None:
     formatter = AnswerFormatter()
     response = formatter.format(
         answer="Test answer",
@@ -9,7 +9,7 @@ def test_answer_formatter_adds_citation_if_missing() -> None:
         trace_id="t1",
     )
 
-    assert "[C1]" in response.answer
+    assert response.answer == "Test answer"
     assert len(response.citations) == 1
     assert response.citations[0].citation_label == "C1"
     assert response.citations[0].span_text == "ctx"
@@ -82,7 +82,7 @@ def test_answer_formatter_prioritizes_primary_citations_and_reorders_contexts() 
         "c-support",
         "c-conflict",
     ]
-    assert "[C1]" in response.answer
+    assert "[C1]" not in response.answer
     assert response.citations[0].evidence_role == "primary"
     assert response.citations[0].span_text == "primary"
 
@@ -114,14 +114,19 @@ def test_answer_formatter_adds_conflict_notice_when_conflicting_evidence_exists(
     )
 
     assert "available evidence is conflicting" in response.answer
-    assert "[C1]" in response.answer
+    assert "[C1]" not in response.answer
     assert "Conflicting evidence" not in response.answer
 
 
-def test_answer_formatter_does_not_duplicate_conflict_notice() -> None:
+def test_answer_formatter_does_not_add_conflict_notice_when_conflict_claim_exists() -> None:
     formatter = AnswerFormatter()
     response = formatter.format(
-        answer="The sources are inconsistent, so this should be interpreted carefully.",
+        answer=(
+            "Final Answer:\n"
+            "This should be interpreted carefully. [C1]\n\n"
+            "Supporting Claims:\n"
+            "- [conflict] The evidence is conflicting. [C1]\n"
+        ),
         contexts=[
             {
                 "chunk_id": "c-conflict",
@@ -136,7 +141,33 @@ def test_answer_formatter_does_not_duplicate_conflict_notice() -> None:
         trace_id="t1",
     )
 
-    assert response.answer.count("inconsistent") == 1
+    assert "available evidence is conflicting" not in response.answer
+
+
+def test_answer_formatter_adds_condition_notice_when_condition_is_ignored() -> None:
+    formatter = AnswerFormatter()
+    response = formatter.format(
+        answer=(
+            "Final Answer:\n"
+            "Vitamin D prevents flu. [C1]\n\n"
+            "Supporting Claims:\n"
+            "- [factual] Vitamin D prevents flu. [C1]\n"
+        ),
+        contexts=[
+            {
+                "chunk_id": "c1",
+                "citation_label": "C1",
+                "source": "/tmp/primary.md",
+                "score": 1.0,
+                "text": "If adults have low vitamin D, supplementation reduced flu incidence.",
+                "evidence_role": "primary",
+                "claim_role": "condition",
+            }
+        ],
+        trace_id="t1",
+    )
+
+    assert "applicability conditions" in response.answer
 
 
 def test_answer_formatter_does_not_duplicate_evidence_summary() -> None:
@@ -394,7 +425,7 @@ def test_answer_formatter_ignores_none_supporting_claims_placeholder() -> None:
     assert response.supporting_claims == []
 
 
-def test_answer_formatter_infers_claim_types_when_prefix_is_missing() -> None:
+def test_answer_formatter_defaults_unprefixed_claims_to_factual() -> None:
     formatter = AnswerFormatter()
     response = formatter.format(
         answer=(
@@ -439,9 +470,54 @@ def test_answer_formatter_infers_claim_types_when_prefix_is_missing() -> None:
         trace_id="t1",
     )
 
-    assert [claim.claim_type for claim in response.supporting_claims] == [
-        "conditional",
-        "conflict",
-        "insufficiency",
-        "factual",
-    ]
+    assert [claim.claim_type for claim in response.supporting_claims] == ["factual"] * 4
+
+
+def test_answer_formatter_marks_claim_with_missing_number_unverified() -> None:
+    formatter = AnswerFormatter()
+    response = formatter.format(
+        answer=(
+            "Final Answer:\n"
+            "Carryover is capped at 7 days. [C1]\n\n"
+            "Supporting Claims:\n"
+            "- [factual] Carryover is capped at 7 days. [C1]\n"
+        ),
+        contexts=[
+            {
+                "chunk_id": "c1",
+                "citation_label": "C1",
+                "source": "/tmp/policy.md",
+                "score": 1.0,
+                "text": "Carryover is capped at 5 days.",
+            }
+        ],
+        trace_id="t1",
+    )
+
+    assert response.supporting_claims[0].verified is False
+    assert response.supporting_claims[0].missing_numbers == ["7"]
+
+
+def test_answer_formatter_marks_supported_claim_verified() -> None:
+    formatter = AnswerFormatter()
+    response = formatter.format(
+        answer=(
+            "Final Answer:\n"
+            "Carryover is capped at 5 days. [C1]\n\n"
+            "Supporting Claims:\n"
+            "- [factual] Carryover is capped at 5 days. [C1]\n"
+        ),
+        contexts=[
+            {
+                "chunk_id": "c1",
+                "citation_label": "C1",
+                "source": "/tmp/policy.md",
+                "score": 1.0,
+                "text": "Carryover is capped at 5 days.",
+            }
+        ],
+        trace_id="t1",
+    )
+
+    assert response.supporting_claims[0].verified is True
+    assert response.supporting_claims[0].support_score == 1.0

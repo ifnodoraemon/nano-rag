@@ -24,13 +24,22 @@ def _import_milvus() -> tuple[type[Any], type[Exception]]:
 def _create_milvus_client_sync() -> Any:
     MilvusClient, MilvusException = _import_milvus()
     uri = os.getenv("MILVUS_URI", "http://localhost:19530")
+    token = os.getenv("MILVUS_TOKEN", "").strip()
+    user = os.getenv("MILVUS_USER", "").strip()
+    password = os.getenv("MILVUS_PASSWORD", "").strip()
     attempts = max(1, int(os.getenv("MILVUS_CONNECT_MAX_ATTEMPTS", "30")))
     retry_seconds = max(0.1, float(os.getenv("MILVUS_CONNECT_RETRY_SECONDS", "2")))
     last_error: Exception | None = None
+    client_kwargs: dict[str, str] = {}
+    if token:
+        client_kwargs["token"] = token
+    elif user and password:
+        client_kwargs["user"] = user
+        client_kwargs["password"] = password
 
     for attempt in range(1, attempts + 1):
         try:
-            return MilvusClient(uri=uri)
+            return MilvusClient(uri=uri, **client_kwargs)
         except MilvusException as exc:
             last_error = exc
             if attempt == attempts:

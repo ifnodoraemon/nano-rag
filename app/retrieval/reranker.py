@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import date, datetime
 
 from app.model_client.rerank import RerankClient
+from app.retrieval.query_router import QueryRoute
 from app.vectorstore.repository import SearchHit
 
 DEFAULT_METADATA_WEIGHTS = {
@@ -12,6 +13,10 @@ DEFAULT_METADATA_WEIGHTS = {
     "section_match": 0.1,
     "doc_type_match": 0.08,
     "effective_date_recency": 0.12,
+    "table_row": 0.18,
+    "clause": 0.12,
+    "definition": 0.12,
+    "latest_version": 0.15,
 }
 
 
@@ -27,7 +32,13 @@ class RetrievalReranker:
             **(metadata_weights or {}),
         }
 
-    async def rerank(self, query: str, hits: list[SearchHit], top_k: int) -> list[SearchHit]:
+    async def rerank(
+        self,
+        query: str,
+        hits: list[SearchHit],
+        top_k: int,
+        query_route: QueryRoute | None = None,
+    ) -> list[SearchHit]:
         results = await self.client.rerank(query, [hit.chunk.text for hit in hits], top_k)
         reranked: list[SearchHit] = []
         for result in results:
@@ -35,13 +46,15 @@ class RetrievalReranker:
             reranked.append(
                 SearchHit(
                     chunk=hit.chunk,
-                    score=result.score + self._metadata_adjustment(query, hit),
+                    score=result.score + self._metadata_adjustment(query, hit, query_route),
                 )
             )
         reranked.sort(key=lambda item: item.score, reverse=True)
         return reranked
 
-    def _metadata_adjustment(self, query: str, hit: SearchHit) -> float:
+    def _metadata_adjustment(
+        self, query: str, hit: SearchHit, query_route: QueryRoute | None = None
+    ) -> float:
         metadata = hit.chunk.metadata or {}
         adjustment = 0.0
 
@@ -69,6 +82,20 @@ class RetrievalReranker:
             adjustment += self.metadata_weights["effective_date_recency"] * _recency_ratio(
                 effective_date
             )
+        route = query_route.route if query_route else "fact"
+        preferred = set(query_route.preferred_chunk_kinds if query_route else [])
+        if metadata.get("chunk_kind") in preferred:
+            adjustment += self.metadata_weights["table_row"]
+        if metadata.get("chunk_kind") == "table_row" and route == "table":
+            adjustment += self.metadata_weights["table_row"]
+        if metadata.get("node_type") == "clause" and route in {"version", "conflict"}:
+            adjustment += self.metadata_weights["clause"]
+        if metadata.get("node_type") == "definition" and route == "definition":
+            adjustment += self.metadata_weights["definition"]
+        if metadata.get("is_latest_version") is True and (
+            query_route.requires_current_version if query_route else False
+        ):
+            adjustment += self.metadata_weights["latest_version"]
 
         return round(adjustment, 6)
 

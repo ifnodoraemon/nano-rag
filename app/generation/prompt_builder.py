@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import json
 import logging
 import os
 from pathlib import Path
@@ -14,6 +15,8 @@ DEFAULT_SYSTEM_PROMPT = """你是一个基于证据回答问题的助手。只�
 
 # Media types that can be sent inline to a vision-capable LLM.
 _VISION_MIME_PREFIXES = ("image/",)
+DEFAULT_PROMPT_CONTEXT_MAX_CHARS = 48000
+DEFAULT_PROMPT_CONTEXT_ITEM_MAX_CHARS = 6000
 
 
 class PromptBuilder:
@@ -23,6 +26,15 @@ class PromptBuilder:
         )
         self._media_inline_max_bytes = int(
             os.getenv("RAG_PROMPT_INLINE_MEDIA_MAX_BYTES", str(10 * 1024 * 1024))
+        )
+        self._context_max_chars = int(
+            os.getenv("RAG_PROMPT_CONTEXT_MAX_CHARS", str(DEFAULT_PROMPT_CONTEXT_MAX_CHARS))
+        )
+        self._context_item_max_chars = int(
+            os.getenv(
+                "RAG_PROMPT_CONTEXT_ITEM_MAX_CHARS",
+                str(DEFAULT_PROMPT_CONTEXT_ITEM_MAX_CHARS),
+            )
         )
 
     def build_messages(
@@ -38,14 +50,15 @@ class PromptBuilder:
                 "You must explicitly describe the conflict and avoid giving an overly certain conclusion.\n\n"
             )
         context_text = self._render_evidence_sections(contexts)
+        question_input = json.dumps({"question": query}, ensure_ascii=False)
         instruction = (
-            f"Question: {query}\n\n"
+            f"Question input JSON: {question_input}\n\n"
             f"{conflict_notice}"
             f"{self._render_agent_state(agent_state)}"
             f"Available context:\n{context_text}\n\n"
             "只根据上面的上下文回答，并使用提供的标签引用证据，例如 [C1]。\n"
             "优先引用同时包含问题核心实体和答案值的最小证据。不要引用只包含单位、表头、残缺行或泛化说明的片段，除非它们是唯一可用证据。\n"
-            "如果表格行已经包含地区、等级和价格，直接回答该行对应的价格，不要因为相邻片段不完整而拒答。\n\n"
+            "如果单条表格行已经同时包含问题中的实体、限定条件和答案值，直接基于该行回答；不要因为相邻片段不完整而拒答。\n\n"
             "按以下格式返回：\n"
             "Final Answer:\n"
             "<带引用的答案>\n\n"
@@ -152,7 +165,47 @@ class PromptBuilder:
             f"- graph_expanded_node_ids: {', '.join(graph_expanded) or 'none'}\n"
             f"- evidence_sufficient: {verification_text.get('sufficient')}\n"
             f"- missing_terms: {', '.join(missing_terms) or 'none'}\n"
+            f"{self._render_evidence_plan(agent_state.get('evidence_plan'))}"
             "如果 evidence_sufficient 为 false，最终答案必须明确说明现有证据不足，并列出还缺少哪些信息。\n\n"
+        )
+
+    def _render_evidence_plan(self, value: object) -> str:
+        if not isinstance(value, dict):
+            return ""
+        strategy = value.get("answer_strategy") or "direct"
+        primary = [
+            str(item)
+            for item in value.get("primary_evidence", [])
+            if str(item).strip()
+        ]
+        conditions = [
+            str(item)
+            for item in value.get("conditions", [])
+            if str(item).strip()
+        ]
+        relations = [
+            item
+            for item in value.get("relations", [])
+            if isinstance(item, dict)
+        ]
+        outline = [
+            str(item)
+            for item in value.get("outline", [])
+            if str(item).strip()
+        ]
+        rendered_relations = []
+        for relation in relations[:6]:
+            rendered_relations.append(
+                f"{relation.get('source')} {relation.get('relation')} {relation.get('target')}"
+            )
+        return (
+            "- evidence_plan_strategy: "
+            f"{strategy}\n"
+            f"- evidence_plan_primary: {', '.join(primary) or 'none'}\n"
+            f"- evidence_plan_conditions: {'; '.join(conditions[:4]) or 'none'}\n"
+            f"- evidence_plan_relations: {'; '.join(rendered_relations) or 'none'}\n"
+            f"- evidence_plan_outline: {'; '.join(outline[:5]) or 'none'}\n"
+            "必须遵循 evidence_plan：有条件就给条件化结论，有 contradictions/冲突关系就明确说明冲突，不能只挑单边证据。\n"
         )
 
     def _render_evidence_sections(self, contexts: list[dict[str, object]]) -> str:
@@ -168,8 +221,19 @@ class PromptBuilder:
             ]
             if not role_contexts:
                 continue
-            entries = "\n\n".join(self._render_context(item) for item in role_contexts)
-            sections.append(f"## {role_titles[role]}\n{entries}")
+            entries = []
+            for item in role_contexts:
+                rendered = self._render_context(item)
+                projected = "\n\n".join([*sections, f"## {role_titles[role]}\n", *entries, rendered])
+                if len(projected) > self._context_max_chars:
+                    logger.warning(
+                        "prompt context budget reached at %d chars; dropping remaining contexts",
+                        self._context_max_chars,
+                    )
+                    break
+                entries.append(rendered)
+            if entries:
+                sections.append(f"## {role_titles[role]}\n" + "\n\n".join(entries))
         if not sections:
             return ""
         return "\n\n".join(sections)
@@ -181,6 +245,8 @@ class PromptBuilder:
             media_uri = item.get("media_uri") or "n/a"
             mime_type = item.get("mime_type") or "n/a"
             body = f"[{modality} attachment: {media_uri} ({mime_type})]"
+        elif isinstance(body, str) and len(body) > self._context_item_max_chars:
+            body = body[: self._context_item_max_chars - 3].rstrip() + "..."
         return (
             f"[{item.get('citation_label') or item.get('chunk_id', 'unknown')}] "
             f"(evidence={item.get('evidence_role') or 'supporting'}) "
@@ -188,5 +254,6 @@ class PromptBuilder:
             f"(kind={item.get('wiki_kind') or 'raw'}, status={item.get('wiki_status') or 'n/a'}) "
             f"(section={item.get('section_path') or 'n/a'}, doc_type={item.get('doc_type') or 'n/a'}) "
             f"(effective_date={item.get('effective_date') or 'n/a'}, version={item.get('version') or 'n/a'}, freshness={item.get('freshness_tier') or 'n/a'}) "
+            f"(claim_role={item.get('claim_role') or 'n/a'}, certainty={item.get('certainty') or 'n/a'}, scope={item.get('claim_scope') or 'n/a'}) "
             f"{body}"
         )

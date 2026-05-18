@@ -41,6 +41,23 @@ def test_trace_store_loads_persisted_records(tmp_path) -> None:
     assert result.items[0].trace_id == "trace-1"
 
 
+def test_trace_store_skips_invalid_persisted_records(tmp_path) -> None:
+    trace_dir = tmp_path / "traces"
+    trace_dir.mkdir()
+    (trace_dir / "bad.json").write_text(
+        json.dumps({"query": "missing trace id"}),
+        encoding="utf-8",
+    )
+    (trace_dir / "trace-1.json").write_text(
+        json.dumps({"trace_id": "trace-1", "query": "persisted"}),
+        encoding="utf-8",
+    )
+
+    store = TraceStore(persist_dir=trace_dir)
+
+    assert store.get("trace-1") is not None
+
+
 def test_trace_store_prunes_old_persisted_files(tmp_path) -> None:
     trace_dir = tmp_path / "traces"
     store = TraceStore(max_records=2, persist_dir=trace_dir)

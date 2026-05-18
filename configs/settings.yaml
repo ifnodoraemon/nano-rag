@@ -16,6 +16,8 @@ retrieval:
     effective_date_recency: 0.12
   freshness_policy:
     enabled: true
+    include_stale: false
+  max_context_text_chars: 6000
 
 agent:
   max_retrieval_loops: 2
@@ -26,8 +28,16 @@ hybrid_search:
   dense_weight: 0.7
   sparse_weight: 0.3
 
+evidence_planner:
+  enabled: ${RAG_EVIDENCE_PLANNER_ENABLED:-true}
+  max_contexts: 8
+  max_context_chars: 1200
+  pairwise: true
+
 prompt:
   version: v1
+  max_context_chars: 48000
+  max_context_item_chars: 6000
 
 timeout:
   embeddings_seconds: 30

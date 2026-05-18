@@ -4,7 +4,7 @@ from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
-from app.api.auth import RequestContext, require_api_key
+from app.api.auth import RequestContext, require_admin_key
 from app.eval.dataset import (
     get_eval_report_dir,
     list_benchmark_reports,
@@ -232,7 +232,7 @@ async def _run_eval_report(
 async def retrieve_debug(
     payload: ChatRequest,
     request: Request,
-    context: RequestContext = Depends(require_api_key),
+    context: RequestContext = Depends(require_admin_key),
 ) -> RetrievalDebugResponse:
     container = request.app.state.container
     kb_id = payload.kb_id or "default"
@@ -254,7 +254,7 @@ async def list_traces(
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=20, ge=1, le=100),
     kb_id: str | None = Query(default=None),
-    context: RequestContext = Depends(require_api_key),
+    context: RequestContext = Depends(require_admin_key),
 ) -> PaginatedResponse[TraceSummary]:
     container = request.app.state.container
     page = _int_query_value(page, 1)
@@ -287,7 +287,7 @@ async def get_trace(
     request: Request,
     kb_id: str | None = Query(default=None),
     session_id: str | None = Query(default=None),
-    context: RequestContext = Depends(require_api_key),
+    context: RequestContext = Depends(require_admin_key),
 ) -> TraceRecord:
     container = request.app.state.container
     kb_id = _optional_query_value(kb_id)
@@ -301,7 +301,7 @@ async def get_trace(
     return record
 
 
-@router.get("/eval/datasets", dependencies=[Depends(require_api_key)])
+@router.get("/eval/datasets", dependencies=[Depends(require_admin_key)])
 async def get_eval_datasets() -> list[dict[str, object]]:
     return list_eval_datasets()
 
@@ -309,7 +309,7 @@ async def get_eval_datasets() -> list[dict[str, object]]:
 @router.get("/eval/reports")
 async def get_eval_reports(
     request: Request,
-    context: RequestContext = Depends(require_api_key),
+    context: RequestContext = Depends(require_admin_key),
 ) -> list[dict[str, object]]:
     container = request.app.state.container
     return [
@@ -321,7 +321,7 @@ async def get_eval_reports(
 @router.get("/benchmark/reports")
 async def get_benchmark_reports(
     request: Request,
-    context: RequestContext = Depends(require_api_key),
+    context: RequestContext = Depends(require_admin_key),
 ) -> list[dict[str, object]]:
     container = request.app.state.container
     return [
@@ -334,7 +334,7 @@ async def get_benchmark_reports(
 async def get_eval_report_detail(
     request: Request,
     path: str = Query(...),
-    context: RequestContext = Depends(require_api_key),
+    context: RequestContext = Depends(require_admin_key),
 ) -> dict:
     try:
         target = resolve_eval_report_path(path)
@@ -351,7 +351,7 @@ async def get_eval_report_detail(
 async def get_benchmark_report_detail(
     request: Request,
     path: str = Query(...),
-    context: RequestContext = Depends(require_api_key),
+    context: RequestContext = Depends(require_admin_key),
 ) -> dict:
     try:
         target = resolve_benchmark_report_path(path)
@@ -372,7 +372,7 @@ async def get_benchmark_report_detail(
 async def run_eval(
     payload: EvalRunRequest,
     request: Request,
-    context: RequestContext = Depends(require_api_key),
+    context: RequestContext = Depends(require_admin_key),
 ) -> EvalRunResponse:
     container = request.app.state.container
     ragas_runner = _require_eval_runner(container)
@@ -412,7 +412,7 @@ async def run_eval(
 async def diagnose_trace(
     payload: TraceDiagnosisRequest,
     request: Request,
-    context: RequestContext = Depends(require_api_key),
+    context: RequestContext = Depends(require_admin_key),
 ) -> DiagnosisResponse:
     container = request.app.state.container
     diagnosis_service = _require_diagnosis_service(container)
@@ -440,7 +440,7 @@ async def diagnose_trace(
 async def diagnose_eval(
     payload: EvalDiagnosisRequest,
     request: Request,
-    context: RequestContext = Depends(require_api_key),
+    context: RequestContext = Depends(require_admin_key),
 ) -> DiagnosisResponse:
     container = request.app.state.container
     diagnosis_service = _require_diagnosis_service(container)
@@ -494,7 +494,7 @@ async def diagnose_eval(
 async def diagnose_auto(
     payload: AutoDiagnosisRequest,
     request: Request,
-    context: RequestContext = Depends(require_api_key),
+    context: RequestContext = Depends(require_admin_key),
 ) -> DiagnosisResponse:
     container = request.app.state.container
     diagnosis_service = _require_diagnosis_service(container)
@@ -568,7 +568,7 @@ async def replay_trace_endpoint(
     request: Request,
     kb_id: str | None = Query(default=None),
     session_id: str | None = Query(default=None),
-    context: RequestContext = Depends(require_api_key),
+    context: RequestContext = Depends(require_admin_key),
 ) -> dict:
     container = request.app.state.container
     kb_id = _optional_query_value(kb_id)
@@ -597,7 +597,7 @@ async def replay_trace_endpoint(
 @router.get("/debug/storage")
 async def storage_debug(
     request: Request,
-    context: RequestContext = Depends(require_api_key),
+    context: RequestContext = Depends(require_admin_key),
 ) -> dict[str, object]:
     container = request.app.state.container
     parsed_dir = container.config.parsed_dir
@@ -627,7 +627,7 @@ async def storage_debug(
 async def parsed_document_debug(
     doc_id: str,
     request: Request,
-    context: RequestContext = Depends(require_api_key),
+    context: RequestContext = Depends(require_admin_key),
 ) -> dict:
     if not re.match(r"^[a-zA-Z0-9_-]+$", doc_id):
         raise HTTPException(

@@ -37,18 +37,25 @@ class HybridRetriever:
     hybrid_config: HybridSearchConfig = field(
         default_factory=HybridSearchConfig.from_env
     )
+    enabled_config: bool | None = None
     _chunk_cache: dict[str, Chunk] = field(default_factory=dict)
     _lock: threading.Lock = field(default_factory=threading.Lock)
     _bm25_enabled: bool = field(default=False, init=False)
 
     def __post_init__(self) -> None:
+        if self.enabled_config is not None:
+            self._bm25_enabled = self.enabled_config
+            return
         self._bm25_enabled = os.getenv(
             "RAG_HYBRID_SEARCH_ENABLED", "false"
         ).lower() in ("true", "1", "yes")
 
     @property
     def _native_hybrid_available(self) -> bool:
-        return callable(getattr(self.repository, "native_hybrid_search", None))
+        native_enabled = getattr(self.repository, "native_hybrid_enabled", True)
+        return bool(native_enabled) and callable(
+            getattr(self.repository, "native_hybrid_search", None)
+        )
 
     @property
     def enabled(self) -> bool:
@@ -77,16 +84,21 @@ class HybridRetriever:
             self.bm25_index.remove_document(chunk_id)
 
     def remove_by_source(
-        self, source_path: str, kb_id: str
+        self,
+        source_path: str,
+        kb_id: str,
+        keep_chunk_ids: set[str] | None = None,
     ) -> None:
         if not self._bm25_enabled or self._native_hybrid_available:
             return
+        keep_chunk_ids = keep_chunk_ids or set()
         with self._lock:
             removable_ids = [
                 chunk_id
                 for chunk_id, chunk in self._chunk_cache.items()
                 if chunk.source_path == source_path
                 and chunk.metadata.get("kb_id", "default") == kb_id
+                and chunk_id not in keep_chunk_ids
             ]
             for chunk_id in removable_ids:
                 self._chunk_cache.pop(chunk_id, None)

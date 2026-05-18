@@ -24,6 +24,31 @@ def test_feedback_store_loads_persisted_records(tmp_path) -> None:
     assert store.list()[0].feedback_id == "fb-1"
 
 
+def test_feedback_store_skips_invalid_persisted_records(tmp_path) -> None:
+    feedback_dir = tmp_path / "feedback"
+    feedback_dir.mkdir()
+    (feedback_dir / "bad.json").write_text(
+        json.dumps({"feedback_id": "fb-bad"}),
+        encoding="utf-8",
+    )
+    (feedback_dir / "fb-1.json").write_text(
+        json.dumps(
+            {
+                "feedback_id": "fb-1",
+                "trace_id": "trace-1",
+                "rating": "up",
+                "kb_id": "default",
+                "created_at": 1.0,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    store = FeedbackStore(persist_dir=feedback_dir)
+
+    assert [item.feedback_id for item in store.list()] == ["fb-1"]
+
+
 def test_feedback_store_prunes_old_persisted_files(tmp_path) -> None:
     feedback_dir = tmp_path / "feedback"
     store = FeedbackStore(max_records=2, persist_dir=feedback_dir)

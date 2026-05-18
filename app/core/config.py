@@ -22,9 +22,12 @@ from app.model_client.embeddings import EmbeddingClient
 from app.model_client.generation import GenerationClient
 from app.model_client.rerank import RerankClient
 from app.retrieval.graph_store import GraphStore, Neo4jGraphStore
+from app.retrieval.evidence_planner import EvidencePlanner, EvidencePlannerConfig
+from app.retrieval.hybrid_fusion import HybridSearchConfig
 from app.retrieval.hybrid_retriever import HybridRetriever
 from app.retrieval.pipeline import RetrievalPipeline
 from app.retrieval.query_rewriter import QueryRewriter, QueryRewriterConfig
+from app.retrieval.query_router import QueryRouter, QueryRouterConfig
 from app.utils.text import parse_bool_env
 from app.vectorstore.repository import (
     InMemoryVectorRepository,
@@ -203,6 +206,40 @@ class AppConfig:
         }
 
     @property
+    def multivector_configured(self) -> dict[str, object]:
+        section = self.models.get("multivector", {})
+        provider = str(
+            os.getenv("MULTIVECTOR_PROVIDER")
+            or section.get("provider")
+            or "disabled"
+        ).strip()
+        enabled = provider.lower() not in {"", "disabled", "none", "false", "off"}
+        model = str(
+            os.getenv("MULTIVECTOR_MODEL_ALIAS")
+            or section.get("default_alias")
+            or ""
+        )
+        base_url = str(
+            os.getenv("MULTIVECTOR_API_BASE_URL")
+            or section.get("base_url")
+            or ""
+        )
+        missing: list[str] = []
+        if enabled and not model:
+            missing.append("MULTIVECTOR_MODEL_ALIAS")
+        if enabled and provider.lower() in {"http", "colpali-http", "colqwen-http"}:
+            if not base_url:
+                missing.append("MULTIVECTOR_API_BASE_URL")
+        return {
+            "enabled": enabled,
+            "provider": provider,
+            "model": model or None,
+            "base_url": base_url or None,
+            "configured": enabled and not missing,
+            "missing": missing,
+        }
+
+    @property
     def trace_store_dir(self) -> Path:
         return Path(
             os.getenv(
@@ -281,7 +318,10 @@ class AppConfig:
         raw = os.getenv("RAG_HYBRID_SEARCH_ENABLED")
         if raw is not None:
             return parse_bool_env(raw)
-        return bool(self.settings.get("hybrid_search", {}).get("enabled", False))
+        configured = self.settings.get("hybrid_search", {}).get("enabled", False)
+        if isinstance(configured, bool):
+            return configured
+        return parse_bool_env(str(configured))
 
     @property
     def graph_backend(self) -> str:
@@ -363,6 +403,8 @@ class AppContainer:
     graph_store: GraphStore | None = None
     ingest_job_store: IngestJobStore | None = None
     query_rewriter: QueryRewriter | None = None
+    query_router: QueryRouter | None = None
+    evidence_planner: EvidencePlanner | None = None
     hybrid_retriever: HybridRetriever | None = None
     wiki_compiler: WikiCompiler | None = None
     wiki_searcher: WikiSearcher | None = None
@@ -409,11 +451,25 @@ class AppContainer:
                 generation_client=generation_client,
                 config=query_rewriter_config,
             )
+        query_router = QueryRouter(
+            generation_client=generation_client,
+            config=QueryRouterConfig.from_env(),
+        )
+        evidence_planner = EvidencePlanner(
+            generation_client=generation_client,
+            config=EvidencePlannerConfig.from_settings(
+                config.settings.get("evidence_planner", {})
+            ),
+        )
         hybrid_retriever = None
         if config.hybrid_search_enabled:
             hybrid_retriever = HybridRetriever(
                 repository=repository,
                 embedding_client=embedding_client,
+                hybrid_config=HybridSearchConfig.from_settings(
+                    config.settings.get("hybrid_search", {})
+                ),
+                enabled_config=config.hybrid_search_enabled,
             )
             hybrid_retriever.bootstrap_from_parsed_dir(config.parsed_dir)
         ragas_runner = None
@@ -434,6 +490,8 @@ class AppContainer:
             trace_store,
             tracing_manager,
             query_rewriter=query_rewriter,
+            query_router=query_router,
+            evidence_planner=evidence_planner,
             hybrid_retriever=hybrid_retriever,
             wiki_searcher=wiki_searcher,
         )
@@ -477,6 +535,8 @@ class AppContainer:
             ingest_job_store=ingest_job_store,
             knowledge_base_catalog=knowledge_base_catalog,
             query_rewriter=query_rewriter,
+            query_router=query_router,
+            evidence_planner=evidence_planner,
             hybrid_retriever=hybrid_retriever,
             wiki_compiler=wiki_compiler,
             wiki_searcher=wiki_searcher,

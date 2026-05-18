@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 from dataclasses import dataclass
@@ -30,11 +31,10 @@ class RetrievalEvaluatorConfig:
         )
 
 
-RELEVANCE_EVAL_PROMPT = """You are a document relevance evaluator. Given a query and a document, determine if the document is relevant to answering the query.
+RELEVANCE_EVAL_PROMPT = """You are a document relevance evaluator. Given the input JSON, determine if the document is relevant to answering the query.
 
-Query: {query}
-
-Document: {document}
+Input JSON:
+{input_json}
 
 Instructions:
 1. Read the query and document carefully
@@ -64,7 +64,13 @@ class RetrievalEvaluator:
             return 0.0
         try:
             prompt = RELEVANCE_EVAL_PROMPT.format(
-                query=query, document=document[:MAX_DOC_PREVIEW_LENGTH]
+                input_json=json.dumps(
+                    {
+                        "query": query,
+                        "document": document[:MAX_DOC_PREVIEW_LENGTH],
+                    },
+                    ensure_ascii=False,
+                )
             )
             result = await self.generation_client.generate(
                 [{"role": "user", "content": prompt}]

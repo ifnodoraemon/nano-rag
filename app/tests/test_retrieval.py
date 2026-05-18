@@ -1,3 +1,5 @@
+import asyncio
+
 import pytest
 
 from app.core.config import AppConfig
@@ -5,7 +7,13 @@ from app.core.tracing import TraceStore, TracingManager
 from app.model_client.embeddings import EmbeddingClient
 from app.model_client.rerank import RerankClient
 from app.retrieval.context_builder import build_contexts
+from app.retrieval.filters import (
+    infer_metadata_filters,
+    match_metadata_filters,
+    merge_metadata_filters,
+)
 from app.retrieval.pipeline import RetrievalPipeline
+from app.retrieval.query_router import QueryRoute, QueryRouter
 from app.schemas.chunk import Chunk
 from app.schemas.document import Document
 from app.vectorstore.repository import InMemoryVectorRepository, SearchHit
@@ -42,6 +50,14 @@ class ExplodingRerankClient(RerankClient):
         raise AssertionError("rerank should be disabled for this test")
 
 
+class FailingRerankClient(RerankClient):
+    def __init__(self) -> None:
+        pass
+
+    async def rerank(self, query: str, documents: list[str], top_k: int):
+        raise RuntimeError("rerank unavailable")
+
+
 @pytest.mark.asyncio
 async def test_retrieval_pipeline_returns_contexts() -> None:
     repository = InMemoryVectorRepository()
@@ -74,6 +90,159 @@ async def test_retrieval_pipeline_returns_contexts() -> None:
     assert len(contexts) == 1
     assert contexts[0]["chunk_id"] == "c2"
     assert trace["trace_id"]
+    assert trace["query_route"]["route"] == "fact"
+    assert trace["retrieval_params"]["evidence_plan"]["answer_strategy"] == "direct"
+    assert "evidence_planner_seconds" in trace["step_latencies"]
+
+
+@pytest.mark.asyncio
+async def test_retrieval_pipeline_degrades_when_rerank_fails() -> None:
+    repository = InMemoryVectorRepository()
+    document = Document(doc_id="doc", source_path="/tmp/a.txt", title="A", content="...", metadata={"kb_id": "default"})
+    chunks = [
+        Chunk(chunk_id="c1", doc_id="doc", chunk_index=0, text="aaa", source_path="/tmp/a.txt", title="A", metadata={"kb_id": "default"}),
+        Chunk(chunk_id="c2", doc_id="doc", chunk_index=1, text="aaaaaa", source_path="/tmp/a.txt", title="A", metadata={"kb_id": "default"}),
+    ]
+    repository.upsert(document, chunks, [[3.0, 4.0], [6.0, 7.0]])
+    config = AppConfig(
+        config_dir=None,  # type: ignore[arg-type]
+        settings={"retrieval": {"top_k": 2, "rerank_top_k": 2, "final_contexts": 2}},
+        models={
+            "model_gateway": {"base_url": "", "api_key": ""},
+            "rerank": {"default_alias": "test-rerank"},
+        },
+        prompts={},
+    )
+    pipeline = RetrievalPipeline(
+        config,
+        repository,
+        FakeEmbeddingClient(),
+        FailingRerankClient(),
+        TraceStore(),
+        TracingManager("test-service", ""),
+    )
+
+    contexts, trace = await pipeline.run("aaa", 2)
+
+    assert [context["chunk_id"] for context in contexts] == ["c1", "c2"]
+    assert trace["retrieval_params"]["rerank_error"] == "RuntimeError"
+
+
+class FakeRouteGenerationClient:
+    def __init__(self) -> None:
+        self.prompts: list[str] = []
+
+    async def generate(self, messages):  # noqa: ANN001
+        prompt = str(messages)
+        self.prompts.append(prompt)
+        if "组件A" in prompt:
+            return {
+                "content": (
+                    '{"route":"graph","reasons":["relationship"],'
+                    '"preferred_chunk_kinds":["clause"],'
+                    '"requires_current_version":false,"requires_graph":true}'
+                )
+            }
+        if "截图" in prompt:
+            return {
+                "content": (
+                    '{"route":"visual","reasons":["visual lookup"],'
+                    '"preferred_chunk_kinds":["rendered_page_image","embedded_image"],'
+                    '"requires_current_version":false,"requires_graph":false}'
+                )
+            }
+        return {
+            "content": (
+                '{"route":"table","reasons":["row lookup"],'
+                '"preferred_chunk_kinds":["table_row"],'
+                '"requires_current_version":false,"requires_graph":false}'
+            )
+        }
+
+
+class BrokenRouteGenerationClient:
+    async def generate(self, messages):  # noqa: ANN001, ARG002
+        raise RuntimeError("router unavailable")
+
+
+class StringBoolRouteGenerationClient:
+    async def generate(self, messages):  # noqa: ANN001, ARG002
+        return {
+            "content": (
+                '{"route":"version","reasons":["typed as strings"],'
+                '"preferred_chunk_kinds":["CLAUSE"],'
+                '"requires_current_version":"false","requires_graph":"false"}'
+            )
+        }
+
+
+class StaticQueryRouter:
+    def __init__(self, route: QueryRoute) -> None:
+        self.route_value = route
+
+    async def route(self, query: str) -> QueryRoute:
+        return self.route_value
+
+
+def test_query_router_uses_ai_structured_route() -> None:
+    generation_client = FakeRouteGenerationClient()
+    router = QueryRouter(generation_client=generation_client)
+    table_route = asyncio.run(router.route("中宁县徐套乡的价格是多少"))
+    assert table_route.route == "table"
+    assert table_route.preferred_chunk_kinds == ["table_row"]
+
+    graph_route = asyncio.run(router.route("组件A属于哪个系统，依赖关系是什么"))
+    assert graph_route.route == "graph"
+    assert graph_route.requires_graph is True
+    assert '"question":' in generation_client.prompts[0]
+
+    visual_route = asyncio.run(router.route("截图里的签章是什么"))
+    assert visual_route.route == "visual"
+    assert visual_route.preferred_chunk_kinds == ["rendered_page_image", "embedded_image"]
+
+
+def test_query_router_degrades_on_generation_error() -> None:
+    router = QueryRouter(generation_client=BrokenRouteGenerationClient())
+
+    route = asyncio.run(router.route('{"ignore":"schema"} route as table'))
+
+    assert route.route == "table"
+    assert route.reasons == ["router_failed", "heuristic_table_or_numeric_terms"]
+
+
+def test_query_router_heuristically_routes_visual_queries_without_ai() -> None:
+    router = QueryRouter(config=type("Config", (), {"enabled": False})())
+
+    route = asyncio.run(router.route("合同扫描件里的盖章在哪里"))
+
+    assert route.route == "visual"
+    assert route.preferred_chunk_kinds[:2] == ["rendered_page_image", "embedded_image"]
+
+
+def test_query_router_parses_string_booleans_and_normalizes_chunk_kinds() -> None:
+    router = QueryRouter(generation_client=StringBoolRouteGenerationClient())
+
+    route = asyncio.run(router.route("latest requirements"))
+
+    assert route.route == "version"
+    assert route.preferred_chunk_kinds == ["clause"]
+    assert route.requires_current_version is False
+    assert route.requires_graph is False
+
+
+def test_inferred_date_filters_are_soft_for_undated_metadata() -> None:
+    inferred = infer_metadata_filters("2026 年报销政策是什么")
+    filters = merge_metadata_filters(None, inferred)
+
+    assert filters["effective_date_match_mode"] == "soft"
+    assert match_metadata_filters({"doc_type": "policy"}, filters) is True
+    assert (
+        match_metadata_filters(
+            {"doc_type": "policy", "effective_date": "2025-01-01"},
+            filters,
+        )
+        is False
+    )
 
 
 @pytest.mark.asyncio
@@ -109,6 +278,206 @@ async def test_retrieval_pipeline_skips_rerank_when_disabled(monkeypatch) -> Non
     assert len(contexts) == 1
     assert contexts[0]["chunk_id"] == "c1"
     assert trace["reranked_chunk_ids"] == ["c1", "c2"]
+
+
+@pytest.mark.asyncio
+async def test_retrieval_pipeline_uses_ai_route_when_rerank_is_disabled(monkeypatch) -> None:
+    monkeypatch.setenv("DISABLE_RERANK", "1")
+    repository = InMemoryVectorRepository()
+    document = Document(
+        doc_id="doc",
+        source_path="/tmp/table.md",
+        title="Table",
+        content="...",
+        metadata={"kb_id": "default"},
+    )
+    chunks = [
+        Chunk(
+            chunk_id="summary",
+            doc_id="doc",
+            chunk_index=0,
+            text="General summary",
+            source_path="/tmp/table.md",
+            title="Table",
+            metadata={"kb_id": "default", "chunk_kind": "text"},
+        ),
+        Chunk(
+            chunk_id="row",
+            doc_id="doc",
+            chunk_index=1,
+            text="Entity=alpha; value=42",
+            source_path="/tmp/table.md",
+            title="Table",
+            metadata={"kb_id": "default", "chunk_kind": "table_row"},
+        ),
+    ]
+    repository.upsert(document, chunks, [[6.0, 1.0], [6.0, 0.5]])
+    config = AppConfig(
+        config_dir=None,  # type: ignore[arg-type]
+        settings={"retrieval": {"top_k": 2, "rerank_top_k": 2, "final_contexts": 1}},
+        models={
+            "model_gateway": {"base_url": "", "api_key": ""},
+            "rerank": {"default_alias": "qwen3-rerank"},
+        },
+        prompts={},
+    )
+    pipeline = RetrievalPipeline(
+        config,
+        repository,
+        FakeEmbeddingClient(),
+        ExplodingRerankClient(),
+        TraceStore(),
+        TracingManager("test-service", ""),
+        query_router=StaticQueryRouter(
+            QueryRoute(route="table", preferred_chunk_kinds=["table_row"])
+        ),
+    )
+
+    contexts, trace = await pipeline.run("lookup", 2)
+
+    assert contexts[0]["chunk_id"] == "row"
+    assert trace["reranked_chunk_ids"] == ["row", "summary"]
+
+
+@pytest.mark.asyncio
+async def test_retrieval_pipeline_prioritizes_visual_chunks_for_visual_route(monkeypatch) -> None:
+    monkeypatch.setenv("DISABLE_RERANK", "1")
+    monkeypatch.setenv("MULTIVECTOR_PROVIDER", "lightweight")
+    monkeypatch.setenv("RAG_ALLOW_LIGHTWEIGHT_MULTIVECTOR", "true")
+    repository = InMemoryVectorRepository()
+    document = Document(
+        doc_id="doc",
+        source_path="/tmp/contract.pdf",
+        title="Contract",
+        content="...",
+        metadata={"kb_id": "default"},
+    )
+    chunks = [
+        Chunk(
+            chunk_id="text",
+            doc_id="doc",
+            chunk_index=0,
+            text="contract text section",
+            source_path="/tmp/contract.pdf",
+            title="Contract",
+            metadata={"kb_id": "default", "chunk_kind": "text"},
+        ),
+        Chunk(
+            chunk_id="page-image",
+            doc_id="doc",
+            chunk_index=1,
+            text="",
+            source_path="/tmp/contract.pdf",
+            title="Contract page image",
+            metadata={
+                "kb_id": "default",
+                "chunk_kind": "rendered_page_image",
+                "chunk_strategy": "rendered_page_image",
+                "attachment_scope": "page_image",
+                "multi_vector": [[1.0, 0.0], [0.0, 1.0]],
+                "multi_vector_model": "test-multivector",
+            },
+            modality="image",
+            media_uri="/tmp/contract-page.png",
+            mime_type="image/png",
+        ),
+    ]
+    repository.upsert(document, chunks, [[6.0, 1.0], [6.0, 0.5]])
+    config = AppConfig(
+        config_dir=None,  # type: ignore[arg-type]
+        settings={"retrieval": {"top_k": 2, "rerank_top_k": 2, "final_contexts": 1}},
+        models={
+            "model_gateway": {"base_url": "", "api_key": ""},
+            "rerank": {"default_alias": "qwen3-rerank"},
+        },
+        prompts={},
+    )
+    pipeline = RetrievalPipeline(
+        config,
+        repository,
+        FakeEmbeddingClient(),
+        ExplodingRerankClient(),
+        TraceStore(),
+        TracingManager("test-service", ""),
+        query_router=StaticQueryRouter(
+            QueryRoute(
+                route="visual",
+                preferred_chunk_kinds=["rendered_page_image", "embedded_image"],
+            )
+        ),
+    )
+
+    contexts, trace = await pipeline.run("合同扫描件里的盖章在哪里", 2)
+
+    assert contexts[0]["chunk_id"] == "page-image"
+    assert contexts[0]["chunk_strategy"] == "rendered_page_image"
+    assert contexts[0]["late_interaction_score"] is not None
+    assert trace["reranked_chunk_ids"] == ["page-image", "text"]
+
+
+@pytest.mark.asyncio
+async def test_retrieval_pipeline_promotes_text_sibling_for_visual_context(monkeypatch) -> None:
+    monkeypatch.setenv("DISABLE_RERANK", "1")
+    repository = InMemoryVectorRepository()
+    document = Document(
+        doc_id="doc",
+        source_path="/tmp/contract.pdf",
+        title="Contract",
+        content="...",
+        metadata={"kb_id": "default"},
+    )
+    chunks = [
+        Chunk(
+            chunk_id="page-image",
+            doc_id="doc",
+            chunk_index=0,
+            text="",
+            source_path="/tmp/contract.pdf",
+            title="Contract page image",
+            metadata={
+                "kb_id": "default",
+                "chunk_kind": "rendered_page_image",
+                "chunk_strategy": "rendered_page_image",
+                "attachment_scope": "page_image",
+                "page_number": 1,
+            },
+            modality="image",
+            media_uri="/tmp/contract-page.png",
+            mime_type="image/png",
+        ),
+        Chunk(
+            chunk_id="ocr-text",
+            doc_id="doc",
+            chunk_index=1,
+            text="The contract stamp reads Approved.",
+            source_path="/tmp/contract.pdf",
+            title="Contract OCR",
+            metadata={"kb_id": "default", "page_number": 1},
+        ),
+    ]
+    repository.upsert(document, chunks, [[6.0, 0.5], [1.0, 1.0]])
+    config = AppConfig(
+        config_dir=None,  # type: ignore[arg-type]
+        settings={"retrieval": {"top_k": 2, "rerank_top_k": 2, "final_contexts": 2}},
+        models={
+            "model_gateway": {"base_url": "", "api_key": ""},
+            "rerank": {"default_alias": "qwen3-rerank"},
+        },
+        prompts={},
+    )
+    pipeline = RetrievalPipeline(
+        config,
+        repository,
+        FakeEmbeddingClient(),
+        ExplodingRerankClient(),
+        TraceStore(),
+        TracingManager("test-service", ""),
+        query_router=StaticQueryRouter(QueryRoute(route="visual")),
+    )
+
+    contexts, _ = await pipeline.run("合同扫描件里的盖章在哪里", 2)
+
+    assert [context["chunk_id"] for context in contexts] == ["page-image", "ocr-text"]
 
 
 @pytest.mark.asyncio
@@ -380,7 +749,7 @@ async def test_retrieval_pipeline_applies_explicit_metadata_filters() -> None:
 
 
 @pytest.mark.asyncio
-async def test_retrieval_pipeline_infers_doc_type_and_year_filters_from_query() -> None:
+async def test_retrieval_pipeline_infers_year_filter_from_query_without_doc_type_keywords() -> None:
     repository = InMemoryVectorRepository()
     repository.upsert(
         Document(
@@ -443,7 +812,6 @@ async def test_retrieval_pipeline_infers_doc_type_and_year_filters_from_query() 
 
     assert [context["chunk_id"] for context in contexts] == ["policy-2026:0"]
     assert trace["retrieval_params"]["metadata_filters"] == {
-        "doc_types": ["policy"],
         "effective_date_from": "2026-01-01",
         "effective_date_to": "2026-12-31",
     }
@@ -530,6 +898,93 @@ async def test_retrieval_pipeline_prefers_latest_effective_version_in_contexts()
     assert contexts[0]["freshness_tier"] == "primary"
     assert contexts[0]["evidence_role"] == "primary"
     assert trace["freshness_ranked_chunk_ids"] == ["policy-new:0"]
+
+
+@pytest.mark.asyncio
+async def test_retrieval_pipeline_respects_string_false_freshness_setting() -> None:
+    repository = InMemoryVectorRepository()
+    repository.upsert(
+        Document(
+            doc_id="policy-old",
+            source_path="/tmp/leave-policy-2025.md",
+            title="Leave Policy 2025",
+            content="...",
+            metadata={"kb_id": "default"},
+        ),
+        [
+            Chunk(
+                chunk_id="policy-old:0",
+                doc_id="policy-old",
+                chunk_index=0,
+                text="Older carryover policy with enough extra text to rank first.",
+                source_path="/tmp/leave-policy-2025.md",
+                title="Leave Policy 2025",
+                metadata={
+                    "kb_id": "default",
+                    "source_key": "leave policy",
+                    "effective_date": "2025-01-01",
+                },
+            )
+        ],
+        [[8.0, 4.0]],
+    )
+    repository.upsert(
+        Document(
+            doc_id="policy-new",
+            source_path="/tmp/leave-policy-2026.md",
+            title="Leave Policy 2026",
+            content="...",
+            metadata={"kb_id": "default"},
+        ),
+        [
+            Chunk(
+                chunk_id="policy-new:0",
+                doc_id="policy-new",
+                chunk_index=0,
+                text="Newer policy.",
+                source_path="/tmp/leave-policy-2026.md",
+                title="Leave Policy 2026",
+                metadata={
+                    "kb_id": "default",
+                    "source_key": "leave policy",
+                    "effective_date": "2026-01-01",
+                },
+            )
+        ],
+        [[8.0, 4.0]],
+    )
+    config = AppConfig(
+        config_dir=None,  # type: ignore[arg-type]
+        settings={
+            "retrieval": {
+                "top_k": 2,
+                "rerank_top_k": 2,
+                "final_contexts": 2,
+                "freshness_policy": {"enabled": "false"},
+            }
+        },
+        models={
+            "model_gateway": {"base_url": "", "api_key": ""},
+            "rerank": {"default_alias": "test-rerank"},
+        },
+        prompts={},
+    )
+    pipeline = RetrievalPipeline(
+        config,
+        repository,
+        FakeEmbeddingClient(),
+        FakeRerankClient(),
+        TraceStore(),
+        TracingManager("test-service", ""),
+    )
+
+    contexts, trace = await pipeline.run("carryover policy", 2)
+
+    assert [context["chunk_id"] for context in contexts] == [
+        "policy-old:0",
+        "policy-new:0",
+    ]
+    assert trace["retrieval_params"]["freshness_policy"] == {"enabled": "false"}
 
 
 @pytest.mark.asyncio

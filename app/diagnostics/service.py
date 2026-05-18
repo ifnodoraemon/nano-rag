@@ -14,37 +14,6 @@ if TYPE_CHECKING:
     from app.model_client.generation import GenerationClient
 
 
-def _looks_like_refusal(answer: str) -> bool:
-    refusal_markers = (
-        "cannot confirm",
-        "insufficient information",
-        "insufficient evidence",
-        "no available context",
-        "please provide",
-        "无法确认",
-        "信息不足",
-        "证据不足",
-        "没有可用上下文",
-        "请提供",
-    )
-    lowered = answer.lower()
-    return any(marker in answer or marker in lowered for marker in refusal_markers)
-
-
-def _mentions_conflict(answer: str) -> bool:
-    conflict_markers = (
-        "存在冲突",
-        "说法不一致",
-        "来源不一致",
-        "无法确定",
-        "不能确定",
-        "inconsistent",
-        "conflict",
-    )
-    lowered = answer.lower()
-    return any(marker in answer or marker in lowered for marker in conflict_markers)
-
-
 def _count_claim_types(claims: object) -> dict[str, int]:
     counts = {
         "factual": 0,
@@ -118,12 +87,12 @@ class DiagnosisService:
                         },
                     )
                 )
-            if answer and not _mentions_conflict(answer):
+            if claim_type_counts["conflict"] == 0:
                 findings.append(
                     DiagnosisFinding(
                         category="conflict_not_reflected_in_answer",
                         severity="high",
-                        rationale="A conflicting topic was retrieved, but the final answer did not reflect that conflict, creating overconfidence risk.",
+                        rationale="A conflicting topic was retrieved, but the final answer did not include a structured conflict claim, creating overconfidence risk.",
                         suggested_actions=[
                             "Tighten the prompt so conflicting topics must be acknowledged explicitly.",
                             "Add conflict safeguards in the answer formatter or post-generation processing.",
@@ -171,12 +140,12 @@ class DiagnosisService:
                 )
             )
 
-        elif contexts and _looks_like_refusal(answer):
+        elif contexts and claim_type_counts["insufficiency"] > 0:
             findings.append(
                 DiagnosisFinding(
                     category="generation_refusal_with_context",
                     severity="medium",
-                    rationale="Relevant context was retrieved, but the model still produced a refusal or insufficient-information answer, which points more to prompting or model stability.",
+                    rationale="Relevant context was retrieved, but the model emitted a structured insufficiency claim, which points more to prompting, model stability, or missing evidence binding.",
                     suggested_actions=[
                         "Tighten the system prompt so retrieved evidence should lead to a direct answer first.",
                         "Compare different generation models or temperature settings on the same bad case.",
@@ -189,23 +158,6 @@ class DiagnosisService:
                     },
                 )
             )
-            if claim_type_counts["insufficiency"] == 0:
-                findings.append(
-                    DiagnosisFinding(
-                        category="insufficiency_claim_missing",
-                        severity="medium",
-                        rationale="The answer behaves like an insufficiency or refusal response, but no structured insufficiency claim was produced.",
-                        suggested_actions=[
-                            "Require the generation layer to emit an [insufficiency] claim whenever the answer says evidence is insufficient.",
-                            "Bind insufficiency claims to the citation labels that justify the limitation.",
-                            "Track insufficiency-claim coverage in eval to avoid silent refusals.",
-                        ],
-                        evidence={
-                            "answer_preview": answer[:200],
-                            "claim_type_counts": claim_type_counts,
-                        },
-                    )
-                )
 
         if retrieved and trace.reranked_chunk_ids and trace.retrieved_chunk_ids:
             if set(trace.reranked_chunk_ids) - set(trace.retrieved_chunk_ids):
@@ -318,20 +270,6 @@ class DiagnosisService:
                         "answer_preview": answer[:200],
                         "reference_preview": reference_answer[:200],
                     },
-                )
-            )
-
-        if _looks_like_refusal(answer) and context_recall >= 1.0:
-            findings.append(
-                DiagnosisFinding(
-                    category="refusal_bad_case",
-                    severity="medium",
-                    rationale="This bad case is a refusal despite sufficient evidence, which usually points to prompt constraints or model instability.",
-                    suggested_actions=[
-                        "Add this sample to the regression set to track refusal behavior explicitly.",
-                        "Strengthen the prompt instruction that matched evidence should lead to a direct answer.",
-                    ],
-                    evidence={"answer_preview": answer[:200]},
                 )
             )
 

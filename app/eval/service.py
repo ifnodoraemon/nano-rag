@@ -36,6 +36,58 @@ def _count_claim_type(claims: object, claim_type: str) -> int:
     )
 
 
+def _claim_verification_stats(claims: object) -> dict[str, object]:
+    if not isinstance(claims, list):
+        return {
+            "supporting_claim_count": 0,
+            "verified_claim_count": 0,
+            "unsupported_claim_count": 0,
+            "claim_support_score_avg": 0.0,
+            "missing_number_count": 0,
+            "missing_term_count": 0,
+        }
+    normalized: list[dict[str, object]] = []
+    for claim in claims:
+        if isinstance(claim, dict):
+            normalized.append(claim)
+        elif hasattr(claim, "model_dump"):
+            normalized.append(claim.model_dump())
+    if not normalized:
+        return {
+            "supporting_claim_count": 0,
+            "verified_claim_count": 0,
+            "unsupported_claim_count": 0,
+            "claim_support_score_avg": 0.0,
+            "missing_number_count": 0,
+            "missing_term_count": 0,
+        }
+    scored = [
+        float(claim.get("support_score", 0.0) or 0.0)
+        for claim in normalized
+        if claim.get("support_score") is not None
+    ]
+    verified = sum(1 for claim in normalized if claim.get("verified") is True)
+    unsupported = sum(1 for claim in normalized if claim.get("verified") is False)
+    missing_numbers = sum(
+        len(claim.get("missing_numbers", []) or [])
+        for claim in normalized
+        if isinstance(claim.get("missing_numbers", []), list)
+    )
+    missing_terms = sum(
+        len(claim.get("missing_terms", []) or [])
+        for claim in normalized
+        if isinstance(claim.get("missing_terms", []), list)
+    )
+    return {
+        "supporting_claim_count": len(normalized),
+        "verified_claim_count": verified,
+        "unsupported_claim_count": unsupported,
+        "claim_support_score_avg": round(sum(scored) / len(scored), 4) if scored else 0.0,
+        "missing_number_count": missing_numbers,
+        "missing_term_count": missing_terms,
+    }
+
+
 async def materialize_eval_records(
     container: AppContainer, records: list[dict]
 ) -> list[dict]:
@@ -54,6 +106,7 @@ async def materialize_eval_records(
         insufficiency_claim_count = int(
             prepared.get("insufficiency_claim_count", 0) or 0
         )
+        claim_stats = _claim_verification_stats(prepared.get("supporting_claims", []))
 
         if not query:
             prepared_records.append(prepared)
@@ -82,6 +135,8 @@ async def materialize_eval_records(
                     insufficiency_claim_count = _count_claim_type(
                         trace.supporting_claims, "insufficiency"
                     )
+                    claim_stats = _claim_verification_stats(trace.supporting_claims)
+                    prepared["supporting_claims"] = trace.supporting_claims
             if not retrieved_contexts:
                 prepared["retrieved_contexts"] = [
                     _context_to_text(context) for context in chat_response.contexts
@@ -102,6 +157,12 @@ async def materialize_eval_records(
                     getattr(chat_response, "supporting_claims", []), "insufficiency"
                 ),
             )
+            if not prepared.get("supporting_claims"):
+                prepared["supporting_claims"] = [
+                    claim.model_dump() if hasattr(claim, "model_dump") else claim
+                    for claim in getattr(chat_response, "supporting_claims", [])
+                ]
+            claim_stats = _claim_verification_stats(prepared.get("supporting_claims", []))
 
         if not retrieved_contexts:
             retrieval = await container.retrieval_pipeline.debug(
@@ -127,10 +188,14 @@ async def materialize_eval_records(
                     insufficiency_claim_count,
                     _count_claim_type(trace.supporting_claims, "insufficiency"),
                 )
+                if not prepared.get("supporting_claims"):
+                    prepared["supporting_claims"] = trace.supporting_claims
+                claim_stats = _claim_verification_stats(prepared.get("supporting_claims", []))
 
         prepared["conflicting_context_count"] = conflicting_context_count
         prepared["conflict_claim_count"] = conflict_claim_count
         prepared["insufficiency_claim_count"] = insufficiency_claim_count
+        prepared.update(claim_stats)
 
         prepared_records.append(prepared)
     return prepared_records

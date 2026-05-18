@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
+import os
+import random
 from typing import TYPE_CHECKING, Any
 
 import httpx
@@ -59,26 +62,81 @@ class AsyncJsonProviderClient:
 
     async def post_json(self, path: str, payload: dict[str, Any]) -> dict[str, Any]:
         self.provider.require_ready(require_model=False)
+        attempts = self._max_attempts()
+        last_error: Exception | None = None
+        for attempt in range(1, attempts + 1):
+            try:
+                response = await self._get_client().post(
+                    f"{self.provider.base_url}{path}",
+                    headers=self.headers,
+                    json=payload,
+                )
+                status_code = int(getattr(response, "status_code", 200))
+                if self._should_retry_status(status_code) and attempt < attempts:
+                    await asyncio.sleep(self._retry_sleep(attempt))
+                    continue
+                response.raise_for_status()
+                return response.json()
+            except httpx.TimeoutException as exc:
+                last_error = exc
+                if attempt < attempts:
+                    await asyncio.sleep(self._retry_sleep(attempt))
+                    continue
+                raise ModelGatewayError(
+                    f"{self.provider.capability} provider timeout on {path}. Check upstream provider settings."
+                ) from exc
+            except httpx.HTTPStatusError as exc:
+                last_error = exc
+                if (
+                    self._should_retry_status(exc.response.status_code)
+                    and attempt < attempts
+                ):
+                    await asyncio.sleep(self._retry_sleep(attempt))
+                    continue
+                detail = exc.response.text.strip()
+                raise ModelGatewayError(
+                    f"{self.provider.capability} provider request failed on {path}: "
+                    f"{exc.response.status_code} {detail}"
+                ) from exc
+            except httpx.HTTPError as exc:
+                last_error = exc
+                if attempt < attempts:
+                    await asyncio.sleep(self._retry_sleep(attempt))
+                    continue
+                raise ModelGatewayError(
+                    f"{self.provider.capability} provider connection failed on {path}: {exc}"
+                ) from exc
+        raise ModelGatewayError(
+            f"{self.provider.capability} provider request failed on {path}: {last_error}"
+        )
+
+    def _max_attempts(self) -> int:
+        raw = os.getenv(
+            f"{self.provider.capability.upper()}_MAX_RETRIES",
+            os.getenv("MODEL_PROVIDER_MAX_RETRIES", "2"),
+        )
         try:
-            response = await self._get_client().post(
-                f"{self.provider.base_url}{path}", headers=self.headers, json=payload
-            )
-            response.raise_for_status()
-            return response.json()
-        except httpx.TimeoutException as exc:
-            raise ModelGatewayError(
-                f"{self.provider.capability} provider timeout on {path}. Check upstream provider settings."
-            ) from exc
-        except httpx.HTTPStatusError as exc:
-            detail = exc.response.text.strip()
-            raise ModelGatewayError(
-                f"{self.provider.capability} provider request failed on {path}: "
-                f"{exc.response.status_code} {detail}"
-            ) from exc
-        except httpx.HTTPError as exc:
-            raise ModelGatewayError(
-                f"{self.provider.capability} provider connection failed on {path}: {exc}"
-            ) from exc
+            return max(1, int(raw) + 1)
+        except ValueError:
+            return 3
+
+    def _retry_sleep(self, attempt: int) -> float:
+        base_raw = os.getenv("MODEL_PROVIDER_RETRY_BASE_SECONDS", "0.5")
+        max_raw = os.getenv("MODEL_PROVIDER_RETRY_MAX_SECONDS", "8")
+        try:
+            base = max(0.0, float(base_raw))
+        except ValueError:
+            base = 0.5
+        try:
+            ceiling = max(base, float(max_raw))
+        except ValueError:
+            ceiling = 8.0
+        delay = min(ceiling, base * (2 ** max(0, attempt - 1)))
+        return delay + random.uniform(0, delay * 0.25 if delay else 0)
+
+    @staticmethod
+    def _should_retry_status(status_code: int) -> bool:
+        return status_code in {408, 409, 425, 429} or status_code >= 500
 
     async def chat_completions(
         self, messages: list[dict[str, Any]], model_alias: str | None = None, **extra: Any

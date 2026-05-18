@@ -46,3 +46,32 @@ def test_retrieval_evaluator_short_document_returns_default() -> None:
     )
     score = asyncio.run(evaluator.evaluate_relevance("test query", "hi"))
     assert score == 1.0
+
+
+class FakeGenerationClient:
+    def __init__(self) -> None:
+        self.prompts: list[str] = []
+
+    async def generate(self, messages):  # noqa: ANN001
+        prompt = messages[0]["content"]
+        self.prompts.append(prompt)
+        return {"content": "0.7"}
+
+
+def test_retrieval_evaluator_sends_query_and_document_as_json() -> None:
+    generation_client = FakeGenerationClient()
+    evaluator = RetrievalEvaluator(
+        generation_client=generation_client,
+        config=RetrievalEvaluatorConfig(enable_evaluation=True),
+    )
+
+    score = asyncio.run(
+        evaluator.evaluate_relevance(
+            'query with {"json": true}',
+            "This document is long enough to pass the relevance evaluator length gate.",
+        )
+    )
+
+    assert score == 0.7
+    assert '"query": "query with' in generation_client.prompts[0]
+    assert '"document": "This document is long enough' in generation_client.prompts[0]

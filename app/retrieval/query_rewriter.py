@@ -1,18 +1,18 @@
 from __future__ import annotations
 
+import json
 import logging
 import os
+import re
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
-
-import httpx
-
-from app.core.exceptions import ModelGatewayError
 
 if TYPE_CHECKING:
     from app.model_client.generation import GenerationClient
 
 logger = logging.getLogger(__name__)
+
+LIST_ITEM_PREFIX_RE = re.compile(r"^\s*(?:[-*]|\d+[\.)])\s*")
 
 
 @dataclass
@@ -42,22 +42,25 @@ class QueryRewriterConfig:
         )
 
 
-QUERY_REWRITE_PROMPT = """You are a query optimization assistant. Rewrite the following query to be more effective for document retrieval. Make it more specific and searchable while preserving the original intent.
+QUERY_REWRITE_PROMPT = """You are a query optimization assistant. Rewrite the query from the input JSON to be more effective for document retrieval. Make it more specific and searchable while preserving the original intent.
 
-Original query: {query}
+Input JSON:
+{input_json}
 
 Rewritten query:"""
 
-MULTI_QUERY_PROMPT = """You are a query expansion assistant. Generate {count} different versions of the following query that would help find relevant documents from different angles. Each version should use different keywords or phrasing while maintaining the same intent.
+MULTI_QUERY_PROMPT = """You are a query expansion assistant. Generate {count} different versions of the query from the input JSON that would help find relevant documents from different angles. Each version should use different phrasing while maintaining the same intent.
 
-Original query: {query}
+Input JSON:
+{input_json}
 
 Generate {count} queries, one per line:
 1."""
 
-HYDE_PROMPT = """You are a hypothetical document generator. Given a query, generate a hypothetical document that would perfectly answer this query. This document will be used to find similar real documents.
+HYDE_PROMPT = """You are a hypothetical document generator. Given the query from the input JSON, generate a hypothetical document that would perfectly answer this query. This document will be used to find similar real documents.
 
-Query: {query}
+Input JSON:
+{input_json}
 
 Generate a brief hypothetical document that answers this query:"""
 
@@ -75,13 +78,13 @@ class QueryRewriter:
         if not self.generation_client or not self.config.enable_rewrite:
             return query
         try:
-            prompt = QUERY_REWRITE_PROMPT.format(query=query)
+            prompt = QUERY_REWRITE_PROMPT.format(input_json=_query_input_json(query))
             result = await self.generation_client.generate(
                 [{"role": "user", "content": prompt}]
             )
             rewritten = result.get("content", "").strip()
             return rewritten if rewritten else query
-        except (ModelGatewayError, httpx.HTTPError) as exc:
+        except Exception as exc:
             logger.warning("query rewrite failed: %s", exc)
             return query
 
@@ -90,7 +93,7 @@ class QueryRewriter:
             return [query]
         try:
             prompt = MULTI_QUERY_PROMPT.format(
-                query=query, count=self.config.multi_query_count
+                input_json=_query_input_json(query), count=self.config.multi_query_count
             )
             result = await self.generation_client.generate(
                 [{"role": "user", "content": prompt}]
@@ -100,15 +103,11 @@ class QueryRewriter:
             for line in content.split("\n"):
                 line = line.strip()
                 if line and len(line) > 5:
-                    cleaned = line
-                    for prefix in ["1.", "2.", "3.", "4.", "5.", "-", "*"]:
-                        if cleaned.startswith(prefix):
-                            cleaned = cleaned[len(prefix) :].strip()
-                            break
+                    cleaned = LIST_ITEM_PREFIX_RE.sub("", line, count=1).strip()
                     if cleaned and cleaned.lower() != query.lower():
                         queries.append(cleaned)
             return queries[: self.config.multi_query_count + 1]
-        except (ModelGatewayError, httpx.HTTPError) as exc:
+        except Exception as exc:
             logger.warning("multi-query generation failed: %s", exc)
             return [query]
 
@@ -116,13 +115,13 @@ class QueryRewriter:
         if not self.generation_client or not self.config.enable_hyde:
             return query
         try:
-            prompt = HYDE_PROMPT.format(query=query)
+            prompt = HYDE_PROMPT.format(input_json=_query_input_json(query))
             result = await self.generation_client.generate(
                 [{"role": "user", "content": prompt}]
             )
             hyde_doc = result.get("content", "").strip()
             return hyde_doc if hyde_doc else query
-        except (ModelGatewayError, httpx.HTTPError) as exc:
+        except Exception as exc:
             logger.warning("hyde generation failed: %s", exc)
             return query
 
@@ -154,3 +153,7 @@ class QueryRewriter:
             retrieval_queries=unique_queries,
             hyde_query=hyde_query if hyde_query and hyde_query != rewritten else None,
         )
+
+
+def _query_input_json(query: str) -> str:
+    return json.dumps({"query": query}, ensure_ascii=False)

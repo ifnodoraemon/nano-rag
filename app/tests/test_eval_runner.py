@@ -22,6 +22,12 @@ def test_ragas_runner_returns_aggregate_metrics() -> None:
                 "conflicting_context_count": 1,
                 "conflict_claim_count": 1,
                 "insufficiency_claim_count": 0,
+                "supporting_claim_count": 2,
+                "verified_claim_count": 1,
+                "unsupported_claim_count": 1,
+                "claim_support_score_avg": 0.75,
+                "missing_number_count": 1,
+                "missing_term_count": 3,
             }
         ]
     )
@@ -35,10 +41,16 @@ def test_ragas_runner_returns_aggregate_metrics() -> None:
     assert report["aggregate"]["conflict_claim_hit_rate"] == 1.0
     assert report["aggregate"]["insufficiency_claim_count_avg"] == 0.0
     assert report["aggregate"]["insufficiency_claim_hit_rate"] == 0.0
+    assert report["aggregate"]["verified_claim_rate"] == 0.5
+    assert report["aggregate"]["unsupported_claim_rate"] == 0.5
+    assert report["aggregate"]["claim_support_score_avg"] == 0.75
+    assert report["aggregate"]["missing_number_count_avg"] == 1.0
+    assert report["aggregate"]["missing_term_count_avg"] == 3.0
     assert report["results"][0]["sample_id"] == "sample-1"
     assert report["results"][0]["trace_id"] == "trace-1"
     assert report["results"][0]["conflicting_context_count"] == 1
     assert report["results"][0]["conflict_claim_count"] == 1
+    assert report["results"][0]["unsupported_claim_count"] == 1
 
 
 def test_ragas_runner_ignores_trailing_citation_marker_for_exact_match() -> None:
@@ -134,6 +146,8 @@ async def test_materialize_eval_records_passes_business_context() -> None:
                         "claim_type": "conflict",
                         "text": "Sources disagree.",
                         "citation_labels": ["C1"],
+                        "verified": True,
+                        "support_score": 1.0,
                     }
                 ],
             }
@@ -146,6 +160,8 @@ async def test_materialize_eval_records_passes_business_context() -> None:
                     "claim_type": "conflict",
                     "text": "Sources disagree.",
                     "citation_labels": ["C1"],
+                    "verified": True,
+                    "support_score": 1.0,
                 }
             ],
             trace_id="trace-eval-1",
@@ -185,3 +201,7 @@ async def test_materialize_eval_records_passes_business_context() -> None:
     assert records[0]["conflicting_context_count"] == 1
     assert records[0]["conflict_claim_count"] == 1
     assert records[0]["insufficiency_claim_count"] == 0
+    assert records[0]["supporting_claim_count"] == 1
+    assert records[0]["verified_claim_count"] == 1
+    assert records[0]["unsupported_claim_count"] == 0
+    assert records[0]["claim_support_score_avg"] == 1.0

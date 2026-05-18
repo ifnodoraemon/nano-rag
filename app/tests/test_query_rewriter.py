@@ -43,9 +43,15 @@ class FakeGenerationClient:
         return {"content": "policy about pto carryover and leave rollover"}
 
 
+class BrokenGenerationClient:
+    async def generate(self, messages):  # noqa: ANN001, ARG002
+        raise RuntimeError("rewriter unavailable")
+
+
 def test_query_rewriter_build_plan_applies_rewrite_multi_query_and_hyde() -> None:
+    generation_client = FakeGenerationClient()
     rewriter = QueryRewriter(
-        generation_client=FakeGenerationClient(),
+        generation_client=generation_client,
         config=QueryRewriterConfig(
             enable_rewrite=True,
             enable_multi_query=True,
@@ -63,3 +69,21 @@ def test_query_rewriter_build_plan_applies_rewrite_multi_query_and_hyde() -> Non
         "leave rollover",
     ]
     assert plan.hyde_query == "policy about pto carryover and leave rollover"
+    assert '"query": "vacation policy"' in generation_client.calls[0]
+
+
+def test_query_rewriter_degrades_on_generation_error() -> None:
+    rewriter = QueryRewriter(
+        generation_client=BrokenGenerationClient(),
+        config=QueryRewriterConfig(
+            enable_rewrite=True,
+            enable_multi_query=True,
+            enable_hyde=True,
+        ),
+    )
+
+    plan = asyncio.run(rewriter.build_plan("original query"))
+
+    assert plan.rewritten_query is None
+    assert plan.retrieval_queries == ["original query"]
+    assert plan.hyde_query is None

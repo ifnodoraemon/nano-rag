@@ -5,9 +5,8 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
-from bs4 import BeautifulSoup
-
 from app.core.exceptions import ParsingError
+from app.ingestion.parser_registry import parse_content
 from app.model_client.document_parser import DocumentParserClient
 from app.schemas.structured import (
     DocumentNode,
@@ -23,6 +22,7 @@ HEADING_RE = re.compile(r"^(#{1,6})\s+(.+?)\s*$")
 NUMBERED_HEADING_RE = re.compile(
     r"^((?:第[一二三四五六七八九十百\d]+[章节])|(?:\d+(?:\.\d+){0,5}))\s*[、.)]?\s*(.+)$"
 )
+URL_LIKE_RE = re.compile(r"(?:https?://|www\.|/)", re.IGNORECASE)
 
 
 @dataclass(frozen=True)
@@ -33,6 +33,7 @@ class ParsedBlock:
     level: int | None
     source_ref: str
     table: TablePayload | None = None
+    metadata: dict[str, object] | None = None
 
 
 class StructuredDocumentParser:
@@ -47,20 +48,17 @@ class StructuredDocumentParser:
         kb_id: str,
         source_path: str,
     ) -> StructuredDocument:
-        suffix = path.suffix.lower()
-        if suffix in {".md", ".markdown", ".txt"}:
-            text = path.read_text(encoding="utf-8", errors="ignore")
-            blocks = self._parse_markdown_blocks(text)
-            parser_name = "markdown-tree"
-        elif suffix == ".html":
-            html = path.read_text(encoding="utf-8", errors="ignore")
-            text = BeautifulSoup(html, "html.parser").get_text("\n")
-            blocks = self._parse_markdown_blocks(text)
-            parser_name = "html-text-tree"
-        else:
-            text = await self._parse_with_multimodal_llm(path)
-            blocks = self._parse_markdown_blocks(text)
-            parser_name = "multimodal-llm-tree"
+        try:
+            parsed = await parse_content(path, self.document_parser)
+        except ParsingError as exc:
+            if "configured document parser model" in str(exc):
+                raise ParsingError(
+                    f"{path.suffix or 'file'} parsing requires a configured multimodal document parser."
+                ) from exc
+            raise
+        text = parsed.text
+        blocks = self._parse_markdown_blocks(text)
+        parser_name = parsed.parser_name
 
         if not blocks:
             raise ParsingError(f"Document parsing produced no structured nodes for {source_path}")
@@ -78,7 +76,7 @@ class StructuredDocumentParser:
         leaf_index = 0
 
         for block in blocks:
-            if block.node_type == NodeType.SECTION:
+            if block.node_type in {NodeType.SECTION, NodeType.CLAUSE, NodeType.DEFINITION}:
                 level = block.level or 1
                 while len(stack) > 1 and stack[-1][0] >= level:
                     stack.pop()
@@ -117,19 +115,6 @@ class StructuredDocumentParser:
             metadata={"parser": parser_name},
         )
 
-    async def _parse_with_multimodal_llm(self, path: Path) -> str:
-        parser_enabled = bool(getattr(self.document_parser, "enabled", True))
-        if self.document_parser and parser_enabled and self.document_parser.supports(path):
-            parsed = await self.document_parser.parse_file(path)
-            if parsed.strip():
-                return parsed
-            raise ParsingError(
-                f"Document parsing returned empty content for {path.name}."
-            )
-        raise ParsingError(
-            f"{path.suffix or 'file'} parsing requires a configured multimodal document parser."
-        )
-
     def _build_node(
         self,
         block: ParsedBlock,
@@ -159,6 +144,7 @@ class StructuredDocumentParser:
             ),
             table=block.table,
             metadata={
+                **(block.metadata or {}),
                 "content_hash": hashlib.sha256(text.encode("utf-8")).hexdigest(),
                 "parser_confidence": 1.0,
             },
@@ -191,22 +177,52 @@ class StructuredDocumentParser:
             stripped = line.strip()
             heading = HEADING_RE.match(stripped)
             numbered = NUMBERED_HEADING_RE.match(stripped)
-            if heading or (numbered and len(stripped) <= 120):
+            clause = self._parse_clause_heading(stripped)
+            definition = self._parse_definition(stripped)
+            if heading or clause or definition or (numbered and len(stripped) <= 120):
                 flush_paragraph(index)
                 if heading:
                     level = len(heading.group(1))
                     title = heading.group(2).strip()
+                    node_type = NodeType.SECTION
+                    metadata = {"heading_level": level}
+                elif clause:
+                    marker, body = clause
+                    title = f"{marker} {body}".strip()
+                    level = 2
+                    node_type = NodeType.CLAUSE
+                    metadata = {
+                        "clause_id": marker,
+                        "clause_title": body,
+                        "clause_type": "clause",
+                    }
+                elif definition:
+                    term, body = definition
+                    title = f"{term}: {body}".strip()
+                    level = 3
+                    node_type = NodeType.DEFINITION
+                    metadata = {
+                        "definition_term": term,
+                        "clause_type": "definition",
+                    }
                 else:
                     marker = numbered.group(1)
                     title = f"{marker} {numbered.group(2).strip()}"
                     level = 1 if marker.startswith("第") or "." not in marker else min(marker.count(".") + 1, 6)
+                    node_type = NodeType.CLAUSE if "." in marker else NodeType.SECTION
+                    metadata = {
+                        "clause_id": marker,
+                        "clause_title": numbered.group(2).strip(),
+                        "clause_type": "numbered",
+                    }
                 blocks.append(
                     ParsedBlock(
-                        node_type=NodeType.SECTION,
+                        node_type=node_type,
                         text=title,
                         title=title,
                         level=level,
                         source_ref=f"lines:{index + 1}-{index + 1}",
+                        metadata=metadata,
                     )
                 )
                 index += 1
@@ -303,6 +319,29 @@ class StructuredDocumentParser:
 
     def _is_table_line(self, value: str) -> bool:
         return value.startswith("|") and value.endswith("|") and value.count("|") >= 3
+
+    def _parse_clause_heading(self, value: str) -> tuple[str, str] | None:
+        match = re.match(
+            r"^(第[一二三四五六七八九十百千万\d]+条)\s*[、.)．]?\s*(.+)?$",
+            value,
+        )
+        if not match:
+            return None
+        marker = match.group(1).strip()
+        body = (match.group(2) or "").strip()
+        return marker, body
+
+    def _parse_definition(self, value: str) -> tuple[str, str] | None:
+        match = re.match(r"^[“\"']?([^：:]{2,40})[”\"']?\s*[:：]\s*(.+)$", value)
+        if not match:
+            return None
+        term = match.group(1).strip()
+        body = match.group(2).strip()
+        if not body or len(value) > 180:
+            return None
+        if URL_LIKE_RE.search(term):
+            return None
+        return term, body
 
     def _stable_node_id(self, doc_id: str, source_ref: str) -> str:
         digest = hashlib.sha256(f"{doc_id}:{source_ref}".encode("utf-8")).hexdigest()

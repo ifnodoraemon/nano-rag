@@ -97,9 +97,15 @@ class _PersistedStore(ABC, Generic[T]):
         for path in files[-self.max_records :]:
             try:
                 payload = json.loads(path.read_text(encoding="utf-8"))
-            except json.JSONDecodeError:
+                record = self._validate_record(payload)
+            except (OSError, json.JSONDecodeError, ValueError) as exc:
+                logger.warning(
+                    "Skipping invalid persisted %s record at %s: %s",
+                    self._record_id_field,
+                    path,
+                    exc,
+                )
                 continue
-            record = self._validate_record(payload)
             record_id = getattr(record, self._record_id_field)
             self._records[record_id] = record
         self._prune_persisted()

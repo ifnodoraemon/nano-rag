@@ -272,6 +272,12 @@ class RagasRunner:
             "conflicting_context_count": int(record.get("conflicting_context_count", 0) or 0),
             "conflict_claim_count": int(record.get("conflict_claim_count", 0) or 0),
             "insufficiency_claim_count": int(record.get("insufficiency_claim_count", 0) or 0),
+            "supporting_claim_count": int(record.get("supporting_claim_count", 0) or 0),
+            "verified_claim_count": int(record.get("verified_claim_count", 0) or 0),
+            "unsupported_claim_count": int(record.get("unsupported_claim_count", 0) or 0),
+            "claim_support_score_avg": round(float(record.get("claim_support_score_avg", 0.0) or 0.0), 4),
+            "missing_number_count": int(record.get("missing_number_count", 0) or 0),
+            "missing_term_count": int(record.get("missing_term_count", 0) or 0),
             "answer": record.get("answer", ""),
             "reference_answer": record.get("reference_answer", ""),
         }
@@ -289,6 +295,26 @@ class RagasRunner:
             "conflict_claim_hit_rate": round(sum(1 for r in results if r.get("conflict_claim_count", 0) > 0) / total, 4),
             "insufficiency_claim_count_avg": round(sum(r.get("insufficiency_claim_count", 0) for r in results) / total, 4),
             "insufficiency_claim_hit_rate": round(sum(1 for r in results if r.get("insufficiency_claim_count", 0) > 0) / total, 4),
+            "supporting_claim_count_avg": round(sum(r.get("supporting_claim_count", 0) for r in results) / total, 4),
+            "verified_claim_count_avg": round(sum(r.get("verified_claim_count", 0) for r in results) / total, 4),
+            "unsupported_claim_count_avg": round(sum(r.get("unsupported_claim_count", 0) for r in results) / total, 4),
+            "verified_claim_rate": round(
+                _safe_ratio(
+                    sum(r.get("verified_claim_count", 0) for r in results),
+                    sum(r.get("supporting_claim_count", 0) for r in results),
+                ),
+                4,
+            ),
+            "unsupported_claim_rate": round(
+                _safe_ratio(
+                    sum(r.get("unsupported_claim_count", 0) for r in results),
+                    sum(r.get("supporting_claim_count", 0) for r in results),
+                ),
+                4,
+            ),
+            "claim_support_score_avg": round(sum(r.get("claim_support_score_avg", 0.0) for r in results) / total, 4),
+            "missing_number_count_avg": round(sum(r.get("missing_number_count", 0) for r in results) / total, 4),
+            "missing_term_count_avg": round(sum(r.get("missing_term_count", 0) for r in results) / total, 4),
         }
 
     def _empty_result(self) -> dict:
@@ -305,6 +331,20 @@ class RagasRunner:
                 "conflict_claim_hit_rate": 0.0,
                 "insufficiency_claim_count_avg": 0.0,
                 "insufficiency_claim_hit_rate": 0.0,
+                "supporting_claim_count_avg": 0.0,
+                "verified_claim_count_avg": 0.0,
+                "unsupported_claim_count_avg": 0.0,
+                "verified_claim_rate": 0.0,
+                "unsupported_claim_rate": 0.0,
+                "claim_support_score_avg": 0.0,
+                "missing_number_count_avg": 0.0,
+                "missing_term_count_avg": 0.0,
             },
             "results": [],
         }
+
+
+def _safe_ratio(numerator: float, denominator: float) -> float:
+    if denominator == 0:
+        return 0.0
+    return numerator / denominator

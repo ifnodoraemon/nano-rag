@@ -49,6 +49,51 @@ def test_in_memory_repository_delete_by_source_removes_matching_documents_and_ch
     assert remaining_hit.chunk.source_path == other_source
 
 
+def test_in_memory_repository_delete_by_source_can_keep_replacement_chunks() -> None:
+    repository = InMemoryVectorRepository()
+    source_path = "data/raw/employee_handbook.md"
+    repository.upsert(
+        Document(doc_id="doc-1", source_path=source_path, title="A", content="old", metadata={"kb_id": "default"}),
+        [
+            Chunk(
+                chunk_id="doc-1:old",
+                doc_id="doc-1",
+                chunk_index=0,
+                text="old",
+                source_path=source_path,
+                title="A",
+                metadata={"kb_id": "default"},
+            )
+        ],
+        [[0.0, 1.0]],
+    )
+    repository.upsert(
+        Document(doc_id="doc-1", source_path=source_path, title="A", content="new", metadata={"kb_id": "default"}),
+        [
+            Chunk(
+                chunk_id="doc-1:new",
+                doc_id="doc-1",
+                chunk_index=0,
+                text="new",
+                source_path=source_path,
+                title="A",
+                metadata={"kb_id": "default"},
+            )
+        ],
+        [[1.0, 0.0]],
+    )
+
+    repository.delete_by_source(
+        source_path,
+        kb_id="default",
+        keep_chunk_ids={"doc-1:new"},
+    )
+
+    hits = repository.search([1.0, 0.0], top_k=5, kb_id="default")
+    assert [hit.chunk.chunk_id for hit in hits] == ["doc-1:new"]
+    assert repository.documents["doc-1"].content == "new"
+
+
 def test_in_memory_repository_search_is_scoped_by_kb() -> None:
     repository = InMemoryVectorRepository()
     source_path = "data/raw/employee_handbook.md"
@@ -200,6 +245,46 @@ def test_milvus_repository_refuses_to_drop_collection_on_dimension_mismatch(monk
     assert "Refusing to drop the collection automatically" in str(exc_info.value)
 
 
+def test_milvus_repository_requires_native_hybrid_schema_only_when_configured(monkeypatch) -> None:
+    import types
+
+    fake_pymilvus = types.ModuleType("pymilvus")
+    fake_pymilvus.DataType = type(
+        "DataType",
+        (),
+        {
+            "VARCHAR": "VARCHAR",
+            "FLOAT_VECTOR": "FLOAT_VECTOR",
+            "SPARSE_FLOAT_VECTOR": "SPARSE_FLOAT_VECTOR",
+        },
+    )
+    monkeypatch.setitem(__import__("sys").modules, "pymilvus", fake_pymilvus)
+
+    class FakeMilvusClient:
+        def has_collection(self, collection_name):  # noqa: ANN001, ARG002
+            return True
+
+        def describe_collection(self, collection_name):  # noqa: ANN001, ARG002
+            return {
+                "fields": [
+                    {"name": "vector", "params": {"dim": 1536}},
+                    {"name": "text"},
+                ]
+            }
+
+    monkeypatch.setattr("app.vectorstore.repository.create_milvus_client", lambda: FakeMilvusClient())
+    monkeypatch.delenv("RAG_MILVUS_REQUIRE_NATIVE_HYBRID", raising=False)
+
+    repository = MilvusVectorRepository(dimension=1536)
+
+    assert repository.native_hybrid_enabled is False
+
+    monkeypatch.setenv("RAG_MILVUS_REQUIRE_NATIVE_HYBRID", "true")
+    with pytest.raises(RuntimeError) as exc_info:
+        MilvusVectorRepository(dimension=1536)
+    assert "missing native hybrid field" in str(exc_info.value)
+
+
 def test_milvus_repository_new_collection_includes_native_hybrid_schema(monkeypatch) -> None:
     import types
 
@@ -334,6 +419,7 @@ def test_milvus_repository_search_specifies_dense_vector_field(monkeypatch) -> N
     assert hits[0].chunk.chunk_id == "doc-1:0"
     assert fake_client.search_kwargs["anns_field"] == "vector"
     assert fake_client.search_kwargs["filter"] == 'kb_id == "default"'
+    assert fake_client.search_kwargs["limit"] == 20
 
 
 def test_milvus_repository_batches_upserts(monkeypatch) -> None:

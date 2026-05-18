@@ -1,4 +1,5 @@
 import base64
+import zipfile
 from pathlib import Path
 
 import httpx
@@ -8,6 +9,8 @@ from pypdf import PdfWriter
 from app.core.exceptions import ModelGatewayError, ParsingError
 from app.ingestion.parser_docling import parse_document
 from app.ingestion.pipeline import IngestionPipeline
+from app.ingestion.structured_parser import StructuredDocumentParser
+from app.model_client.multimodal_embedding import FileItem, ImageItem
 from app.model_client.document_parser import DocumentParserClient
 from app.core.config import AppConfig
 from app.core.tracing import TracingManager
@@ -16,7 +19,7 @@ from app.vectorstore.repository import InMemoryVectorRepository
 
 class FakeEmbeddingClient:
     async def embed_texts(self, texts: list[str]) -> list[list[float]]:  # noqa: ARG002
-        return [[0.0, 0.0]]
+        return [[0.0, 0.0] for _ in texts]
 
     async def embed_items(self, items):  # noqa: ANN001
         return await self.embed_texts([
@@ -41,6 +44,13 @@ class EmptyDocumentParser:
         return ""
 
 
+class DisabledStringDocumentParser(FakeDocumentParser):
+    enabled = "false"
+
+    async def parse_file(self, path: Path) -> str:  # noqa: ARG002
+        raise AssertionError("disabled parser should not parse files")
+
+
 class FakeGenerationClient:
     async def generate(self, messages):  # noqa: ANN001
         return {"content": '{"entities": [], "relations": []}'}
@@ -59,6 +69,34 @@ async def test_parse_document_uses_model_parser_for_pdf(tmp_path) -> None:
     text = await parse_document(pdf_path, FakeDocumentParser())
 
     assert "徐套乡区片综合地价" in text
+
+
+@pytest.mark.asyncio
+async def test_parse_document_respects_string_false_parser_enabled(tmp_path) -> None:
+    pdf_path = tmp_path / "notice.pdf"
+    pdf_path.write_bytes(b"%PDF-1.4 fake")
+
+    with pytest.raises(ParsingError) as exc_info:
+        await parse_document(pdf_path, DisabledStringDocumentParser())
+
+    assert "configured document parser model" in str(exc_info.value)
+
+
+@pytest.mark.asyncio
+async def test_structured_parser_respects_string_false_parser_enabled(tmp_path) -> None:
+    pdf_path = tmp_path / "notice.pdf"
+    pdf_path.write_bytes(b"%PDF-1.4 fake")
+    parser = StructuredDocumentParser(DisabledStringDocumentParser())
+
+    with pytest.raises(ParsingError) as exc_info:
+        await parser.parse(
+            pdf_path,
+            doc_id="doc",
+            kb_id="default",
+            source_path="/tmp/notice.pdf",
+        )
+
+    assert "requires a configured multimodal document parser" in str(exc_info.value)
 
 
 @pytest.mark.asyncio
@@ -119,8 +157,165 @@ async def test_ingestion_pipeline_keeps_document_when_graph_extraction_fails(
     response = await pipeline.run(str(doc_path), kb_id="default")
 
     assert response.documents == 1
-    assert response.chunks == 1
-    assert repository.stats()["chunks"] == 1
+    assert response.chunks == 2
+    assert repository.stats()["chunks"] == 2
+
+
+@pytest.mark.asyncio
+async def test_pdf_ingestion_adds_page_attachment_chunks(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("RAG_INGEST_ALLOWED_DIRS", str(tmp_path))
+    monkeypatch.setenv("PARSED_OUTPUT_DIR", str(tmp_path / "parsed"))
+    monkeypatch.setattr("app.ingestion.loader._cached_allowed_dirs", None)
+    pdf_path = tmp_path / "notice.pdf"
+    writer = PdfWriter()
+    writer.add_blank_page(width=72, height=72)
+    writer.add_blank_page(width=72, height=72)
+    with pdf_path.open("wb") as handle:
+        writer.write(handle)
+
+    captured_items = []
+
+    class CapturingEmbeddingClient(FakeEmbeddingClient):
+        async def embed_items(self, items):  # noqa: ANN001
+            captured_items.extend(items)
+            return await super().embed_items(items)
+
+    config = AppConfig(
+        config_dir=tmp_path,
+        settings={"timeout": {"document_parser_seconds": 30}},
+        models={"model_gateway": {"base_url": "", "api_key": ""}},
+        prompts={},
+    )
+    repository = InMemoryVectorRepository()
+    pipeline = IngestionPipeline(
+        config=config,
+        repository=repository,
+        embedding_client=CapturingEmbeddingClient(),
+        generation_client=FakeGenerationClient(),
+        tracing_manager=TracingManager("test-service", ""),
+        document_parser=FakeDocumentParser(),
+    )
+
+    response = await pipeline.run(str(pdf_path), kb_id="default")
+
+    assert response.documents == 1
+    assert response.chunks == 3
+    chunks = [chunk for chunk, _ in repository.entries]
+    page_chunks = [chunk for chunk in chunks if chunk.metadata.get("chunk_strategy") == "page_attachment"]
+    assert len(page_chunks) == 2
+    assert [chunk.metadata["page_number"] for chunk in page_chunks] == [1, 2]
+    assert all(chunk.modality == "document" for chunk in page_chunks)
+    assert all(Path(str(chunk.media_uri)).is_file() for chunk in page_chunks)
+    assert sum(1 for batch in captured_items if isinstance(batch[0], FileItem)) == 2
+    assert [batch[0].path.name for batch in captured_items if isinstance(batch[0], FileItem)] == [
+        "page-1.pdf",
+        "page-2.pdf",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_pdf_ingestion_adds_rendered_page_image_chunks(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("RAG_INGEST_ALLOWED_DIRS", str(tmp_path))
+    monkeypatch.setenv("PARSED_OUTPUT_DIR", str(tmp_path / "parsed"))
+    monkeypatch.setattr("app.ingestion.loader._cached_allowed_dirs", None)
+    pdf_path = tmp_path / "notice.pdf"
+    writer = PdfWriter()
+    writer.add_blank_page(width=72, height=72)
+    with pdf_path.open("wb") as handle:
+        writer.write(handle)
+
+    def fake_render(path, output_dir):  # noqa: ANN001
+        image_path = output_dir / "page-1.png"
+        image_path.parent.mkdir(parents=True, exist_ok=True)
+        image_path.write_bytes(b"PNGDATA")
+        return [(1, image_path)]
+
+    monkeypatch.setattr("app.ingestion.pipeline._render_pdf_page_images", fake_render)
+    captured_items = []
+
+    class CapturingEmbeddingClient(FakeEmbeddingClient):
+        async def embed_items(self, items):  # noqa: ANN001
+            captured_items.extend(items)
+            return await super().embed_items(items)
+
+    config = AppConfig(
+        config_dir=tmp_path,
+        settings={"timeout": {"document_parser_seconds": 30}},
+        models={"model_gateway": {"base_url": "", "api_key": ""}},
+        prompts={},
+    )
+    repository = InMemoryVectorRepository()
+    pipeline = IngestionPipeline(
+        config=config,
+        repository=repository,
+        embedding_client=CapturingEmbeddingClient(),
+        generation_client=FakeGenerationClient(),
+        tracing_manager=TracingManager("test-service", ""),
+        document_parser=FakeDocumentParser(),
+    )
+
+    response = await pipeline.run(str(pdf_path), kb_id="default")
+
+    assert response.chunks == 3
+    chunks = [chunk for chunk, _ in repository.entries]
+    rendered = [chunk for chunk in chunks if chunk.metadata.get("chunk_strategy") == "rendered_page_image"]
+    assert len(rendered) == 1
+    assert rendered[0].modality == "image"
+    assert rendered[0].metadata["page_number"] == 1
+    image_batches = [batch for batch in captured_items if isinstance(batch[0], ImageItem)]
+    assert len(image_batches) == 1
+    assert image_batches[0][0].data == b"PNGDATA"
+
+
+@pytest.mark.asyncio
+async def test_pptx_ingestion_extracts_embedded_images(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("RAG_INGEST_ALLOWED_DIRS", str(tmp_path))
+    monkeypatch.setenv("PARSED_OUTPUT_DIR", str(tmp_path / "parsed"))
+    monkeypatch.setattr("app.ingestion.loader._cached_allowed_dirs", None)
+    pptx_path = tmp_path / "deck.pptx"
+    slide = """
+<p:sld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"
+       xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+  <p:cSld><p:spTree>
+    <p:sp><p:txBody><a:p><a:r><a:t>Visual Report</a:t></a:r></a:p></p:txBody></p:sp>
+  </p:spTree></p:cSld>
+</p:sld>
+    """.strip()
+    with zipfile.ZipFile(pptx_path, "w") as archive:
+        archive.writestr("ppt/slides/slide1.xml", slide)
+        archive.writestr("ppt/media/image1.png", b"PNGDATA")
+
+    captured_items = []
+
+    class CapturingEmbeddingClient(FakeEmbeddingClient):
+        async def embed_items(self, items):  # noqa: ANN001
+            captured_items.extend(items)
+            return await super().embed_items(items)
+
+    config = AppConfig(
+        config_dir=tmp_path,
+        settings={"timeout": {"document_parser_seconds": 30}},
+        models={"model_gateway": {"base_url": "", "api_key": ""}},
+        prompts={},
+    )
+    repository = InMemoryVectorRepository()
+    pipeline = IngestionPipeline(
+        config=config,
+        repository=repository,
+        embedding_client=CapturingEmbeddingClient(),
+        generation_client=FakeGenerationClient(),
+        tracing_manager=TracingManager("test-service", ""),
+    )
+
+    response = await pipeline.run(str(pptx_path), kb_id="default")
+
+    assert response.documents == 1
+    chunks = [chunk for chunk, _ in repository.entries]
+    assert any(chunk.metadata.get("chunk_strategy") == "document_attachment" for chunk in chunks)
+    embedded = [chunk for chunk in chunks if chunk.metadata.get("chunk_strategy") == "embedded_image"]
+    assert len(embedded) == 1
+    assert Path(str(embedded[0].media_uri)).read_bytes() == b"PNGDATA"
+    assert any(isinstance(batch[0], ImageItem) and batch[0].data == b"PNGDATA" for batch in captured_items)
 
 
 def test_document_parser_base_url_strips_openai_suffix(tmp_path) -> None:

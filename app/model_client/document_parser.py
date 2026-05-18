@@ -18,9 +18,21 @@ if TYPE_CHECKING:
     from app.core.config import AppConfig
 
 
-_MODEL_PARSER_SUFFIXES = {".pdf", ".png", ".jpg", ".jpeg", ".webp"}
+_MODEL_PARSER_SUFFIXES = {
+    ".doc",
+    ".pdf",
+    ".ppt",
+    ".xls",
+    ".png",
+    ".jpg",
+    ".jpeg",
+    ".webp",
+}
 _CONTENT_TYPES = {
+    ".doc": "application/msword",
     ".pdf": "application/pdf",
+    ".ppt": "application/vnd.ms-powerpoint",
+    ".xls": "application/vnd.ms-excel",
     ".png": "image/png",
     ".jpg": "image/jpeg",
     ".jpeg": "image/jpeg",

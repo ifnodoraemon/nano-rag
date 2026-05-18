@@ -35,6 +35,15 @@ def _milvus_upsert_batch_size() -> int:
         return 64
 
 
+def _milvus_search_oversample(metadata_filters: dict[str, object] | None) -> int:
+    default = "20" if metadata_filters else "4"
+    raw = os.getenv("MILVUS_SEARCH_OVERSAMPLE", default)
+    try:
+        return max(1, int(raw))
+    except ValueError:
+        return int(default)
+
+
 @dataclass
 class SearchHit:
     chunk: Chunk
@@ -50,7 +59,7 @@ class VectorRepository(ABC):
 
     @abstractmethod
     def delete_by_source(
-        self, source_path: str, kb_id: str
+        self, source_path: str, kb_id: str, keep_chunk_ids: set[str] | None = None
     ) -> None:
         raise NotImplementedError
 
@@ -80,17 +89,30 @@ class InMemoryVectorRepository(VectorRepository):
     ) -> None:
         with self._lock:
             self.documents[document.doc_id] = document
+            chunk_ids = {chunk.chunk_id for chunk in chunks}
+            self.entries = [
+                (chunk, embedding)
+                for chunk, embedding in self.entries
+                if chunk.chunk_id not in chunk_ids
+            ]
             self.entries.extend(zip(chunks, embeddings, strict=True))
 
     def delete_by_source(
-        self, source_path: str, kb_id: str
+        self, source_path: str, kb_id: str, keep_chunk_ids: set[str] | None = None
     ) -> None:
+        keep_chunk_ids = keep_chunk_ids or set()
         with self._lock:
             removed_doc_ids = {
                 doc_id
                 for doc_id, document in self.documents.items()
                 if document.source_path == source_path
                 and document.metadata.get("kb_id", "default") == kb_id
+                and doc_id
+                not in {
+                    chunk.doc_id
+                    for chunk, _ in self.entries
+                    if chunk.chunk_id in keep_chunk_ids
+                }
             }
             if removed_doc_ids:
                 self.documents = {
@@ -104,6 +126,7 @@ class InMemoryVectorRepository(VectorRepository):
                 if not (
                     chunk.source_path == source_path
                     and chunk.metadata.get("kb_id", "default") == kb_id
+                    and chunk.chunk_id not in keep_chunk_ids
                 )
             ]
 
@@ -138,6 +161,7 @@ class MilvusVectorRepository(VectorRepository):
         self.client = create_milvus_client()
         self.dimension = dimension
         self.upsert_batch_size = _milvus_upsert_batch_size()
+        self.native_hybrid_enabled = False
         self._ensure_collection()
 
     @classmethod
@@ -173,6 +197,9 @@ class MilvusVectorRepository(VectorRepository):
                 field_names = {str(field.get("name")) for field in fields}
                 missing_hybrid_fields = {TEXT_FIELD, SPARSE_FIELD} - field_names
                 if not missing_hybrid_fields:
+                    self.native_hybrid_enabled = True
+                    return
+                if not _require_native_hybrid_schema():
                     return
                 missing = ", ".join(sorted(missing_hybrid_fields))
                 raise RuntimeError(
@@ -226,6 +253,7 @@ class MilvusVectorRepository(VectorRepository):
             schema=schema,
             index_params=index_params,
         )
+        self.native_hybrid_enabled = True
 
     def upsert(
         self, document: Document, chunks: list[Chunk], embeddings: list[list[float]]
@@ -255,11 +283,19 @@ class MilvusVectorRepository(VectorRepository):
             )
 
     def delete_by_source(
-        self, source_path: str, kb_id: str
+        self, source_path: str, kb_id: str, keep_chunk_ids: set[str] | None = None
     ) -> None:
         escaped = _escape_milvus_string(source_path)
         escaped_kb_id = _escape_milvus_string(kb_id)
         base_filter = f'source == "{escaped}" and kb_id == "{escaped_kb_id}"'
+        if keep_chunk_ids:
+            escaped_ids = [
+                f'"{_escape_milvus_string(chunk_id)}"'
+                for chunk_id in sorted(keep_chunk_ids)
+            ]
+            base_filter = (
+                f"{base_filter} and not (chunk_id in [{', '.join(escaped_ids)}])"
+            )
         self.client.delete(
             collection_name=CHUNKS_COLLECTION,
             filter=base_filter,
@@ -274,12 +310,13 @@ class MilvusVectorRepository(VectorRepository):
     ) -> list[SearchHit]:
         escaped_kb_id = _escape_milvus_string(kb_id)
         base_filter = f'kb_id == "{escaped_kb_id}"'
+        request_limit = max(top_k * _milvus_search_oversample(metadata_filters), 20)
         results = self.client.search(
             collection_name=CHUNKS_COLLECTION,
             data=[vector],
             anns_field="vector",
             filter=base_filter,
-            limit=max(top_k * 4, 20),
+            limit=request_limit,
             output_fields=[
                 "chunk_id",
                 "doc_id",
@@ -300,7 +337,7 @@ class MilvusVectorRepository(VectorRepository):
             if not match_metadata_filters(metadata, metadata_filters):
                 continue
             modality = str(entity.get("modality") or metadata.get("modality") or "text")
-            if modality not in ("text", "image", "audio", "video"):
+            if modality not in ("text", "image", "audio", "video", "document"):
                 modality = "text"
             media_uri = entity.get("media_uri") or metadata.get("media_uri") or None
             mime_type = entity.get("mime_type") or metadata.get("mime_type") or None
@@ -335,11 +372,15 @@ class MilvusVectorRepository(VectorRepository):
         dense_weight: float = 0.7,
         sparse_weight: float = 0.3,
     ) -> list[SearchHit]:
+        if not self.native_hybrid_enabled:
+            raise RuntimeError(
+                f"Milvus collection '{CHUNKS_COLLECTION}' does not have native hybrid search fields."
+            )
         from pymilvus import AnnSearchRequest, WeightedRanker
 
         escaped_kb_id = _escape_milvus_string(kb_id)
         base_filter = f'kb_id == "{escaped_kb_id}"'
-        request_limit = max(top_k * 4, 20)
+        request_limit = max(top_k * _milvus_search_oversample(metadata_filters), 20)
         dense_req = AnnSearchRequest(
             data=[vector],
             anns_field="vector",
@@ -387,7 +428,7 @@ class MilvusVectorRepository(VectorRepository):
             if not match_metadata_filters(metadata, metadata_filters):
                 continue
             modality = str(entity.get("modality") or metadata.get("modality") or "text")
-            if modality not in ("text", "image", "audio", "video"):
+            if modality not in ("text", "image", "audio", "video", "document"):
                 modality = "text"
             media_uri = entity.get("media_uri") or metadata.get("media_uri") or None
             mime_type = entity.get("mime_type") or metadata.get("mime_type") or None
@@ -452,6 +493,14 @@ def _json_safe(value: object) -> object:
         except TypeError:
             pass
     return str(value)
+
+
+def _require_native_hybrid_schema() -> bool:
+    return os.getenv("RAG_MILVUS_REQUIRE_NATIVE_HYBRID", "false").lower() in {
+        "true",
+        "1",
+        "yes",
+    }
 
 
 TEXT_FIELD = "text"

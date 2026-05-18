@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+import fcntl
 import json
+import os
 from enum import Enum
+from contextlib import contextmanager
 from pathlib import Path
 from threading import Lock
 from time import time
+from collections.abc import Generator
 from uuid import uuid4
 
 from pydantic import BaseModel, Field
@@ -39,6 +43,17 @@ class IngestJobStore:
         self.root_dir.mkdir(parents=True, exist_ok=True)
         self._lock = Lock()
 
+    @contextmanager
+    def _file_lock(self) -> Generator[None, None, None]:
+        lock_path = self.root_dir / ".lock"
+        lock_fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR, 0o644)
+        try:
+            fcntl.flock(lock_fd, fcntl.LOCK_EX)
+            yield
+        finally:
+            fcntl.flock(lock_fd, fcntl.LOCK_UN)
+            os.close(lock_fd)
+
     def create(
         self,
         *,
@@ -62,9 +77,10 @@ class IngestJobStore:
         if not path.exists():
             return None
         try:
-            return IngestJobRecord.model_validate(
-                json.loads(path.read_text(encoding="utf-8"))
-            )
+            with self._file_lock():
+                return IngestJobRecord.model_validate(
+                    json.loads(path.read_text(encoding="utf-8"))
+                )
         except (OSError, json.JSONDecodeError, ValueError):
             return None
 
@@ -101,10 +117,14 @@ class IngestJobStore:
 
     def save(self, record: IngestJobRecord) -> None:
         with self._lock:
-            self._path(record.job_id).write_text(
-                json.dumps(record.model_dump(mode="json"), ensure_ascii=False, indent=2),
-                encoding="utf-8",
-            )
+            with self._file_lock():
+                path = self._path(record.job_id)
+                tmp_path = path.with_suffix(".json.tmp")
+                tmp_path.write_text(
+                    json.dumps(record.model_dump(mode="json"), ensure_ascii=False, indent=2),
+                    encoding="utf-8",
+                )
+                os.replace(str(tmp_path), str(path))
 
     def _require(self, job_id: str) -> IngestJobRecord:
         record = self.get(job_id)

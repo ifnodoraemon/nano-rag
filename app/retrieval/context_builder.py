@@ -1,4 +1,5 @@
 import re
+import os
 
 from app.vectorstore.repository import SearchHit
 
@@ -6,6 +7,7 @@ DEFAULT_BUCKET_ORDER = ["topic", "raw", "source", "index"]
 DEFAULT_EVIDENCE_ORDER = ["primary", "supporting", "conflicting"]
 CJK_SEQUENCE_RE = re.compile(r"[\u4e00-\u9fff\u3400-\u4dbf\uf900-\ufaff]+")
 WORD_RE = re.compile(r"[A-Za-z0-9_]+")
+DEFAULT_CONTEXT_TEXT_MAX_CHARS = 6000
 
 
 def _context_bucket(context: dict[str, object]) -> str:
@@ -177,9 +179,11 @@ def build_contexts(
     quotas: dict[str, int] | None = None,
     bucket_order: list[str] | None = None,
     query: str | None = None,
+    max_text_chars: int | None = None,
 ) -> list[dict[str, object]]:
     contexts = []
     seen_keys: set[str] = set()
+    max_text_chars = max_text_chars or _context_text_max_chars()
     for hit in hits:
         metadata = hit.chunk.metadata or {}
         parent_chunk_id = metadata.get("parent_chunk_id")
@@ -197,7 +201,7 @@ def build_contexts(
             "chunk_id": hit.chunk.chunk_id,
             "node_id": metadata.get("node_id") or hit.chunk.chunk_id,
             "_dedupe_key": dedupe_key,
-            "text": context_text,
+            "text": _truncate_text(context_text, max_text_chars),
             "source": hit.chunk.source_path,
             "title": section_path_text or hit.chunk.title,
             "score": round(hit.score, 6),
@@ -213,14 +217,40 @@ def build_contexts(
             "effective_date": metadata.get("effective_date"),
             "version": metadata.get("version"),
             "source_key": metadata.get("source_key"),
+            "source_file_name": metadata.get("source_file_name"),
+            "source_suffix": metadata.get("source_suffix"),
+            "source_size_bytes": metadata.get("source_size_bytes"),
+            "source_modified_at": metadata.get("source_modified_at"),
+            "source_content_hash": metadata.get("source_content_hash"),
+            "parser": metadata.get("parser"),
+            "index_schema_version": metadata.get("index_schema_version"),
             "freshness_tier": metadata.get("freshness_tier"),
             "is_latest_version": metadata.get("is_latest_version"),
             "freshness_rank": metadata.get("freshness_rank"),
             "chunk_kind": metadata.get("chunk_kind"),
+            "chunk_strategy": metadata.get("chunk_strategy"),
+            "node_type": metadata.get("node_type"),
+            "clause_id": metadata.get("clause_id"),
+            "clause_title": metadata.get("clause_title"),
+            "clause_type": metadata.get("clause_type"),
+            "definition_term": metadata.get("definition_term"),
+            "claim_role": metadata.get("claim_role"),
+            "claim_scope": metadata.get("claim_scope"),
+            "certainty": metadata.get("certainty"),
+            "discourse_units": metadata.get("discourse_units"),
+            "table_node_id": metadata.get("table_node_id"),
+            "table_row_index": metadata.get("table_row_index"),
+            "table_headers": metadata.get("table_headers"),
+            "table_row": metadata.get("table_row"),
             "supporting_chunk_id": hit.chunk.chunk_id,
             "modality": hit.chunk.modality,
             "media_uri": hit.chunk.media_uri,
             "mime_type": hit.chunk.mime_type,
+            "attachment_scope": metadata.get("attachment_scope"),
+            "page_count": metadata.get("page_count"),
+            "late_interaction_score": metadata.get("late_interaction_score"),
+            "late_interaction_model": metadata.get("late_interaction_model"),
+            "multi_vector_model": metadata.get("multi_vector_model"),
         }
         context_entry["evidence_role"] = _evidence_role(context_entry)
         contexts.append(context_entry)
@@ -272,3 +302,17 @@ def build_contexts(
 
     selected = _promote_query_coverage(selected[:limit], contexts, query)
     return _with_citation_labels(_order_contexts_by_evidence(selected))
+
+
+def _context_text_max_chars() -> int:
+    raw = os.getenv("RAG_CONTEXT_TEXT_MAX_CHARS", str(DEFAULT_CONTEXT_TEXT_MAX_CHARS))
+    try:
+        return max(500, int(raw))
+    except ValueError:
+        return DEFAULT_CONTEXT_TEXT_MAX_CHARS
+
+
+def _truncate_text(value: str, limit: int) -> str:
+    if len(value) <= limit:
+        return value
+    return value[: limit - 3].rstrip() + "..."

@@ -3,19 +3,23 @@ services:
     build:
       context: ..
       dockerfile: docker/app.Dockerfile
-    container_name: nano-rag-app
+    container_name: nanorag-app
     expose:
       - "8000"
     environment: &app-env
       APP_CONFIG_DIR: /workspace/configs
+      RAG_ENV: ${RAG_ENV:-local}
       VECTORSTORE_BACKEND: ${VECTORSTORE_BACKEND:-milvus}
       MILVUS_URI: ${MILVUS_URI:-http://milvus:19530}
+      MILVUS_TOKEN: ${MILVUS_TOKEN:-}
+      MILVUS_USER: ${MILVUS_USER:-}
+      MILVUS_PASSWORD: ${MILVUS_PASSWORD:-}
       HTTP_PROXY: ${HTTP_PROXY:-}
       HTTPS_PROXY: ${HTTPS_PROXY:-}
-      NO_PROXY: ${NO_PROXY:-localhost,127.0.0.1,::1},app,redis,neo4j,langfuse-web,langfuse-worker,langfuse-postgres,langfuse-clickhouse,langfuse-redis,milvus,etcd,minio
+      NO_PROXY: ${NO_PROXY:-localhost,127.0.0.1,::1},app,redis,neo4j,milvus,etcd,minio
       http_proxy: ${http_proxy:-}
       https_proxy: ${https_proxy:-}
-      no_proxy: ${no_proxy:-localhost,127.0.0.1,::1},app,redis,neo4j,langfuse-web,langfuse-worker,langfuse-postgres,langfuse-clickhouse,langfuse-redis,milvus,etcd,minio
+      no_proxy: ${no_proxy:-localhost,127.0.0.1,::1},app,redis,neo4j,milvus,etcd,minio
       ALL_PROXY: ""
       all_proxy: ""
       PARSED_OUTPUT_DIR: /workspace/data/parsed
@@ -28,16 +32,18 @@ services:
       NEO4J_USER: ${NEO4J_USER:-neo4j}
       NEO4J_PASSWORD: ${NEO4J_PASSWORD:-nano-rag-graph}
       EVAL_REPORT_DIR: /workspace/data/reports/eval
-      LANGFUSE_OTEL_ENDPOINT: ${LANGFUSE_OTEL_ENDPOINT:-}
-      LANGFUSE_UI_ENDPOINT: ${LANGFUSE_UI_ENDPOINT:-}
-      LANGFUSE_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY:-}
-      LANGFUSE_SECRET_KEY: ${LANGFUSE_SECRET_KEY:-}
       RAG_INGEST_ALLOWED_DIRS: /workspace/data/raw
       EVAL_DATASET_DIR: /workspace/data/eval
       RAG_AUTH_DISABLED: ${RAG_AUTH_DISABLED:-}
       RAG_API_KEYS: ${RAG_API_KEYS:-nano-rag-local}
+      RAG_ADMIN_API_KEYS: ${RAG_ADMIN_API_KEYS:-}
+      RAG_TRUSTED_PROXY_SECRET: ${RAG_TRUSTED_PROXY_SECRET:-}
+      RAG_RATE_LIMIT_REQUESTS_PER_MINUTE: ${RAG_RATE_LIMIT_REQUESTS_PER_MINUTE:-0}
       RAG_DIAGNOSIS_ENABLED: ${RAG_DIAGNOSIS_ENABLED:-true}
       RAG_EVAL_ENABLED: ${RAG_EVAL_ENABLED:-true}
+      MODEL_PROVIDER_MAX_RETRIES: ${MODEL_PROVIDER_MAX_RETRIES:-2}
+      MODEL_PROVIDER_RETRY_BASE_SECONDS: ${MODEL_PROVIDER_RETRY_BASE_SECONDS:-0.5}
+      MODEL_PROVIDER_RETRY_MAX_SECONDS: ${MODEL_PROVIDER_RETRY_MAX_SECONDS:-8}
       MODEL_GATEWAY_MODE: ${MODEL_GATEWAY_MODE:-live}
       MODEL_GATEWAY_BASE_URL: ${COMPOSE_MODEL_GATEWAY_BASE_URL:-https://generativelanguage.googleapis.com/v1beta/openai}
       MODEL_GATEWAY_API_KEY: ${COMPOSE_MODEL_GATEWAY_API_KEY:-}
@@ -50,6 +56,15 @@ services:
       EMBEDDING_MODEL_ALIAS: ${COMPOSE_EMBEDDING_MODEL_ALIAS:-gemini-embedding-2-preview}
       EMBEDDING_API_BASE_URL: ${COMPOSE_EMBEDDING_API_BASE_URL:-https://generativelanguage.googleapis.com}
       EMBEDDING_API_KEY: ${COMPOSE_EMBEDDING_API_KEY:-}
+      MULTIVECTOR_PROVIDER: ${COMPOSE_MULTIVECTOR_PROVIDER:-disabled}
+      MULTIVECTOR_MODEL_ALIAS: ${COMPOSE_MULTIVECTOR_MODEL_ALIAS:-vidore/colqwen2-v1.0-hf}
+      MULTIVECTOR_MODEL_FAMILY: ${COMPOSE_MULTIVECTOR_MODEL_FAMILY:-colqwen2}
+      MULTIVECTOR_API_BASE_URL: ${COMPOSE_MULTIVECTOR_API_BASE_URL:-}
+      MULTIVECTOR_API_KEY: ${COMPOSE_MULTIVECTOR_API_KEY:-}
+      MULTIVECTOR_API_PATH: ${COMPOSE_MULTIVECTOR_API_PATH:-/embed}
+      MULTIVECTOR_DEVICE_MAP: ${COMPOSE_MULTIVECTOR_DEVICE_MAP:-auto}
+      MULTIVECTOR_TORCH_DTYPE: ${COMPOSE_MULTIVECTOR_TORCH_DTYPE:-auto}
+      MULTIVECTOR_MAX_PATCH_VECTORS: ${COMPOSE_MULTIVECTOR_MAX_PATCH_VECTORS:-0}
       DOCUMENT_PARSER_ENABLED: ${DOCUMENT_PARSER_ENABLED:-true}
       DOCUMENT_PARSER_PROVIDER: ${COMPOSE_DOCUMENT_PARSER_PROVIDER:-gemini}
       DOCUMENT_PARSER_MODEL: ${COMPOSE_DOCUMENT_PARSER_MODEL:-gemini-flash-lite-latest}
@@ -92,7 +107,7 @@ services:
     build:
       context: ..
       dockerfile: docker/app.Dockerfile
-    container_name: nano-rag-worker
+    container_name: nanorag-worker
     command:
       [
         "celery",
@@ -126,7 +141,7 @@ services:
 
   redis:
     image: redis:7.4-alpine
-    container_name: nano-rag-redis
+    container_name: nanorag-redis
     volumes:
       - redis-data:/data
     healthcheck:
@@ -138,7 +153,7 @@ services:
 
   neo4j:
     image: neo4j:5.26-community
-    container_name: nano-rag-neo4j
+    container_name: nanorag-neo4j
     environment:
       NEO4J_AUTH: neo4j/${NEO4J_PASSWORD:-nano-rag-graph}
       NEO4J_server_memory_heap_initial__size: ${NEO4J_HEAP_INITIAL_SIZE:-1G}
@@ -164,6 +179,7 @@ services:
 
   etcd:
     image: quay.io/coreos/etcd:v3.5.25
+    container_name: nanorag-etcd
     environment:
       ETCDCTL_API: "3"
       ETCD_AUTO_COMPACTION_MODE: revision
@@ -186,6 +202,7 @@ services:
 
   minio:
     image: minio/minio:RELEASE.2024-05-28T17-19-04Z
+    container_name: nanorag-minio
     environment:
       MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
       MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin}
@@ -203,6 +220,7 @@ services:
 
   milvus:
     image: milvusdb/milvus:v2.6.15
+    container_name: nanorag-milvus
     command: ["milvus", "run", "standalone"]
     environment:
       ETCD_ENDPOINTS: etcd:2379
@@ -229,7 +247,7 @@ services:
     build:
       context: ..
       dockerfile: docker/frontend.Dockerfile
-    container_name: nano-rag-frontend
+    container_name: nanorag-frontend
     ports:
       - "${FRONTEND_PORT:-3000}:80"
     environment:
@@ -238,146 +256,6 @@ services:
       app:
         condition: service_healthy
     restart: unless-stopped
-
-  langfuse-worker:
-    profiles: ["observability"]
-    image: langfuse/langfuse-worker:3
-    container_name: nano-rag-langfuse-worker
-    restart: unless-stopped
-    depends_on:
-      langfuse-postgres:
-        condition: service_healthy
-      langfuse-clickhouse:
-        condition: service_healthy
-      langfuse-redis:
-        condition: service_healthy
-      langfuse-minio-bootstrap:
-        condition: service_completed_successfully
-    environment: &langfuse-env
-      DATABASE_URL: postgresql://langfuse:langfuse@langfuse-postgres:5432/langfuse
-      SALT: ${LANGFUSE_SALT:-nano-rag-langfuse-local-salt}
-      ENCRYPTION_KEY: ${LANGFUSE_ENCRYPTION_KEY:-0000000000000000000000000000000000000000000000000000000000000000}
-      TELEMETRY_ENABLED: ${LANGFUSE_TELEMETRY_ENABLED:-false}
-      LANGFUSE_ENABLE_EXPERIMENTAL_FEATURES: ${LANGFUSE_ENABLE_EXPERIMENTAL_FEATURES:-true}
-      CLICKHOUSE_MIGRATION_URL: clickhouse://langfuse-clickhouse:9000
-      CLICKHOUSE_URL: http://langfuse-clickhouse:8123
-      CLICKHOUSE_USER: clickhouse
-      CLICKHOUSE_PASSWORD: clickhouse
-      CLICKHOUSE_CLUSTER_ENABLED: false
-      CLICKHOUSE_MIGRATION_CLUSTER_ENABLED: false
-      REDIS_CONNECTION_STRING: redis://langfuse-redis:6379
-      LANGFUSE_S3_EVENT_UPLOAD_BUCKET: langfuse
-      LANGFUSE_S3_EVENT_UPLOAD_REGION: auto
-      LANGFUSE_S3_EVENT_UPLOAD_ACCESS_KEY_ID: minioadmin
-      LANGFUSE_S3_EVENT_UPLOAD_SECRET_ACCESS_KEY: minioadmin
-      LANGFUSE_S3_EVENT_UPLOAD_ENDPOINT: http://minio:9000
-      LANGFUSE_S3_EVENT_UPLOAD_FORCE_PATH_STYLE: true
-      LANGFUSE_S3_MEDIA_UPLOAD_BUCKET: langfuse
-      LANGFUSE_S3_MEDIA_UPLOAD_REGION: auto
-      LANGFUSE_S3_MEDIA_UPLOAD_ACCESS_KEY_ID: minioadmin
-      LANGFUSE_S3_MEDIA_UPLOAD_SECRET_ACCESS_KEY: minioadmin
-      LANGFUSE_S3_MEDIA_UPLOAD_ENDPOINT: http://minio:9000
-      LANGFUSE_S3_MEDIA_UPLOAD_FORCE_PATH_STYLE: true
-      LANGFUSE_S3_BATCH_EXPORT_BUCKET: langfuse
-      LANGFUSE_S3_BATCH_EXPORT_REGION: auto
-      LANGFUSE_S3_BATCH_EXPORT_ACCESS_KEY_ID: minioadmin
-      LANGFUSE_S3_BATCH_EXPORT_SECRET_ACCESS_KEY: minioadmin
-      LANGFUSE_S3_BATCH_EXPORT_ENDPOINT: http://minio:9000
-      LANGFUSE_S3_BATCH_EXPORT_FORCE_PATH_STYLE: true
-
-  langfuse-web:
-    profiles: ["observability"]
-    image: langfuse/langfuse:3
-    container_name: nano-rag-langfuse
-    ports:
-      - "127.0.0.1:3001:3000"
-    restart: unless-stopped
-    depends_on:
-      langfuse-postgres:
-        condition: service_healthy
-      langfuse-clickhouse:
-        condition: service_healthy
-      langfuse-redis:
-        condition: service_healthy
-      langfuse-minio-bootstrap:
-        condition: service_completed_successfully
-    environment:
-      <<: *langfuse-env
-      NEXTAUTH_URL: ${LANGFUSE_NEXTAUTH_URL:-http://localhost:3001}
-      NEXTAUTH_SECRET: ${LANGFUSE_NEXTAUTH_SECRET:-nano-rag-langfuse-local-nextauth-secret}
-      LANGFUSE_INIT_ORG_ID: ${LANGFUSE_INIT_ORG_ID:-nano-rag}
-      LANGFUSE_INIT_ORG_NAME: ${LANGFUSE_INIT_ORG_NAME:-Nano RAG}
-      LANGFUSE_INIT_PROJECT_ID: ${LANGFUSE_INIT_PROJECT_ID:-nano-rag}
-      LANGFUSE_INIT_PROJECT_NAME: ${LANGFUSE_INIT_PROJECT_NAME:-Nano RAG}
-      LANGFUSE_INIT_PROJECT_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY:-pk-lf-local}
-      LANGFUSE_INIT_PROJECT_SECRET_KEY: ${LANGFUSE_SECRET_KEY:-sk-lf-local}
-      LANGFUSE_INIT_USER_EMAIL: ${LANGFUSE_INIT_USER_EMAIL:-admin@nano-rag.local}
-      LANGFUSE_INIT_USER_NAME: ${LANGFUSE_INIT_USER_NAME:-Nano RAG Admin}
-      LANGFUSE_INIT_USER_PASSWORD: ${LANGFUSE_INIT_USER_PASSWORD:-nano-rag-local-admin}
-    healthcheck:
-      test: ["CMD-SHELL", "wget -q --spider http://$(hostname):3000/api/public/health || exit 1"]
-      interval: 10s
-      timeout: 5s
-      retries: 30
-      start_period: 30s
-
-  langfuse-postgres:
-    profiles: ["observability"]
-    image: postgres:17-alpine
-    container_name: nano-rag-langfuse-postgres
-    restart: unless-stopped
-    environment:
-      POSTGRES_USER: langfuse
-      POSTGRES_PASSWORD: langfuse
-      POSTGRES_DB: langfuse
-    volumes:
-      - langfuse-postgres-data-v2:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U langfuse -d langfuse"]
-      interval: 10s
-      timeout: 5s
-      retries: 10
-
-  langfuse-clickhouse:
-    profiles: ["observability"]
-    image: clickhouse/clickhouse-server:24.8
-    container_name: nano-rag-langfuse-clickhouse
-    restart: unless-stopped
-    environment:
-      CLICKHOUSE_DB: default
-      CLICKHOUSE_USER: clickhouse
-      CLICKHOUSE_PASSWORD: clickhouse
-    volumes:
-      - langfuse-clickhouse-data-v2:/var/lib/clickhouse
-      - langfuse-clickhouse-logs-v2:/var/log/clickhouse-server
-    healthcheck:
-      test: ["CMD", "clickhouse-client", "--query", "SELECT 1"]
-      interval: 10s
-      timeout: 5s
-      retries: 18
-
-  langfuse-redis:
-    profiles: ["observability"]
-    image: redis:7-alpine
-    container_name: nano-rag-langfuse-redis
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 10s
-      timeout: 5s
-      retries: 10
-
-  langfuse-minio-bootstrap:
-    profiles: ["observability"]
-    image: minio/mc:RELEASE.2024-05-24T09-08-49Z
-    container_name: nano-rag-langfuse-minio-bootstrap
-    depends_on:
-      minio:
-        condition: service_healthy
-    entrypoint: ["/bin/sh", "-c"]
-    command: >
-      "mc alias set local http://minio:9000 minioadmin minioadmin &&
-      mc mb --ignore-existing local/langfuse"
 
 volumes:
   app-parsed-data:
@@ -389,6 +267,3 @@ volumes:
   milvus-data:
   neo4j-data:
   neo4j-logs:
-  langfuse-postgres-data-v2:
-  langfuse-clickhouse-data-v2:
-  langfuse-clickhouse-logs-v2:

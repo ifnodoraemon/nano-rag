@@ -27,6 +27,7 @@ def test_prompt_builder_warns_when_contexts_are_conflicting() -> None:
     assert "evidence=conflicting" in messages[1]["content"]
     assert "kind=topic" in messages[1]["content"]
     assert "status=conflicting" in messages[1]["content"]
+    assert 'Question input JSON: {"question": "Is PTO carryover allowed?"}' in messages[1]["content"]
 
 
 def test_prompt_builder_includes_section_metadata() -> None:
@@ -171,3 +172,37 @@ def test_prompt_builder_preserves_text_only_string_content() -> None:
     # all existing generation client paths keep
     # working.
     assert isinstance(messages[1]["content"], str)
+
+
+def test_prompt_builder_includes_evidence_plan_and_discourse_metadata() -> None:
+    builder = PromptBuilder(prompts={})
+
+    messages = builder.build_messages(
+        "Can vitamin D prevent flu?",
+        [
+            {
+                "chunk_id": "c1",
+                "citation_label": "C1",
+                "text": "If vitamin D is low, supplementation reduced flu incidence.",
+                "evidence_role": "primary",
+                "claim_role": "condition",
+                "claim_scope": "low vitamin D",
+                "certainty": "weak",
+            }
+        ],
+        agent_state={
+            "verification": {"sufficient": True, "missing_terms": []},
+            "evidence_plan": {
+                "answer_strategy": "conditional",
+                "primary_evidence": ["C1"],
+                "conditions": ["C1 applies only to low vitamin D adults"],
+                "relations": [],
+                "outline": ["State the scoped answer"],
+            },
+        },
+    )
+
+    content = messages[1]["content"]
+    assert "evidence_plan_strategy: conditional" in content
+    assert "claim_role=condition" in content
+    assert "scope=low vitamin D" in content

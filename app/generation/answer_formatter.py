@@ -3,15 +3,6 @@ import re
 from app.schemas.chat import ChatResponse, Citation, SupportingClaim
 
 EVIDENCE_PRIORITY = {"primary": 0, "supporting": 1, "conflicting": 2}
-CONFLICT_MARKERS = (
-    "存在冲突",
-    "说法不一致",
-    "来源不一致",
-    "无法确定",
-    "不能确定",
-    "inconsistent",
-    "conflict",
-)
 EVIDENCE_SUMMARY_TITLES = {
     "primary": "Primary evidence",
     "supporting": "Supporting evidence",
@@ -37,40 +28,6 @@ CLAIM_TYPE_PREFIX_RE = re.compile(
     r"^\[(factual|conditional|conflict|insufficiency)\]\s*",
     re.IGNORECASE,
 )
-CONDITIONAL_CLAIM_MARKERS = (
-    "if ",
-    "when ",
-    "unless ",
-    "subject to ",
-    "provided that ",
-    "under ",
-    "depending on ",
-)
-CONFLICT_CLAIM_MARKERS = (
-    "conflict",
-    "inconsistent",
-    "disagree",
-    "contradict",
-    "not aligned",
-    "存在冲突",
-    "来源不一致",
-    "说法不一致",
-)
-INSUFFICIENCY_CLAIM_MARKERS = (
-    "insufficient",
-    "not enough evidence",
-    "cannot determine",
-    "unable to determine",
-    "unclear",
-    "unknown",
-    "evidence is limited",
-    "无法确认",
-    "信息不足",
-    "证据不足",
-    "不能确定",
-)
-
-
 class AnswerFormatter:
     def format(
         self, answer: str, contexts: list[dict[str, object]], trace_id: str | None
@@ -137,12 +94,22 @@ class AnswerFormatter:
                     context_text_by_label[citation.citation_label] = str(
                         context.get("text", "") or ""
                     )
+        supporting_claims = self._verify_supporting_claims(
+            supporting_claims,
+            context_text_by_label,
+        )
         normalized_answer = answer_body
-        if self._has_conflicting_evidence(ordered_contexts) and not self._mentions_conflict(
-            normalized_answer
+        if self._has_conflicting_evidence(ordered_contexts) and not self._has_conflict_claim(
+            supporting_claims
         ):
             normalized_answer = (
                 f"{normalized_answer}\n\nNote: the available evidence is conflicting, so the conclusion may depend on source or version differences."
+            ).strip()
+        if self._has_condition_evidence(ordered_contexts) and not self._has_conditional_claim(
+            supporting_claims
+        ):
+            normalized_answer = (
+                f"{normalized_answer}\n\nNote: at least one cited source includes applicability conditions; avoid treating the conclusion as universal."
             ).strip()
         cited_labels = self._extract_cited_labels(normalized_answer)
         cited_labels = self._filter_cited_labels(
@@ -158,9 +125,6 @@ class AnswerFormatter:
             citations_by_label,
             cited_labels,
         )
-        if ordered_citations and not cited_labels:
-            first_label = ordered_citations[0].citation_label or ordered_citations[0].chunk_id
-            normalized_answer = f"{normalized_answer} [{first_label}]"
         return ChatResponse(
             answer=normalized_answer,
             citations=ordered_citations,
@@ -169,16 +133,90 @@ class AnswerFormatter:
             trace_id=trace_id,
         )
 
+    def _verify_supporting_claims(
+        self,
+        claims: list[SupportingClaim],
+        context_text_by_label: dict[str, str],
+    ) -> list[SupportingClaim]:
+        verified_claims: list[SupportingClaim] = []
+        for claim in claims:
+            evidence_text = "\n".join(
+                context_text_by_label.get(label, "")
+                for label in claim.citation_labels
+                if label in context_text_by_label
+            )
+            support_score, missing_terms = self._claim_support_score(
+                claim.text,
+                evidence_text,
+            )
+            claim_numbers = {
+                self._normalize_number(number)
+                for number in NUMBER_RE.findall(claim.text)
+            }
+            evidence_number_text = self._normalize_number_text(evidence_text)
+            missing_numbers = [
+                number for number in sorted(claim_numbers) if number not in evidence_number_text
+            ]
+            verified = bool(evidence_text.strip()) and not missing_numbers
+            if claim.claim_type in {"factual", "conditional"}:
+                verified = verified and support_score >= 0.25
+            verified_claims.append(
+                claim.model_copy(
+                    update={
+                        "verified": verified,
+                        "support_score": support_score,
+                        "missing_numbers": missing_numbers,
+                        "missing_terms": missing_terms[:8],
+                    }
+                )
+            )
+        return verified_claims
+
+    def _claim_support_score(self, claim_text: str, evidence_text: str) -> tuple[float, list[str]]:
+        if not claim_text.strip() or not evidence_text.strip():
+            return 0.0, []
+        claim_terms = self._claim_terms(claim_text)
+        if not claim_terms:
+            return 1.0, []
+        evidence_lower = evidence_text.lower()
+        matched = {
+            term
+            for term in claim_terms
+            if term.lower() in evidence_lower
+        }
+        score = round(len(matched) / len(claim_terms), 4)
+        missing = [term for term in sorted(claim_terms) if term not in matched]
+        return score, missing
+
+    def _claim_terms(self, text: str) -> set[str]:
+        terms = {
+            token.lower()
+            for token in TOKEN_RE.findall(text)
+            if _is_informative_token(token)
+        }
+        for match in CJK_SEQUENCE_RE.finditer(text):
+            chars = match.group()
+            for size in range(2, min(5, len(chars) + 1)):
+                for index in range(0, len(chars) - size + 1):
+                    terms.add(chars[index : index + size])
+        return terms
+
     def _has_conflicting_evidence(self, contexts: list[dict[str, object]]) -> bool:
         return any(
             context.get("evidence_role") == "conflicting"
             or context.get("wiki_status") == "conflicting"
+            or context.get("claim_role") == "conflict"
             for context in contexts
         )
 
-    def _mentions_conflict(self, answer: str) -> bool:
-        lowered = answer.lower()
-        return any(marker in answer or marker in lowered for marker in CONFLICT_MARKERS)
+    def _has_conflict_claim(self, claims: list[SupportingClaim]) -> bool:
+        return any(claim.claim_type == "conflict" for claim in claims)
+
+    def _has_condition_evidence(self, contexts: list[dict[str, object]]) -> bool:
+        return any(context.get("claim_role") == "condition" for context in contexts)
+
+    def _has_conditional_claim(self, claims: list[SupportingClaim]) -> bool:
+        return any(claim.claim_type == "conditional" for claim in claims)
 
     def _append_evidence_summary(
         self,
@@ -340,18 +378,7 @@ class AnswerFormatter:
             claim_type = type_match.group(1).lower()
             claim_body = line[type_match.end() :].strip()
             return claim_type, claim_body
-        inferred_type = self._infer_claim_type(line)
-        return inferred_type, line
-
-    def _infer_claim_type(self, line: str) -> str:
-        lowered = line.lower()
-        if any(marker in lowered for marker in INSUFFICIENCY_CLAIM_MARKERS):
-            return "insufficiency"
-        if any(marker in lowered for marker in CONFLICT_CLAIM_MARKERS):
-            return "conflict"
-        if any(marker in lowered for marker in CONDITIONAL_CLAIM_MARKERS):
-            return "conditional"
-        return "factual"
+        return "factual", line
 
     def _extract_citation_span(
         self,
@@ -454,3 +481,11 @@ class AnswerFormatter:
         if len(normalized) <= limit:
             return normalized
         return normalized[: limit - 3].rstrip() + "..."
+
+
+def _is_informative_token(token: str) -> bool:
+    if any(char.isdigit() for char in token):
+        return True
+    if any(ord(char) > 127 for char in token):
+        return len(token) >= 2
+    return len(token) >= 4

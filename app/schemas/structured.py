@@ -9,6 +9,8 @@ from pydantic import BaseModel, Field
 class NodeType(str, Enum):
     ROOT = "root"
     SECTION = "section"
+    CLAUSE = "clause"
+    DEFINITION = "definition"
     PARAGRAPH = "paragraph"
     TABLE = "table"
     IMAGE = "image"

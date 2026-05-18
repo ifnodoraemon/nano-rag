@@ -264,6 +264,34 @@ async def test_business_ingest_upload_rejects_duplicate_filenames(tmp_path) -> N
 
     assert exc_info.value.status_code == 400
     assert "duplicate upload filename" in str(exc_info.value.detail)
+    assert not (tmp_path / "default" / "policy.md").exists()
+    assert not list((tmp_path / "default").glob("*.tmp"))
+
+
+@pytest.mark.asyncio
+async def test_business_ingest_upload_rejects_oversize_without_overwriting(
+    monkeypatch, tmp_path
+) -> None:
+    target = tmp_path / "default" / "policy.md"
+    target.parent.mkdir(parents=True)
+    target.write_bytes(b"previous")
+    monkeypatch.setattr("app.api.routes_business.MAX_UPLOAD_BYTES", 4)
+    container = SimpleNamespace(
+        ingestion_pipeline=SimpleNamespace(run=None),
+        config=SimpleNamespace(upload_dir=tmp_path),
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        await rag_ingest_upload(
+            _request_with_container(container),
+            files=[UploadFile(filename="policy.md", file=BytesIO(b"too large"))],
+            kb_id="default",
+            context=CONTEXT,
+        )
+
+    assert exc_info.value.status_code == 413
+    assert target.read_bytes() == b"previous"
+    assert not list(target.parent.glob("*.tmp"))
 
 
 @pytest.mark.asyncio

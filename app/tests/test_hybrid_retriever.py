@@ -69,6 +69,26 @@ def test_hybrid_retriever_index_chunk(monkeypatch) -> None:
     assert results[0][0] == "chunk1"
 
 
+def test_hybrid_retriever_honors_config_enabled_without_env(monkeypatch) -> None:
+    monkeypatch.delenv("RAG_HYBRID_SEARCH_ENABLED", raising=False)
+    retriever = HybridRetriever(
+        repository=None,
+        embedding_client=None,
+        enabled_config=True,
+    )
+    chunk = Chunk(
+        chunk_id="chunk1",
+        doc_id="doc1",
+        chunk_index=0,
+        text="hello world",
+        source_path="test.txt",
+    )
+    retriever.index_chunk(chunk)
+
+    assert retriever.enabled is True
+    assert retriever.bm25_index.search("hello", top_k=5)[0][0] == "chunk1"
+
+
 def test_hybrid_retriever_remove_chunk(monkeypatch) -> None:
     monkeypatch.setenv("RAG_HYBRID_SEARCH_ENABLED", "true")
     retriever = HybridRetriever(

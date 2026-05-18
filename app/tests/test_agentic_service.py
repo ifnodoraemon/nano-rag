@@ -90,6 +90,24 @@ class FakeGenerationClient:
         }
 
 
+class BrokenPlannerGenerationClient:
+    async def generate(self, messages):  # noqa: ANN001, ARG002
+        raise RuntimeError("planner unavailable")
+
+
+class StringBooleanVerifierClient:
+    alias = "string-bool-verifier"
+
+    async def generate(self, messages):  # noqa: ANN001, ARG002
+        return {
+            "content": (
+                '{"sufficient":"false","coverage_ratio":"0.25",'
+                '"missing_terms":["missing"],'
+                '"follow_up_queries":["follow up"],"reason":"needs_more"}'
+            )
+        }
+
+
 @pytest.mark.asyncio
 async def test_agent_runs_corrective_retrieval_and_records_state() -> None:
     trace_store = TraceStore()
@@ -126,3 +144,67 @@ async def test_agent_runs_corrective_retrieval_and_records_state() -> None:
     assert record.retrieval_params["agent"]["retrieval_queries"] == retrieval.queries
     assert "graph_expanded_node_ids" in record.retrieval_params["agent"]
     assert record.retrieval_params["agent"]["verification"]["sufficient"] is True
+
+
+@pytest.mark.asyncio
+async def test_agent_planner_helpers_degrade_on_generation_error() -> None:
+    service = AgenticReasoningService(
+        config=SimpleNamespace(
+            parsed_dir=Path("/tmp/nonexistent-agent-test-parsed"),
+            settings={
+                "agent": {
+                    "max_retrieval_loops": 2,
+                    "max_subqueries": 4,
+                },
+                "prompt": {"version": "test"},
+            },
+        ),
+        retrieval_pipeline=FakeRetrievalPipeline(TraceStore()),
+        generation_client=BrokenPlannerGenerationClient(),
+        prompt_builder=PromptBuilder({"chat": {"system": "system"}}),
+        answer_formatter=AnswerFormatter(),
+        trace_store=TraceStore(),
+        tracing_manager=FakeTracingManager(),
+    )
+
+    assert await service._decompose("原始问题") == ["原始问题"]
+    check = await service._verify(
+        "原始问题",
+        ["原始问题"],
+        [{"chunk_id": "c1", "text": "evidence"}],
+    )
+
+    assert check.sufficient is True
+    assert check.reason == "verifier_unavailable"
+
+
+@pytest.mark.asyncio
+async def test_agent_verifier_parses_string_booleans() -> None:
+    service = AgenticReasoningService(
+        config=SimpleNamespace(
+            parsed_dir=Path("/tmp/nonexistent-agent-test-parsed"),
+            settings={
+                "agent": {
+                    "max_retrieval_loops": 2,
+                    "max_subqueries": 4,
+                },
+                "prompt": {"version": "test"},
+            },
+        ),
+        retrieval_pipeline=FakeRetrievalPipeline(TraceStore()),
+        generation_client=StringBooleanVerifierClient(),
+        prompt_builder=PromptBuilder({"chat": {"system": "system"}}),
+        answer_formatter=AnswerFormatter(),
+        trace_store=TraceStore(),
+        tracing_manager=FakeTracingManager(),
+    )
+
+    check = await service._verify(
+        "原始问题",
+        ["原始问题"],
+        [{"chunk_id": "c1", "text": "partial evidence"}],
+    )
+
+    assert check.sufficient is False
+    assert check.coverage_ratio == 0.25
+    assert check.follow_up_queries == ["follow up"]

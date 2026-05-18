@@ -82,7 +82,7 @@ def test_wiki_compiler_topic_page_aggregates_facts_and_conflicts(tmp_path) -> No
             doc_id="doc-2",
             source_path="data/raw/policy_b.md",
             title="Policy B",
-            content="# Leave Policy\n\nPTO carryover is not allowed.",
+            content="# Leave Policy\n\nPTO carryover is allowed up to 3 days.",
             metadata={"kb_id": "default"},
         ),
         [
@@ -90,7 +90,7 @@ def test_wiki_compiler_topic_page_aggregates_facts_and_conflicts(tmp_path) -> No
                 chunk_id="doc-2:0",
                 doc_id="doc-2",
                 chunk_index=0,
-                text="PTO carryover is not allowed.",
+                text="PTO carryover is allowed up to 3 days.",
                 source_path="data/raw/policy_b.md",
                 title="Policy B",
                 metadata={"kb_id": "default"},
@@ -104,7 +104,7 @@ def test_wiki_compiler_topic_page_aggregates_facts_and_conflicts(tmp_path) -> No
 
     assert "## Key Facts" in topic_page
     assert "up to 5 days" in topic_page
-    assert "not allowed" in topic_page
+    assert "up to 3 days" in topic_page
     assert "## Potential Conflicts" in topic_page
     assert "- conflicting" in topic_page
     assert "conflicts with" in topic_page

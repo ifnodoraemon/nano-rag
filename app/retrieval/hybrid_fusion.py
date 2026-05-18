@@ -18,6 +18,19 @@ class HybridSearchConfig:
             rrf_k=int(os.getenv("RAG_HYBRID_RRF_K", "60")),
         )
 
+    @classmethod
+    def from_settings(cls, settings: dict[str, object] | None) -> "HybridSearchConfig":
+        settings = settings or {}
+        return cls(
+            vector_weight=float(
+                os.getenv("RAG_HYBRID_VECTOR_WEIGHT", settings.get("dense_weight", 0.7))
+            ),
+            bm25_weight=float(
+                os.getenv("RAG_HYBRID_BM25_WEIGHT", settings.get("sparse_weight", 0.3))
+            ),
+            rrf_k=int(os.getenv("RAG_HYBRID_RRF_K", settings.get("rrf_k", 60))),
+        )
+
     def __post_init__(self) -> None:
         if not (0 <= self.vector_weight <= 1):
             raise ValueError("vector_weight must be between 0 and 1")

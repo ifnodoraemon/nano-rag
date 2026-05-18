@@ -14,7 +14,6 @@ MAX_CHUNK_PREVIEW_CHARS = 180
 MAX_INDEX_SUMMARY_CHARS = 120
 MAX_TOPIC_ENTRIES = 8
 MAX_TOPIC_FACTS = 8
-NEGATION_MARKERS = (" not ", " no ", " never ", " cannot ", " can't ", "禁止", "不得", "不能", "不可以")
 
 FRONTMATTER_BOUNDARY = "---"
 
@@ -529,18 +528,11 @@ class WikiCompiler:
         return "stable"
 
     def _is_conflict_pair(self, topic_name: str, left_text: str, right_text: str) -> bool:
-        left_norm = f" {left_text.lower()} "
-        right_norm = f" {right_text.lower()} "
-        left_has_negation = any(marker in left_norm for marker in NEGATION_MARKERS)
-        right_has_negation = any(marker in right_norm for marker in NEGATION_MARKERS)
-        if left_has_negation != right_has_negation:
-            return True
+        del topic_name
         left_numbers = set(re.findall(r"\b\d+\b", left_text))
         right_numbers = set(re.findall(r"\b\d+\b", right_text))
         if left_numbers and right_numbers and left_numbers != right_numbers:
-            topic_terms = self._topic_terms(topic_name)
-            if not topic_terms or any(term in left_norm or term in right_norm for term in topic_terms):
-                return True
+            return True
         return False
 
     def _topic_terms(self, topic_name: str) -> set[str]:

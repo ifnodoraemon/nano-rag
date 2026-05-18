@@ -14,13 +14,7 @@ docker compose -f docker/docker-compose.yml up -d --build
 
 - 前端/API 统一入口：`http://127.0.0.1:3000`
 
-默认只暴露前端一个 host 端口；后端、Milvus、Neo4j、Redis、MinIO 都只在 Docker 网络内通信。观测栈按需启动：
-
-```bash
-docker compose -f docker/docker-compose.yml --profile observability up -d langfuse-web langfuse-worker
-```
-
-- Langfuse：`http://127.0.0.1:3001`
+默认只暴露前端一个 host 端口；后端、Milvus、Neo4j、Redis、MinIO 和 etcd 都只在 Docker 网络内通信。
 
 如果只做本地 UI/接口验证，不需要 Milvus、Neo4j 和 Celery worker，可使用 lite 覆盖文件，只启动 `app` 和 `frontend` 两个容器：
 
@@ -59,6 +53,13 @@ Nano RAG 的核心原则是：**真实输入、真实索引、真实模型、真
 - 运维 API：`/health/detail`、`/debug/storage`、`/debug/parsed/{doc_id}`、`/retrieve/debug`、`/traces`、`/replay/{trace_id}`
 - 评测和诊断：`/eval/datasets`、`/eval/reports`、`/eval/run`、`/benchmark/reports`、`/diagnose/*`
 - 向量库：Docker 默认使用 Milvus，collection 包含 dense vector、analyzer text、BM25 sparse 字段和原生 hybrid search
+- 摄入解析：内置 parser registry，支持 Markdown、TXT、HTML、CSV/TSV、JSON/JSONL、YAML、XML、DOCX、XLSX、PPTX、数字版 PDF、本地媒体文件；旧版 DOC/XLS/PPT、扫描 PDF 和图片重文档通过已配置的多模态 document parser 解析
+- 文档结构：保留章节、条款、定义、表格 summary、表格 row-level chunk、来源 hash、文件版本元数据、parser 名称、chunk_strategy 和索引 schema 版本
+- 图片索引：图片文件默认生成视觉媒体 chunk；如果配置了多模态 document parser 且能抽出文字，会同时生成文本/结构 chunk，用于关键词、数字和条款检索
+- 页面/附件索引：PDF 会按页生成 `document` page attachment chunk；如果运行环境存在 `pdftoppm`，还会生成 rendered page image chunk。DOCX/XLSX/PPTX 会生成整文档 attachment chunk，并抽取内嵌图片作为 image chunk，用多模态 embedding 建立版面/视觉召回通路
+- 检索路由：LLM router 可用时使用结构化路由；不可用时通过启发式 fallback 区分 fact、table、version、conflict、definition、graph、visual 查询；visual 查询会优先使用 rendered page、embedded image、media object 和 page attachment，并尽量带上同页文本 sibling
+- Multi-vector：支持真实 ColQwen2/ColPali 视觉 patch embedding。可用 `MULTIVECTOR_PROVIDER=colqwen2|colpali` 在 GPU 镜像内本地加载 Transformers 检索模型，也可用 `MULTIVECTOR_PROVIDER=colpali-http` 调外部 GPU 服务。视觉/附件 chunk 的 patch vectors 默认按内容寻址写入 `PARSED_OUTPUT_DIR/multivectors` sidecar，只在 chunk metadata 中保留 `multi_vector_ref`、模型名、维度和数量；visual 查询下用 MaxSim late-interaction 分数参与重排。未配置时不会静默使用 fake/lightweight 向量；lightweight 只允许在显式测试开关下使用
+- 证据治理：生成结果带 structured supporting claims，并在后处理里标记 claim 是否有引用支撑、缺失数字和缺失术语
 - 模型路径：生成、embedding、文档解析都直连显式配置的真实 provider；默认示例只覆盖 Gemini 和 Qwen
 - 前端：React + Vite 源码位于 `frontend/` 子模块，Docker 构建为 nginx 静态站点并代理后端
 
@@ -76,17 +77,6 @@ nano-rag/
 
 ## Docker 配置
 
-本地 Langfuse 初始化账号：
-
-```bash
-LANGFUSE_INIT_USER_EMAIL=admin@nano-rag.local
-LANGFUSE_INIT_USER_PASSWORD=nano-rag-local-admin
-LANGFUSE_PUBLIC_KEY=pk-lf-local
-LANGFUSE_SECRET_KEY=sk-lf-local
-```
-
-这些 Langfuse 默认账号、项目 key、`NEXTAUTH_SECRET` 和 `ENCRYPTION_KEY` 只用于本地 Docker 环境。共享环境或生产环境必须显式覆盖，不能复用 compose 默认值。
-
 Docker 默认值：
 
 ```bash
@@ -97,11 +87,9 @@ RAG_API_KEYS=nano-rag-local
 RAG_DIAGNOSIS_ENABLED=true
 RAG_EVAL_ENABLED=true
 DOCUMENT_PARSER_ENABLED=true
-LANGFUSE_UI_ENDPOINT=
-LANGFUSE_OTEL_ENDPOINT=
 ```
 
-后端启动时会检查 generation、embedding、document parser、Langfuse OTEL 等关键配置。缺少 `DOCUMENT_PARSER_API_KEY` 这类真实 provider 配置时，容器日志会输出 `Startup readiness` 警告，`/health/detail` 会继续显示对应能力不可用；前端只消费这些后端状态，不负责提示 Docker 配置方式。
+后端启动时会检查 generation、embedding、document parser 等关键配置。缺少 `DOCUMENT_PARSER_API_KEY` 这类真实 provider 配置时，容器日志会输出 `Startup readiness` 警告，`/health/detail` 会继续显示对应能力不可用；前端只消费这些后端状态，不负责提示 Docker 配置方式。
 
 ## Provider 配置
 
@@ -112,8 +100,9 @@ LANGFUSE_OTEL_ENDPOINT=
 - `generation`：OpenAI-compatible chat completions，支持 Gemini、Qwen DashScope、Qwen vLLM。
 - `embedding`：显式 provider adapter，支持 `gemini`、`dashscope`、`vllm`。
 - `document_parser`：`gemini` 使用 Gemini Files API；`qwen` 使用 OpenAI-compatible chat completions，可指向 DashScope 或 vLLM。
+- `multivector`：真实视觉多向量检索。`colqwen2`/`colpali` 使用本地 Transformers `ColQwen2ForRetrieval`/`ColPaliForRetrieval`；`colpali-http` 使用外部服务返回 patch-level vectors，适合把 GPU 检索模型和 RAG API 分开部署。
 - `rerank`：默认关闭；需要时显式配置 Qwen rerank endpoint 和 path。
-- `trace`：只接 Langfuse；后端通过 OTLP/HTTP 写入 `LANGFUSE_OTEL_ENDPOINT`，不再保留 Phoenix。
+- `trace`：默认写入本地 `TraceStore`，可选通过 `LANGFUSE_OTEL_ENDPOINT` 对接外部 Langfuse；默认 Docker 栈不再内置 Langfuse 容器。
 
 Gemini 示例：
 
@@ -183,6 +172,22 @@ COMPOSE_DOCUMENT_PARSER_API_BASE_URL=http://vllm:8000/v1
 COMPOSE_DOCUMENT_PARSER_MODEL=Qwen/Qwen2.5-VL-7B-Instruct
 ```
 
+ColQwen2/ColPali 多向量示例：
+
+```bash
+# 推荐生产形态：独立 GPU 服务暴露 /embed，返回 {"vectors": [[...], ...]}
+COMPOSE_MULTIVECTOR_PROVIDER=colpali-http
+COMPOSE_MULTIVECTOR_MODEL_ALIAS=vidore/colqwen2-v1.0-hf
+COMPOSE_MULTIVECTOR_API_BASE_URL=http://colpali:8080
+COMPOSE_MULTIVECTOR_API_PATH=/embed
+
+# 或在 app/worker GPU 镜像内本地加载模型；该镜像需安装 requirements-multivector.txt
+COMPOSE_MULTIVECTOR_PROVIDER=colqwen2
+COMPOSE_MULTIVECTOR_MODEL_ALIAS=vidore/colqwen2-v1.0-hf
+COMPOSE_MULTIVECTOR_DEVICE_MAP=auto
+COMPOSE_MULTIVECTOR_TORCH_DTYPE=bfloat16
+```
+
 可选 Qwen rerank：
 
 ```bash
@@ -239,6 +244,7 @@ curl -sS http://127.0.0.1:3000/health/detail \
 
 ```bash
 curl -sS -X POST http://127.0.0.1:3000/v1/rag/ingest \
+  -H 'X-RAG-Admin-Key: <your-admin-key>' \
   -H 'Content-Type: application/json' \
   -d '{"path":"/workspace/data/raw/employee_handbook.md","kb_id":"default"}'
 ```
@@ -263,9 +269,41 @@ curl -sS -X POST http://127.0.0.1:3000/v1/rag/retrieve \
 
 ```bash
 curl -sS -X POST http://127.0.0.1:3000/retrieve/debug \
+  -H 'X-RAG-Admin-Key: <your-admin-key>' \
   -H 'Content-Type: application/json' \
   -d '{"query":"请输入你的真实检索问题","kb_id":"default","top_k":10}'
 ```
+
+## 生产部署前置项
+
+本仓库默认配置面向本地验证。上线前至少完成以下调整：
+
+- 设置 `RAG_ENV=production`，并替换 `RAG_API_KEYS`、`RAG_ADMIN_API_KEYS`、`NEO4J_PASSWORD`、`MINIO_ROOT_USER`、`MINIO_ROOT_PASSWORD` 等所有默认密钥；生产环境会拒绝 `nano-rag-local` 这类默认 API key。
+- 业务接口使用 `RAG_API_KEYS` 或可信上游网关；管理、调试、评测、诊断和 replay 接口使用独立的 `RAG_ADMIN_API_KEYS`。
+- 如果由业务网关做登录和租户控制，设置 `RAG_TRUSTED_PROXY_SECRET`，并让网关注入 `X-RAG-Proxy-Secret`、`X-RAG-Principal-Id`、`X-RAG-Org-Id`、`X-RAG-Allowed-KB-Ids`。
+- 设置 `RAG_RATE_LIMIT_REQUESTS_PER_MINUTE`，并在外层网关或 WAF 做全局限流；仓库内的限流是单进程保护，不替代分布式限流。
+- 为 Milvus 开启认证时设置 `MILVUS_TOKEN`，或设置 `MILVUS_USER`/`MILVUS_PASSWORD`；同时按 Milvus 官方 Backup 工具建立 collection、etcd、MinIO 数据备份和恢复演练。
+- 为 Neo4j、Redis、MinIO、Milvus、`app-parsed-data`、`app-report-data`、`app-upload-data` 建立备份、恢复和迁移流程。
+- 默认不再保存完整 prompt 到 trace；只有设置 `RAG_TRACE_STORE_PROMPTS=true` 时才会写入 `prompt_messages`。
+- 模型 provider 默认对 408/409/425/429/5xx 和超时做退避重试；可通过 `MODEL_PROVIDER_MAX_RETRIES`、`MODEL_PROVIDER_RETRY_BASE_SECONDS`、`MODEL_PROVIDER_RETRY_MAX_SECONDS` 调整。
+
+生产常见文档处理：
+
+- 直接支持：Markdown、TXT、HTML、CSV、DOCX、XLSX、图片、音频、视频、PDF。
+- CSV/DOCX/XLSX 使用本地结构化抽取，保留基础段落、表格和单元格值；复杂版式、扫描件、图片型 PDF、图表型材料仍应配置多模态 document parser。
+- 上传大小由 `MAX_UPLOAD_BYTES` 控制，单批文件数由 `MAX_FILES_PER_BATCH` 控制；生产应在网关层同步设置 body size、杀毒/内容安全扫描和文件类型白名单。
+- 对标准、法规、合同、制度类文档，建议在文件名或正文中保留版本号、生效日期、章节号；检索层会使用 `doc_type`、`effective_date`、`version` 等元数据辅助排序。
+
+评测门禁示例：
+
+```bash
+python scripts/run_eval.py \
+  --dataset data/eval/employee_handbook_eval.jsonl \
+  --min-context-recall 0.85 \
+  --max-conflicting-hit-rate 0.05
+```
+
+RAG 本体回归样本位于 `data/eval/rag_quality_regression.jsonl`，覆盖表格行查值、条款定位、术语定义、版本冲突和无答案边界。生产接入新语料后，应把业务高风险问题追加到这个集合并设为 CI 门禁。
 
 ## 关键配置
 
@@ -281,6 +319,8 @@ curl -sS -X POST http://127.0.0.1:3000/retrieve/debug \
 - 文档解析不会回退到本地 PDF 解析器；PDF/图片解析需要启用并配置 document parser。
 - embedding 不会把多模态输入降级成文本；embedding client 必须支持 `embed_items`。
 - freshness 过滤不会追加旧版本内容作为兜底上下文；需要通过显式 `source_key` 管理版本组。
+- 附件索引默认开启：`RAG_DOCUMENT_ATTACHMENT_INDEX_ENABLED=true`。PDF page attachment 页数上限由 `RAG_PDF_ATTACHMENT_MAX_PAGES` 控制；PDF rendered image 需要运行环境存在 `pdftoppm`，并可用 `RAG_RENDERED_PAGE_IMAGE_INDEX_ENABLED`、`RAG_RENDERED_PAGE_IMAGE_DPI` 控制；OOXML 内嵌图片由 `RAG_EMBEDDED_IMAGE_INDEX_ENABLED`、`RAG_EMBEDDED_IMAGE_MAX_COUNT` 控制。
+- Multi-vector 默认不内联到 Milvus metadata，sidecar 存放在 `PARSED_OUTPUT_DIR/multivectors`，重建索引时会保留仍被引用的内容寻址 ref 并清理提交失败或旧版本留下的 ref；`RAG_MULTIVECTOR_INLINE=true` 仅适合调试或小规模实验。`MULTIVECTOR_PROVIDER=lightweight` 不是生产路径，只有设置 `RAG_ALLOW_LIGHTWEIGHT_MULTIVECTOR=true` 时才允许启动。
 
 ## 测试
 

@@ -33,6 +33,24 @@ def main() -> int:
         action="store_true",
         help="Use the RAGAS library metrics in addition to built-in deterministic metrics.",
     )
+    parser.add_argument(
+        "--min-context-recall",
+        type=float,
+        default=None,
+        help="Fail with exit code 2 if aggregate reference_context_recall is below this value.",
+    )
+    parser.add_argument(
+        "--min-exact-match",
+        type=float,
+        default=None,
+        help="Fail with exit code 2 if aggregate answer_exact_match is below this value.",
+    )
+    parser.add_argument(
+        "--max-conflicting-hit-rate",
+        type=float,
+        default=None,
+        help="Fail with exit code 2 if aggregate conflicting_hit_rate is above this value.",
+    )
     args = parser.parse_args()
 
     dataset_path = resolve_project_path(args.dataset)
@@ -56,7 +74,30 @@ def main() -> int:
     output_path.parent.mkdir(parents=True, exist_ok=True)
     save_json(str(output_path), report)
     logger.info("%s", output_path)
+    failed_thresholds = _failed_thresholds(report.get("aggregate", {}), args)
+    if failed_thresholds:
+        for failure in failed_thresholds:
+            logger.error("%s", failure)
+        return 2
     return 0
+
+
+def _failed_thresholds(aggregate: dict, args: argparse.Namespace) -> list[str]:
+    checks = [
+        ("reference_context_recall", args.min_context_recall, "min"),
+        ("answer_exact_match", args.min_exact_match, "min"),
+        ("conflicting_hit_rate", args.max_conflicting_hit_rate, "max"),
+    ]
+    failures: list[str] = []
+    for metric, threshold, mode in checks:
+        if threshold is None:
+            continue
+        value = float(aggregate.get(metric, 0.0) or 0.0)
+        if mode == "min" and value < threshold:
+            failures.append(f"{metric}={value:.4f} is below threshold {threshold:.4f}")
+        if mode == "max" and value > threshold:
+            failures.append(f"{metric}={value:.4f} is above threshold {threshold:.4f}")
+    return failures
 
 
 if __name__ == "__main__":

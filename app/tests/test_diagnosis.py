@@ -20,6 +20,13 @@ def test_diagnose_trace_flags_refusal_with_context() -> None:
         reranked=[{"chunk_id": "c1", "text": "员工应在出差结束后 15 个自然日内提交差旅报销申请。"}],
         contexts=[{"chunk_id": "c1", "text": "员工应在出差结束后 15 个自然日内提交差旅报销申请。"}],
         answer="无法确认。现有证据不足。",
+        supporting_claims=[
+            {
+                "claim_type": "insufficiency",
+                "text": "The available evidence was treated as insufficient.",
+                "citation_labels": ["C1"],
+            }
+        ],
     )
 
     diagnosis = service.diagnose_trace(trace)
@@ -70,7 +77,7 @@ def test_diagnose_trace_flags_conflicting_wiki_contexts() -> None:
     assert "conflict_not_reflected_in_answer" in categories
 
 
-def test_diagnose_trace_flags_missing_insufficiency_claim() -> None:
+def test_diagnose_trace_uses_structured_insufficiency_claim() -> None:
     service = DiagnosisService()
     trace = TraceRecord(
         trace_id="trace-3",
@@ -83,7 +90,7 @@ def test_diagnose_trace_flags_missing_insufficiency_claim() -> None:
         answer="Insufficient evidence to determine the contractor carryover policy.",
         supporting_claims=[
             {
-                "claim_type": "factual",
+                "claim_type": "insufficiency",
                 "text": "No explicit contractor rule was retrieved.",
                 "citation_labels": ["C1"],
             }
@@ -94,7 +101,6 @@ def test_diagnose_trace_flags_missing_insufficiency_claim() -> None:
 
     categories = [finding.category for finding in diagnosis.findings]
     assert "generation_refusal_with_context" in categories
-    assert "insufficiency_claim_missing" in categories
 
 
 def test_diagnose_eval_flags_generation_misalignment_when_context_recall_is_full() -> None:
@@ -118,7 +124,6 @@ def test_diagnose_eval_flags_generation_misalignment_when_context_recall_is_full
     categories = [finding.category for finding in diagnosis.findings]
     assert diagnosis.target_type == "eval_result"
     assert "generation_misalignment" in categories
-    assert "refusal_bad_case" in categories
 
 
 @pytest.mark.asyncio

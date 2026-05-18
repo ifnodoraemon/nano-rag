@@ -83,6 +83,40 @@ def test_prioritize_fresh_hits_prefers_higher_version_when_dates_match() -> None
     assert [hit.chunk.chunk_id for hit in ranked] == ["v2"]
 
 
+def test_prioritize_fresh_hits_can_include_stale_versions() -> None:
+    hits = [
+        _hit(
+            "old",
+            2.0,
+            metadata={
+                "source_key": "expense policy",
+                "section_path_text": "Guide > Reimbursement",
+                "effective_date": "2025-01-01",
+                "version": "v1.0",
+            },
+        ),
+        _hit(
+            "new",
+            1.0,
+            metadata={
+                "source_key": "expense policy",
+                "section_path_text": "Guide > Reimbursement",
+                "effective_date": "2026-01-01",
+                "version": "v2.0",
+            },
+        ),
+    ]
+
+    ranked = prioritize_fresh_hits(
+        hits, FreshnessPolicy(enabled=True, include_stale=True)
+    )
+
+    assert [hit.chunk.chunk_id for hit in ranked] == ["new", "old"]
+    assert ranked[0].chunk.metadata["freshness_tier"] == "primary"
+    assert ranked[1].chunk.metadata["freshness_tier"] == "supplemental"
+    assert ranked[1].chunk.metadata["is_latest_version"] is False
+
+
 def test_prioritize_fresh_hits_keeps_distinct_raw_child_chunks() -> None:
     hits = [
         _hit(

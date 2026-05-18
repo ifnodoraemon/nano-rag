@@ -6,6 +6,7 @@ Enterprise RAG system with a real-data runtime: no frontend hardcoded business d
 
 - Real backend data is the source of truth for workspaces, ingest sources, documents, traces, eval reports, and diagnosis targets.
 - Runtime failures should be visible. Missing provider keys, invalid model credentials, parser errors, and Milvus errors must not be hidden behind mock or fallback behavior.
+- Semantic RAG behavior must not depend on hardcoded keyword lists for business meaning, discourse roles, conflict detection, routing, or answer policy. Use model-produced structure, parser metadata, typed configuration, or trace-visible degraded behavior instead.
 - The frontend does not store or submit business API keys. Browser requests go through the account system or the Docker nginx proxy, which injects the local backend key.
 - Every RAG answer should be traceable to retrieved context, citations, source documents, and trace IDs.
 
@@ -90,6 +91,7 @@ Do not use non-Docker commands to start the app for runtime validation.
 - YAML config supports env substitution
 - OpenTelemetry spans should wrap pipeline stages
 - Do not introduce frontend hardcoded business data or backend fallback behavior
+- Do not introduce hardcoded semantic keyword lists in the RAG layer. If a degraded path is necessary for availability, it must be metadata-only, explicitly marked in trace output, and covered by tests.
 
 ## Docker Services
 

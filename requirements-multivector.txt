@@ -1,0 +1,10 @@
+-r requirements.txt
+
+# Optional GPU/runtime dependencies for MULTIVECTOR_PROVIDER=colqwen2|colpali.
+# The base app image keeps these out by default; production should install this
+# file in a GPU image or run MULTIVECTOR_PROVIDER=colpali-http against a
+# dedicated ColPali/ColQwen service.
+accelerate>=1.8
+pillow>=11.0
+torch>=2.6
+transformers>=4.53

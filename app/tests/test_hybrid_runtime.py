@@ -81,6 +81,16 @@ class FakeGenerationClient:
         return {"content": "internal PTO carryover handbook section"}
 
 
+class FakeImageTextParser:
+    enabled = True
+
+    def supports(self, path):  # noqa: ANN001
+        return path.suffix.lower() == ".png"
+
+    async def parse_file(self, path):  # noqa: ANN001, ARG002
+        return "# Label\n\nInvoice total: 99 USD"
+
+
 def _build_config(tmp_path) -> AppConfig:
     return AppConfig(
         config_dir=tmp_path,
@@ -91,6 +101,18 @@ def _build_config(tmp_path) -> AppConfig:
         },
         prompts={},
     )
+
+
+def test_hybrid_search_enabled_respects_string_false_config(tmp_path, monkeypatch) -> None:
+    monkeypatch.delenv("RAG_HYBRID_SEARCH_ENABLED", raising=False)
+    config = AppConfig(
+        config_dir=tmp_path,
+        settings={"hybrid_search": {"enabled": "false"}},
+        models={"model_gateway": {"base_url": "", "api_key": ""}},
+        prompts={},
+    )
+
+    assert config.hybrid_search_enabled is False
 
 
 class FailingUpsertRepository(InMemoryVectorRepository):
@@ -420,6 +442,43 @@ async def test_uploaded_media_chunks_point_to_persistent_upload_uri(
     assert chunk.media_uri == str(upload_dir / "default" / "__shared__" / "logo.png")
 
 
+@pytest.mark.asyncio
+async def test_image_ingest_creates_visual_and_text_chunks_when_parser_available(
+    monkeypatch, tmp_path
+) -> None:
+    image_path = tmp_path / "receipt.png"
+    image_path.write_bytes(b"\x89PNGfake")
+    monkeypatch.setattr("app.ingestion.pipeline.discover_files", lambda path: [image_path])
+    repository = InMemoryVectorRepository()
+    config = AppConfig(
+        config_dir=tmp_path,
+        settings={"chunk": {"size": 200, "overlap": 20}},
+        models={"model_gateway": {"base_url": "", "api_key": ""}},
+        prompts={},
+    )
+    pipeline = IngestionPipeline(
+        config=config,
+        repository=repository,
+        embedding_client=FakeEmbeddingClient(),
+        generation_client=FakeGenerationClient(),
+        tracing_manager=TracingManager("test-service", ""),
+        document_parser=FakeImageTextParser(),
+    )
+
+    response = await pipeline.run(str(tmp_path), kb_id="default")
+
+    assert response.documents == 1
+    assert response.chunks == 2
+    chunks = [chunk for chunk, _ in repository.entries]
+    assert [chunk.modality for chunk in chunks] == ["image", "text"]
+    assert chunks[0].metadata["chunk_kind"] == "media_object"
+    assert chunks[0].metadata["chunk_strategy"] == "media_object"
+    assert chunks[0].metadata["media_text_extraction"] == "ok"
+    assert chunks[1].text == "Invoice total: 99 USD"
+    assert chunks[1].metadata["chunk_strategy"] == "definition_leaf"
+    assert chunks[1].metadata["source_modality"] == "image"
+
+
 def test_media_reembed_uses_media_uri(tmp_path) -> None:
     durable_path = tmp_path / "uploads" / "default" / "logo.png"
     durable_path.parent.mkdir(parents=True)
@@ -548,6 +607,61 @@ async def test_ingestion_pipeline_uses_stable_source_path_overrides(
 
 
 @pytest.mark.asyncio
+async def test_ingestion_pipeline_preserves_existing_document_when_upsert_fails(
+    monkeypatch, tmp_path
+) -> None:
+    monkeypatch.setenv("PARSED_OUTPUT_DIR", str(tmp_path / "parsed"))
+    source_file = tmp_path / "upload.txt"
+    source_file.write_text("first committed content", encoding="utf-8")
+    monkeypatch.setattr("app.ingestion.pipeline.discover_files", lambda path: [source_file])
+
+    repository = FailingUpsertRepository(fail_on_call=2)
+    config = AppConfig(
+        config_dir=tmp_path,
+        settings={"chunk": {"size": 200, "overlap": 20}},
+        models={"model_gateway": {"base_url": "", "api_key": ""}},
+        prompts={},
+    )
+    pipeline = IngestionPipeline(
+        config=config,
+        repository=repository,
+        embedding_client=FakeEmbeddingClient(),
+        generation_client=FakeGenerationClient(),
+        tracing_manager=TracingManager("test-service", ""),
+    )
+    stable_source = "uploads/default/policy.txt"
+
+    await pipeline.run(
+        str(tmp_path),
+        kb_id="default",
+        source_path_overrides={str(source_file.resolve()): stable_source},
+    )
+    original_multivectors = {
+        path.name for path in (tmp_path / "parsed" / "multivectors").glob("*.json")
+    }
+    source_file.write_text("second replacement content", encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="repository upsert failed"):
+        await pipeline.run(
+            str(tmp_path),
+            kb_id="default",
+            source_path_overrides={str(source_file.resolve()): stable_source},
+        )
+
+    committed_doc = next(iter(repository.documents.values()))
+    assert committed_doc.content == "first committed content"
+    assert len(repository.entries) == 1
+    parsed_artifact = json.loads(
+        next((tmp_path / "parsed").glob("*.json")).read_text(encoding="utf-8")
+    )
+    assert parsed_artifact["document"]["content"] == "first committed content"
+    assert not list((tmp_path / "parsed").glob("*.tmp"))
+    assert {
+        path.name for path in (tmp_path / "parsed" / "multivectors").glob("*.json")
+    } == original_multivectors
+
+
+@pytest.mark.asyncio
 async def test_ingestion_pipeline_is_atomic_before_apply(
     monkeypatch, tmp_path
 ) -> None:
@@ -587,6 +701,7 @@ async def test_ingestion_pipeline_is_atomic_before_apply(
 
     parsed_dir = tmp_path / "parsed"
     assert not parsed_dir.exists() or not any(parsed_dir.glob("*.json"))
+    assert not list((parsed_dir / "multivectors").glob("*.json"))
     assert not repository.documents
     assert not repository.entries
     assert not hybrid.bm25_index.search("safe", top_k=5)

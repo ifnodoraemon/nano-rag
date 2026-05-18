@@ -9,7 +9,7 @@ from uuid import uuid4
 
 from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, Query, Request, UploadFile
 
-from app.api.auth import RequestContext, require_api_key
+from app.api.auth import RequestContext, require_admin_key, require_api_key
 from app.ingestion.executor import submit_ingest_paths
 from app.ingestion.loader import (
     SUPPORTED_EXTENSIONS,
@@ -324,7 +324,7 @@ async def rag_retrieve(
 async def rag_ingest(
     payload: BusinessIngestRequest,
     request: Request,
-    context: RequestContext = Depends(require_api_key),
+    context: RequestContext = Depends(require_admin_key),
     background_tasks: BackgroundTasks = None,
 ) -> BusinessIngestResponse:
     container = request.app.state.container
@@ -403,7 +403,7 @@ async def rag_create_knowledge_base(
 @router.get(
     "/ingest/sources",
     response_model=list[IngestSourceSummary],
-    dependencies=[Depends(require_api_key)],
+    dependencies=[Depends(require_admin_key)],
 )
 async def rag_ingest_sources() -> list[IngestSourceSummary]:
     return [
@@ -436,6 +436,8 @@ async def rag_ingest_upload(
     uploaded_files: list[str] = []
     source_paths_by_durable_path: dict[str, str] = {}
     durable_paths: list[str] = []
+    staged_uploads: list[tuple[Path, Path, str, str]] = []
+    temp_upload_paths: list[Path] = []
     seen_upload_names: set[str] = set()
     seen_source_paths: set[str] = set()
     try:
@@ -463,8 +465,12 @@ async def rag_ingest_upload(
             seen_source_paths.add(source_path)
             durable_path = _upload_storage_path(container.config.upload_dir, source_path)
             durable_path.parent.mkdir(parents=True, exist_ok=True)
+            temp_path = durable_path.with_name(
+                f".{durable_path.name}.{uuid4().hex}.tmp"
+            )
+            temp_upload_paths.append(temp_path)
             total_bytes = 0
-            with durable_path.open("wb") as output:
+            with temp_path.open("wb") as output:
                 while True:
                     chunk = await upload.read(UPLOAD_CHUNK_BYTES)
                     if not chunk:
@@ -476,6 +482,10 @@ async def rag_ingest_upload(
                             detail=f"file '{original_name}' exceeds max size ({MAX_UPLOAD_BYTES} bytes)",
                         )
                     output.write(chunk)
+            staged_uploads.append((temp_path, durable_path, original_name, source_path))
+
+        for temp_path, durable_path, original_name, source_path in staged_uploads:
+            os.replace(temp_path, durable_path)
             uploaded_files.append(original_name)
             source_paths_by_durable_path[str(durable_path.resolve())] = source_path
             durable_paths.append(str(durable_path))
@@ -509,6 +519,8 @@ async def rag_ingest_upload(
             uploaded_files=uploaded_files,
         )
     finally:
+        for temp_path in temp_upload_paths:
+            temp_path.unlink(missing_ok=True)
         for upload in files:
             try:
                 await upload.close()
@@ -668,7 +680,7 @@ async def rag_trace(
 async def rag_benchmark(
     payload: BenchmarkRunRequest,
     request: Request,
-    context: RequestContext = Depends(require_api_key),
+    context: RequestContext = Depends(require_admin_key),
 ) -> BenchmarkRunResponse:
     container = request.app.state.container
     ragas_runner = _require_eval_runner(container)

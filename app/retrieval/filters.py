@@ -3,15 +3,6 @@ from __future__ import annotations
 import re
 from datetime import date, datetime
 
-DOC_TYPE_MARKERS: dict[str, tuple[str, ...]] = {
-    "faq": ("faq", "q&a", "常见问题", "问答"),
-    "policy": ("policy", "政策", "制度", "办法", "规范"),
-    "handbook": ("handbook", "手册", "员工手册"),
-    "guide": ("guide", "guideline", "指南", "指引"),
-    "procedure": ("procedure", "流程", "操作步骤", "操作规程"),
-    "contract": ("contract", "agreement", "合同", "协议"),
-    "form": ("form", "template", "表单", "模板"),
-}
 DATE_PATTERNS = (
     re.compile(r"((?:19|20)\d{2}-\d{1,2}-\d{1,2})"),
     re.compile(r"((?:19|20)\d{2}/\d{1,2}/\d{1,2})"),
@@ -26,29 +17,21 @@ VERSION_PATTERNS = (
 
 
 def infer_metadata_filters(query: str) -> dict[str, object]:
-    lowered = query.lower()
     inferred: dict[str, object] = {}
-
-    doc_types = [
-        doc_type
-        for doc_type, markers in DOC_TYPE_MARKERS.items()
-        if any(marker in lowered for marker in markers)
-    ]
-    if doc_types:
-        inferred["doc_types"] = doc_types
-        inferred["doc_type_match_mode"] = "soft"
 
     explicit_date = _extract_first_match(query, DATE_PATTERNS)
     if explicit_date:
         normalized = normalize_date_string(explicit_date)
         if normalized:
             inferred["effective_date_to"] = normalized
+            inferred["effective_date_match_mode"] = "soft"
     else:
         year_match = YEAR_PATTERN.search(query)
         if year_match:
             year = year_match.group(1)
             inferred["effective_date_from"] = f"{year}-01-01"
             inferred["effective_date_to"] = f"{year}-12-31"
+            inferred["effective_date_match_mode"] = "soft"
 
     version = _extract_first_match(query, VERSION_PATTERNS)
     if version:
@@ -80,6 +63,8 @@ def merge_metadata_filters(
         )
         if explicit_filters.get("doc_types"):
             merged.pop("doc_type_match_mode", None)
+        if explicit_filters.get("effective_date_from") or explicit_filters.get("effective_date_to"):
+            merged.pop("effective_date_match_mode", None)
     return merged or None
 
 
@@ -121,6 +106,8 @@ def match_metadata_filters(
     effective_date_to = parse_date(filters.get("effective_date_to"))
     if effective_date_from or effective_date_to:
         if effective_date is None:
+            if filters.get("effective_date_match_mode") == "soft":
+                return True
             return False
         if effective_date_from and effective_date < effective_date_from:
             return False

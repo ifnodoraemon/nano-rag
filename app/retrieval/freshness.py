@@ -10,6 +10,7 @@ from app.vectorstore.repository import SearchHit
 @dataclass(frozen=True)
 class FreshnessPolicy:
     enabled: bool = True
+    include_stale: bool = False
 
 
 def prioritize_fresh_hits(
@@ -53,6 +54,9 @@ def prioritize_fresh_hits(
             )
 
     primary.sort(key=lambda item: item[0])
+    if policy.include_stale:
+        stale.sort(key=lambda item: item[0])
+        return [hit for _, hit in [*primary, *stale]]
     return [hit for _, hit in primary]
 
 

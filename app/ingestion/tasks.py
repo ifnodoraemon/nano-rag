@@ -27,6 +27,11 @@ def _build_celery_app():
         os.getenv("RAG_WORKER_MAX_TASKS_PER_CHILD", "20")
     )
     app.conf.task_acks_late = True
+    app.conf.task_reject_on_worker_lost = True
+    app.conf.task_track_started = True
+    app.conf.broker_connection_retry_on_startup = True
+    app.conf.task_soft_time_limit = int(os.getenv("RAG_INGEST_TASK_SOFT_TIME_LIMIT", "1800"))
+    app.conf.task_time_limit = int(os.getenv("RAG_INGEST_TASK_TIME_LIMIT", "2100"))
     return app
 
 
@@ -55,7 +60,16 @@ async def _run_job(
 
 if celery_app is not None:
 
-    @celery_app.task(name="nano_rag.ingest_paths", queue="ingest")
+    @celery_app.task(
+        name="nano_rag.ingest_paths",
+        queue="ingest",
+        autoretry_for=(Exception,),
+        retry_backoff=True,
+        retry_jitter=True,
+        retry_kwargs={
+            "max_retries": int(os.getenv("RAG_INGEST_TASK_MAX_RETRIES", "2")),
+        },
+    )
     def ingest_paths_task(
         job_id: str,
         paths: list[str],

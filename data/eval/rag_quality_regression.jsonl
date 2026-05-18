@@ -1,0 +1,5 @@
+{"sample_id":"table-row-price","kb_id":"default","query":"中宁县徐套乡的区片综合地价是多少？","reference_answer":"中宁县徐套乡的区片综合地价为 31800 元/亩。","reference_contexts":["| 中卫市 | 中宁县 | III | 31800 | 喊叫水乡、徐套乡 |"]}
+{"sample_id":"clause-effective-scope","kb_id":"default","query":"第十二条的适用范围是什么？","reference_answer":"应根据第十二条对应条款回答适用范围，并引用该条款。","reference_contexts":["第十二条 适用范围"]}
+{"sample_id":"definition-term","kb_id":"default","query":"术语A的定义是什么？","reference_answer":"术语A应按定义条目回答。","reference_contexts":["术语A：用于测试的定义。"]}
+{"sample_id":"version-conflict","kb_id":"default","query":"最新有效版本是否允许旧版本的做法？","reference_answer":"应优先使用最新有效版本；若旧版本与现行版本冲突，应明确指出冲突。","reference_contexts":["现行版本","旧版本"]}
+{"sample_id":"no-answer-boundary","kb_id":"default","query":"文档是否规定了海外临时工的补贴上限？","reference_answer":"如果上下文没有海外临时工补贴上限，应回答信息不足。","reference_contexts":[]}

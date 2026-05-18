@@ -5,6 +5,7 @@ import base64
 import logging
 import mimetypes
 import os
+import random
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol, Sequence, Union
@@ -104,12 +105,61 @@ class _BaseProvider:
 
         async def _one(items: Sequence[EmbedItem]) -> list[float]:
             async with self._semaphore:
-                return await self.embed_one(items)
+                return await self._embed_one_with_retries(items)
 
         return list(await asyncio.gather(*(_one(items) for items in batches)))
 
     async def embed_one(self, items: Sequence[EmbedItem]) -> list[float]:
         raise NotImplementedError
+
+    async def _embed_one_with_retries(self, items: Sequence[EmbedItem]) -> list[float]:
+        attempts = _max_embedding_attempts()
+        last_error: Exception | None = None
+        for attempt in range(1, attempts + 1):
+            try:
+                return await self.embed_one(items)
+            except ModelGatewayError as exc:
+                last_error = exc
+                if attempt >= attempts or not _retryable_embedding_error(exc):
+                    raise
+                await asyncio.sleep(_embedding_retry_sleep(attempt))
+        raise ModelGatewayError(f"embedding request failed after retries: {last_error}")
+
+
+def _max_embedding_attempts() -> int:
+    raw = os.getenv("EMBEDDING_MAX_RETRIES", os.getenv("MODEL_PROVIDER_MAX_RETRIES", "2"))
+    try:
+        return max(1, int(raw) + 1)
+    except ValueError:
+        return 3
+
+
+def _embedding_retry_sleep(attempt: int) -> float:
+    base_raw = os.getenv("MODEL_PROVIDER_RETRY_BASE_SECONDS", "0.5")
+    max_raw = os.getenv("MODEL_PROVIDER_RETRY_MAX_SECONDS", "8")
+    try:
+        base = max(0.0, float(base_raw))
+    except ValueError:
+        base = 0.5
+    try:
+        ceiling = max(base, float(max_raw))
+    except ValueError:
+        ceiling = 8.0
+    delay = min(ceiling, base * (2 ** max(0, attempt - 1)))
+    return delay + random.uniform(0, delay * 0.25 if delay else 0)
+
+
+def _retryable_embedding_error(exc: ModelGatewayError) -> bool:
+    message = str(exc).lower()
+    return (
+        "timeout" in message
+        or "connection" in message
+        or " 408 " in message
+        or " 409 " in message
+        or " 425 " in message
+        or " 429 " in message
+        or any(f" {status} " in message for status in range(500, 600))
+    )
 
 class GeminiMultimodalEmbedding(_BaseProvider):
     """Direct adapter for Gemini Embedding 2 (gemini-embedding-2-preview).
@@ -283,6 +333,8 @@ class DashScopeMultimodalEmbedding(_BaseProvider):
         if isinstance(item, FileItem):
             mime = item.resolve_mime()
             data_url = f"data:{mime};base64,{base64.b64encode(item.path.read_bytes()).decode('ascii')}"
+            if mime == "application/pdf":
+                return {"file": data_url}
             if mime.startswith("image/"):
                 return {"image": data_url}
             if mime.startswith("video/"):

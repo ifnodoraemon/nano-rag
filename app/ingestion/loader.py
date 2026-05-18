@@ -1,10 +1,12 @@
 import os
 from pathlib import Path
 
+from app.ingestion.parser_registry import supported_text_suffixes
 
 SUPPORTED_EXTENSIONS = {
     # text-bearing
-    ".pdf", ".md", ".txt", ".html",
+    *supported_text_suffixes(),
+    ".pdf",
     # image
     ".png", ".jpg", ".jpeg", ".webp",
     # audio

@@ -70,19 +70,32 @@ def extract_document_metadata(
 
 
 def infer_doc_type(source_path: str, title: str, text: str) -> str:
-    combined = f"{source_path}\n{title}\n{text[:500]}".lower()
-    heuristics = (
-        ("faq", ("faq", "q&a", "常见问题", "问答")),
-        ("policy", ("policy", "政策", "制度", "办法", "规范")),
-        ("handbook", ("handbook", "手册", "员工手册")),
-        ("guide", ("guide", "guideline", "指南", "指引")),
-        ("procedure", ("procedure", "流程", "操作步骤", "操作规程")),
-        ("contract", ("contract", "agreement", "合同", "协议")),
-        ("form", ("form", "template", "表单", "模板")),
-    )
-    for doc_type, markers in heuristics:
-        if any(marker in combined for marker in markers):
-            return doc_type
+    del title, text
+    suffix = source_path.rsplit(".", 1)[-1].lower() if "." in source_path else ""
+    if suffix in {"csv", "json", "jsonl", "tsv", "xls", "xlsx", "yaml", "yml", "xml"}:
+        return "structured_data"
+    if suffix in {"ppt", "pptx"}:
+        return "presentation"
+    if suffix in {"doc", "docx"}:
+        return "document"
+    if suffix in {"tex"}:
+        return "technical_document"
+    if suffix in {"c", "cpp", "cs", "css", "go", "java", "js", "jsx", "php", "py", "rb", "rs", "sh", "sql", "ts", "tsx"}:
+        return "code"
+    if suffix in {"log"}:
+        return "log"
+    if suffix in {"pdf"}:
+        return "document"
+    if suffix in {"png", "jpg", "jpeg", "webp"}:
+        return "image"
+    if suffix in {"mp3", "wav", "m4a", "aac", "ogg", "flac"}:
+        return "audio"
+    if suffix in {"mp4", "mov", "webm", "mkv", "avi", "mpeg", "mpg"}:
+        return "video"
+    if suffix in {"txt", "md", "markdown"}:
+        return "document"
+    if suffix:
+        return suffix
     return "document"
 
 

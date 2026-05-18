@@ -49,6 +49,10 @@ class SupportingClaim(BaseModel):
     claim_type: Literal["factual", "conditional", "conflict", "insufficiency"] = "factual"
     text: str
     citation_labels: list[str] = Field(default_factory=list)
+    verified: bool | None = None
+    support_score: float | None = None
+    missing_numbers: list[str] = Field(default_factory=list)
+    missing_terms: list[str] = Field(default_factory=list)
 
 
 class ChatResponse(BaseModel):
