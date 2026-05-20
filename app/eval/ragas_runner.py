@@ -148,9 +148,9 @@ class RagasRunner:
 
     async def _run_async(self, records: list[dict]) -> dict:
         from ragas import evaluate
-        from ragas.dataset_schema import EvaluationDataset, SingleTurnSample
+        from ragas.dataset_schema import EvaluationDataset, MultiTurnSample, SingleTurnSample
 
-        samples: list[SingleTurnSample] = []
+        samples: list[SingleTurnSample | MultiTurnSample] = []
         for record in records:
             contexts = record.get("retrieved_contexts", []) or []
             if contexts and isinstance(contexts[0], dict):

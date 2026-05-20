@@ -239,7 +239,7 @@ class RetrievalPipeline:
                     "rerank_seconds": rerank_seconds,
                     "query_route_seconds": route_seconds,
                     "evidence_planner_seconds": float(
-                        evidence_plan.get("planner_seconds", 0.0) or 0.0
+                        str(evidence_plan.get("planner_seconds", 0.0) or 0.0)
                     ),
                 },
             )
@@ -270,7 +270,8 @@ class RetrievalPipeline:
             session_id=session_id,
             metadata_filters=metadata_filters,
         )
-        record = self.trace_store.get(trace["trace_id"])
+        trace_id = str(trace["trace_id"])
+        record = self.trace_store.get(trace_id)
         if record is None:
             raise RuntimeError(f"trace not found: {trace['trace_id']}")
         return RetrievalDebugResponse(
@@ -278,7 +279,7 @@ class RetrievalPipeline:
             retrieved=record.retrieved,
             reranked=record.reranked,
             contexts=contexts,
-            trace_id=trace["trace_id"],
+            trace_id=trace_id,
         )
 
 

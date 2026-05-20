@@ -19,6 +19,7 @@ data/reports/eval/*.json
 data/reports/eval/benchmarks/*.json
 !data/raw/.gitkeep
 !data/raw/employee_handbook.md
+!data/raw/RAG搜对了却答错？德国萨尔大学找到了真相丨ACL'26.html
 !data/parsed/.gitkeep
 !data/reports/traces/.gitkeep
 !data/reports/feedback/.gitkeep

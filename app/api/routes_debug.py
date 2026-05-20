@@ -5,6 +5,9 @@ from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
 from app.api.auth import RequestContext, require_admin_key
+from app.core.config import AppContainer
+from app.diagnostics.service import DiagnosisService
+from app.eval.ragas_runner import RagasRunner
 from app.eval.dataset import (
     get_eval_report_dir,
     list_benchmark_reports,
@@ -34,7 +37,7 @@ from app.utils.text import safe_float
 router = APIRouter()
 
 
-def _require_eval_runner(container) -> object:
+def _require_eval_runner(container: AppContainer) -> RagasRunner:
     runner = getattr(container, "ragas_runner", None)
     if runner is None:
         raise HTTPException(
@@ -44,7 +47,7 @@ def _require_eval_runner(container) -> object:
     return runner
 
 
-def _require_diagnosis_service(container) -> object:
+def _require_diagnosis_service(container: AppContainer) -> DiagnosisService:
     service = getattr(container, "diagnosis_service", None)
     if service is None:
         raise HTTPException(
@@ -212,16 +215,10 @@ def _scope_report_summary(
 
 
 async def _run_eval_report(
-    ragas_runner: object, records: list[dict], use_ragas_lib: bool
+    ragas_runner: RagasRunner, records: list[dict], use_ragas_lib: bool
 ) -> dict:
     if use_ragas_lib:
-        run_async = getattr(ragas_runner, "run_async", None)
-        if run_async is None:
-            raise HTTPException(
-                status_code=503,
-                detail="RAGAS library evaluation is not available in this runner.",
-            )
-        return await run_async(records)
+        return await ragas_runner.run_async(records)
     return ragas_runner.run(records)
 
 

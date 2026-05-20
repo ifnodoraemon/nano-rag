@@ -757,6 +757,7 @@ def _int_setting(env_name: str, configured: object, default: int) -> int:
     raw = os.getenv(env_name)
     value = raw if raw is not None else configured
     try:
+        from typing import Any
         return int(value) if value is not None else default
     except (TypeError, ValueError):
         return default

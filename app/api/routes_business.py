@@ -10,6 +10,9 @@ from uuid import uuid4
 from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, Query, Request, UploadFile
 
 from app.api.auth import RequestContext, require_admin_key, require_api_key
+from app.core.config import AppContainer
+from app.diagnostics.service import DiagnosisService
+from app.eval.ragas_runner import RagasRunner
 from app.ingestion.executor import submit_ingest_paths
 from app.ingestion.loader import (
     SUPPORTED_EXTENSIONS,
@@ -90,7 +93,7 @@ def _ensure_kb_access(container, kb_id: str, context: RequestContext | None = No
         )
 
 
-def _require_eval_runner(container) -> object:
+def _require_eval_runner(container: AppContainer) -> RagasRunner:
     runner = getattr(container, "ragas_runner", None)
     if runner is None:
         raise HTTPException(
@@ -100,7 +103,7 @@ def _require_eval_runner(container) -> object:
     return runner
 
 
-def _require_diagnosis_service(container) -> object:
+def _require_diagnosis_service(container: AppContainer) -> DiagnosisService:
     service = getattr(container, "diagnosis_service", None)
     if service is None:
         raise HTTPException(
@@ -111,16 +114,10 @@ def _require_diagnosis_service(container) -> object:
 
 
 async def _run_eval_report(
-    ragas_runner: object, records: list[dict], use_ragas_lib: bool
+    ragas_runner: RagasRunner, records: list[dict], use_ragas_lib: bool
 ) -> dict:
     if use_ragas_lib:
-        run_async = getattr(ragas_runner, "run_async", None)
-        if run_async is None:
-            raise HTTPException(
-                status_code=503,
-                detail="RAGAS library evaluation is not available in this runner.",
-            )
-        return await run_async(records)
+        return await ragas_runner.run_async(records)
     return ragas_runner.run(records)
 
 
@@ -325,7 +322,7 @@ async def rag_ingest(
     payload: BusinessIngestRequest,
     request: Request,
     context: RequestContext = Depends(require_admin_key),
-    background_tasks: BackgroundTasks = None,
+    background_tasks: BackgroundTasks = None,  # type: ignore
 ) -> BusinessIngestResponse:
     container = request.app.state.container
     _ensure_kb_access(container, payload.kb_id, context)
@@ -420,7 +417,7 @@ async def rag_ingest_upload(
     request: Request,
     files: list[UploadFile] = File(...),
     kb_id: str = Form(default="default"),
-    background_tasks: BackgroundTasks = None,
+    background_tasks: BackgroundTasks = None,  # type: ignore
     context: RequestContext = Depends(require_api_key),
 ) -> BusinessIngestResponse:
     _ensure_kb_access(request.app.state.container, kb_id, context)

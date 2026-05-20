@@ -255,8 +255,8 @@ def build_contexts(
         context_entry["evidence_role"] = _evidence_role(context_entry)
         contexts.append(context_entry)
     if quotas is None:
-        selected = _promote_query_coverage(contexts[:limit], contexts, query)
-        return _with_citation_labels(_order_contexts_by_evidence(selected))
+        selected_simple = _promote_query_coverage(contexts[:limit], contexts, query)
+        return _with_citation_labels(_order_contexts_by_evidence(selected_simple))
 
     ordered_buckets = bucket_order or DEFAULT_BUCKET_ORDER
     grouped: dict[str, list[dict[str, object]]] = {bucket: [] for bucket in ordered_buckets}

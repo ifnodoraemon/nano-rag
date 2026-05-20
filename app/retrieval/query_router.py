@@ -107,7 +107,8 @@ class QueryRouter:
             return _heuristic_route(query, reason="router_failed")
 
     def _parse_route(self, content: str) -> QueryRoute:
-        payload = self._json_object(content)
+        from typing import Any
+        payload: dict[str, Any] = self._json_object(content)
         route = str(payload.get("route") or "fact").strip().lower()
         if route not in ROUTES:
             route = "fact"
