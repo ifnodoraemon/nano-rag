@@ -15,14 +15,13 @@ async def generate_synthetic_data(container: AppContainer, limit: int = 10):
     to create a synthetic dataset for robust evaluation.
     """
     logger.info("Initializing synthetic dataset generation...")
-    vector_repo = container.vector_repository
+    vector_repo = container.repository
     generation_client = container.generation_client
 
     dummy_vector = [random.random() for _ in range(1536)]
     
-    hits = await vector_repo.search(
-        collection_name="default",
-        query_vector=dummy_vector,
+    hits = vector_repo.search(
+        vector=dummy_vector,
         top_k=limit * 2,
     )
     
@@ -43,10 +42,10 @@ async def generate_synthetic_data(container: AppContainer, limit: int = 10):
     3. 输出必须是合法的 JSON 格式。
 
     输出 JSON 格式要求：
-    {
+    {{
         "query": "生成的问题",
         "expected_answer": "生成的答案"
-    }
+    }}
     
     文本片段：
     {text}
