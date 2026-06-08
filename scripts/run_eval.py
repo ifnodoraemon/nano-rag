@@ -39,10 +39,10 @@ def main() -> int:
         help="Fail with exit code 2 if aggregate reference_context_recall is below this value.",
     )
     parser.add_argument(
-        "--min-answer-correctness",
+        "--min-answer-relevancy",
         type=float,
         default=None,
-        help="Fail with exit code 2 if aggregate answer_correctness is below this value.",
+        help="Fail with exit code 2 if aggregate answer_relevancy is below this value.",
     )
     parser.add_argument(
         "--max-conflicting-hit-rate",
@@ -86,8 +86,8 @@ def main() -> int:
 
 def _failed_thresholds(aggregate: dict, args: argparse.Namespace) -> list[str]:
     checks = [
-        ("reference_context_recall", args.min_context_recall, "min"),
-        ("answer_correctness", args.min_answer_correctness, "min"),
+        ("context_recall", args.min_context_recall, "min"),
+        ("answer_relevancy", args.min_answer_relevancy, "min"),
         ("conflicting_hit_rate", args.max_conflicting_hit_rate, "max"),
     ]
     failures: list[str] = []
