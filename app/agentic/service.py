@@ -118,7 +118,12 @@ class AgenticReasoningService:
 
     async def _intent_decomposition_node(self, state: AgentState) -> AgentState:
         payload = state["payload"]
-        return {"subqueries": await self._decompose(payload.query)}
+        query = payload.query
+        history = self.trace_store.get_history(payload.session_id) if payload.session_id else []
+        if history:
+            query = await self._contextualize(query, history)
+            payload.query = query
+        return {"subqueries": await self._decompose(query), "payload": payload}
 
     async def _initial_recall_node(self, state: AgentState) -> AgentState:
         payload = state["payload"]
@@ -336,6 +341,32 @@ class AgenticReasoningService:
         if query not in subqueries:
             subqueries.insert(0, query)
         return self._dedupe(subqueries)[: self.max_subqueries]
+
+    async def _contextualize(self, query: str, history: list) -> str:
+        if not history:
+            return query
+        try:
+            history_text = "\n".join(
+                f"User: {r.query}\nAssistant: {r.answer[:200]}..."
+                for r in history
+            )
+            result = await self.generation_client.generate(
+                [
+                    {
+                        "role": "system",
+                        "content": "You are a query contextualizer. Rewrite the user's latest query to be fully self-contained, resolving any pronouns based on the chat history. Return ONLY the rewritten query text. Do not explain.",
+                    },
+                    {
+                        "role": "user",
+                        "content": f"Chat History:\n{history_text}\n\nLatest Query: {query}\n\nRewritten fully self-contained query:",
+                    },
+                ]
+            )
+            content = str(result.get("content") or "").strip()
+            return content if content else query
+        except Exception as exc:
+            logger.warning("query contextualization failed: %s", exc)
+            return query
 
     async def _verify(
         self,

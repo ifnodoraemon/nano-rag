@@ -77,14 +77,6 @@ def _log_startup_readiness(config) -> None:  # noqa: ANN001
             document_parser.get("model"),
             ", ".join(document_parser.get("missing", [])),
         )
-    multivector = config.multivector_configured
-    if multivector["enabled"] and not multivector["configured"]:
-        logger.warning(
-            "Startup readiness: multivector provider is not configured. provider=%s model=%s missing=%s",
-            multivector.get("provider"),
-            multivector.get("model"),
-            ", ".join(multivector.get("missing", [])),
-        )
 
     capabilities = ["generation", "embedding"]
     if config.rerank_enabled:

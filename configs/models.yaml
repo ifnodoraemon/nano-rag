@@ -15,21 +15,6 @@ embedding:
   base_url: ${EMBEDDING_API_BASE_URL:-https://generativelanguage.googleapis.com}
   api_key: ${EMBEDDING_API_KEY:-}
 
-multivector:
-  # Real late-interaction visual retrieval. Configure one of:
-  # - colqwen2 / colpali: local Transformers model in a GPU image
-  # - colpali-http: external GPU service returning patch-level vectors
-  provider: ${MULTIVECTOR_PROVIDER:-disabled}
-  default_alias: ${MULTIVECTOR_MODEL_ALIAS:-vidore/colqwen2-v1.0-hf}
-  family: ${MULTIVECTOR_MODEL_FAMILY:-colqwen2}
-  dimension: 128
-  base_url: ${MULTIVECTOR_API_BASE_URL:-}
-  api_key: ${MULTIVECTOR_API_KEY:-}
-  path: ${MULTIVECTOR_API_PATH:-/embed}
-  device_map: ${MULTIVECTOR_DEVICE_MAP:-auto}
-  torch_dtype: ${MULTIVECTOR_TORCH_DTYPE:-auto}
-  max_patch_vectors: ${MULTIVECTOR_MAX_PATCH_VECTORS:-0}
-  timeout_seconds: ${MULTIVECTOR_TIMEOUT_SECONDS:-120}
 
 rerank:
   default_alias: ${RERANK_MODEL_ALIAS:-disabled}

@@ -205,39 +205,6 @@ class AppConfig:
             "missing": missing,
         }
 
-    @property
-    def multivector_configured(self) -> dict[str, object]:
-        section = self.models.get("multivector", {})
-        provider = str(
-            os.getenv("MULTIVECTOR_PROVIDER")
-            or section.get("provider")
-            or "disabled"
-        ).strip()
-        enabled = provider.lower() not in {"", "disabled", "none", "false", "off"}
-        model = str(
-            os.getenv("MULTIVECTOR_MODEL_ALIAS")
-            or section.get("default_alias")
-            or ""
-        )
-        base_url = str(
-            os.getenv("MULTIVECTOR_API_BASE_URL")
-            or section.get("base_url")
-            or ""
-        )
-        missing: list[str] = []
-        if enabled and not model:
-            missing.append("MULTIVECTOR_MODEL_ALIAS")
-        if enabled and provider.lower() in {"http", "colpali-http", "colqwen-http"}:
-            if not base_url:
-                missing.append("MULTIVECTOR_API_BASE_URL")
-        return {
-            "enabled": enabled,
-            "provider": provider,
-            "model": model or None,
-            "base_url": base_url or None,
-            "configured": enabled and not missing,
-            "missing": missing,
-        }
 
     @property
     def trace_store_dir(self) -> Path:
@@ -334,6 +301,7 @@ class AppConfig:
             query_rewriter_config.enable_rewrite
             or query_rewriter_config.enable_multi_query
             or query_rewriter_config.enable_hyde
+            or query_rewriter_config.enable_decomposition
         )
 
     @property
@@ -394,7 +362,7 @@ class AppContainer:
     ingestion_pipeline: IngestionPipeline
     retrieval_pipeline: RetrievalPipeline
     chat_pipeline: AgenticReasoningService
-    ragas_runner: object | None
+    eval_runner: object | None
     trace_store: TraceStore
     tracing_manager: TracingManager
     diagnosis_service: object | None
@@ -472,11 +440,11 @@ class AppContainer:
                 enabled_config=config.hybrid_search_enabled,
             )
             hybrid_retriever.bootstrap_from_parsed_dir(config.parsed_dir)
-        ragas_runner = None
+        eval_runner = None
         if config.eval_enabled:
-            from app.eval.ragas_runner import RagasRunner
+            from app.eval.deepeval_runner import DeepevalRunner
 
-            ragas_runner = RagasRunner(generation_client=generation_client)
+            eval_runner = DeepevalRunner(generation_client=generation_client)
         diagnosis_service = None
         if config.diagnosis_enabled:
             from app.diagnostics.service import DiagnosisService
@@ -527,7 +495,7 @@ class AppContainer:
             retrieval_pipeline=retrieval_pipeline,
             chat_pipeline=chat_pipeline,
             graph_store=graph_store,
-            ragas_runner=ragas_runner,
+            eval_runner=eval_runner,
             trace_store=trace_store,
             tracing_manager=tracing_manager,
             diagnosis_service=diagnosis_service,

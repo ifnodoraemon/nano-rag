@@ -248,9 +248,8 @@ def build_contexts(
             "mime_type": hit.chunk.mime_type,
             "attachment_scope": metadata.get("attachment_scope"),
             "page_count": metadata.get("page_count"),
-            "late_interaction_score": metadata.get("late_interaction_score"),
-            "late_interaction_model": metadata.get("late_interaction_model"),
-            "multi_vector_model": metadata.get("multi_vector_model"),
+
+
         }
         context_entry["evidence_role"] = _evidence_role(context_entry)
         contexts.append(context_entry)

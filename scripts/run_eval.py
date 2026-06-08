@@ -11,7 +11,6 @@ if str(ROOT) not in sys.path:
 from app.core.config import AppContainer
 from app.eval.dataset import get_eval_report_dir, load_jsonl_dataset, save_json
 from app.eval.service import materialize_eval_records
-from app.eval.ragas_runner import RagasRunner
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 logger = logging.getLogger(__name__)
@@ -29,9 +28,9 @@ def main() -> int:
     parser.add_argument("--dataset", required=True, help="Path to JSONL dataset.")
     parser.add_argument("--output", required=False, help="Path to output JSON report.")
     parser.add_argument(
-        "--ragas-lib",
+        "--no-ragas-lib",
         action="store_true",
-        help="Use the RAGAS library metrics in addition to built-in deterministic metrics.",
+        help="Disable the RAGAS library metrics and only use built-in deterministic metrics.",
     )
     parser.add_argument(
         "--min-context-recall",
@@ -40,10 +39,10 @@ def main() -> int:
         help="Fail with exit code 2 if aggregate reference_context_recall is below this value.",
     )
     parser.add_argument(
-        "--min-exact-match",
+        "--min-answer-correctness",
         type=float,
         default=None,
-        help="Fail with exit code 2 if aggregate answer_exact_match is below this value.",
+        help="Fail with exit code 2 if aggregate answer_correctness is below this value.",
     )
     parser.add_argument(
         "--max-conflicting-hit-rate",
@@ -62,14 +61,17 @@ def main() -> int:
         output_path = report_dir / f"{dataset_path.stem}_manual.json"
     dataset = load_jsonl_dataset(str(dataset_path))
     container = AppContainer.from_env()
-    runner = container.ragas_runner or RagasRunner(
-        generation_client=container.generation_client
-    )
+    
+    runner = container.eval_runner
+    if not runner:
+        from app.eval.deepeval_runner import DeepevalRunner
+        runner = DeepevalRunner(generation_client=container.generation_client)
+        
     evaluated_records = asyncio.run(materialize_eval_records(container, dataset))
     report = (
-        asyncio.run(runner.run_async(evaluated_records))
-        if args.ragas_lib
-        else runner.run(evaluated_records)
+        runner.run(evaluated_records)
+        if args.no_ragas_lib
+        else asyncio.run(runner.run_async(evaluated_records))
     )
     output_path.parent.mkdir(parents=True, exist_ok=True)
     save_json(str(output_path), report)
@@ -85,7 +87,7 @@ def main() -> int:
 def _failed_thresholds(aggregate: dict, args: argparse.Namespace) -> list[str]:
     checks = [
         ("reference_context_recall", args.min_context_recall, "min"),
-        ("answer_exact_match", args.min_exact_match, "min"),
+        ("answer_correctness", args.min_answer_correctness, "min"),
         ("conflicting_hit_rate", args.max_conflicting_hit_rate, "max"),
     ]
     failures: list[str] = []

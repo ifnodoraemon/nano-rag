@@ -8,6 +8,7 @@ from time import time
 from uuid import uuid4
 
 from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, Query, Request, UploadFile
+from fastapi.responses import JSONResponse, StreamingResponse
 
 from app.api.auth import RequestContext, require_admin_key, require_api_key
 from app.core.config import AppContainer
@@ -283,6 +284,36 @@ async def rag_chat(
         kb_id=payload.kb_id,
         session_id=payload.session_id,
     )
+
+
+@router.post("/chat/stream")
+async def rag_chat_stream(
+    payload: BusinessChatRequest,
+    request: Request,
+    context: RequestContext = Depends(require_api_key),
+) -> StreamingResponse:
+    """
+    流式响应接口 (SSE)。
+    目前作为骨架存在，用于支持前端逐步迁移至流式 UX。
+    """
+    container = request.app.state.container
+    _ensure_kb_access(container, payload.kb_id, context)
+    
+    async def event_generator():
+        yield "data: {\"status\": \"thinking\", \"message\": \"Retrieving and synthesizing...\"}\n\n"
+        # Temporarily call the synchronous pipeline and dump at the end
+        response = await container.chat_pipeline.run(
+            ChatRequest(
+                query=payload.query,
+                top_k=payload.top_k,
+                kb_id=payload.kb_id,
+                session_id=payload.session_id,
+                metadata_filters=payload.metadata_filters,
+            )
+        )
+        yield f"data: {{\"status\": \"success\", \"answer\": {json.dumps(response.answer)}, \"trace_id\": \"{response.trace_id}\"}}\n\n"
+
+    return StreamingResponse(event_generator(), media_type="text/event-stream")
 
 
 @router.post(

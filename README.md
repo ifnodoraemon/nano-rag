@@ -58,7 +58,7 @@ Nano RAG 的核心原则是：**真实输入、真实索引、真实模型、真
 - 图片索引：图片文件默认生成视觉媒体 chunk；如果配置了多模态 document parser 且能抽出文字，会同时生成文本/结构 chunk，用于关键词、数字和条款检索
 - 页面/附件索引：PDF 会按页生成 `document` page attachment chunk；如果运行环境存在 `pdftoppm`，还会生成 rendered page image chunk。DOCX/XLSX/PPTX 会生成整文档 attachment chunk，并抽取内嵌图片作为 image chunk，用多模态 embedding 建立版面/视觉召回通路
 - 检索路由：LLM router 可用时使用结构化路由；不可用时通过启发式 fallback 区分 fact、table、version、conflict、definition、graph、visual 查询；visual 查询会优先使用 rendered page、embedded image、media object 和 page attachment，并尽量带上同页文本 sibling
-- Multi-vector：支持真实 ColQwen2/ColPali 视觉 patch embedding。可用 `MULTIVECTOR_PROVIDER=colqwen2|colpali` 在 GPU 镜像内本地加载 Transformers 检索模型，也可用 `MULTIVECTOR_PROVIDER=colpali-http` 调外部 GPU 服务。视觉/附件 chunk 的 patch vectors 默认按内容寻址写入 `PARSED_OUTPUT_DIR/multivectors` sidecar，只在 chunk metadata 中保留 `multi_vector_ref`、模型名、维度和数量；visual 查询下用 MaxSim late-interaction 分数参与重排。未配置时不会静默使用 fake/lightweight 向量；lightweight 只允许在显式测试开关下使用
+
 - 证据治理：生成结果带 structured supporting claims，并在后处理里标记 claim 是否有引用支撑、缺失数字和缺失术语
 - 模型路径：生成、embedding、文档解析都直连显式配置的真实 provider；默认示例只覆盖 Gemini 和 Qwen
 - 前端：React + Vite 源码位于 `frontend/` 子模块，Docker 构建为 nginx 静态站点并代理后端
@@ -100,7 +100,7 @@ DOCUMENT_PARSER_ENABLED=true
 - `generation`：OpenAI-compatible chat completions，支持 Gemini、Qwen DashScope、Qwen vLLM。
 - `embedding`：显式 provider adapter，支持 `gemini`、`dashscope`、`vllm`。
 - `document_parser`：`gemini` 使用 Gemini Files API；`qwen` 使用 OpenAI-compatible chat completions，可指向 DashScope 或 vLLM。
-- `multivector`：真实视觉多向量检索。`colqwen2`/`colpali` 使用本地 Transformers `ColQwen2ForRetrieval`/`ColPaliForRetrieval`；`colpali-http` 使用外部服务返回 patch-level vectors，适合把 GPU 检索模型和 RAG API 分开部署。
+
 - `rerank`：默认关闭；需要时显式配置 Qwen rerank endpoint 和 path。
 - `trace`：默认写入本地 `TraceStore`，可选通过 `LANGFUSE_OTEL_ENDPOINT` 对接外部 Langfuse；默认 Docker 栈不再内置 Langfuse 容器。
 
@@ -172,21 +172,7 @@ COMPOSE_DOCUMENT_PARSER_API_BASE_URL=http://vllm:8000/v1
 COMPOSE_DOCUMENT_PARSER_MODEL=Qwen/Qwen2.5-VL-7B-Instruct
 ```
 
-ColQwen2/ColPali 多向量示例：
 
-```bash
-# 推荐生产形态：独立 GPU 服务暴露 /embed，返回 {"vectors": [[...], ...]}
-COMPOSE_MULTIVECTOR_PROVIDER=colpali-http
-COMPOSE_MULTIVECTOR_MODEL_ALIAS=vidore/colqwen2-v1.0-hf
-COMPOSE_MULTIVECTOR_API_BASE_URL=http://colpali:8080
-COMPOSE_MULTIVECTOR_API_PATH=/embed
-
-# 或在 app/worker GPU 镜像内本地加载模型；该镜像需安装 requirements-multivector.txt
-COMPOSE_MULTIVECTOR_PROVIDER=colqwen2
-COMPOSE_MULTIVECTOR_MODEL_ALIAS=vidore/colqwen2-v1.0-hf
-COMPOSE_MULTIVECTOR_DEVICE_MAP=auto
-COMPOSE_MULTIVECTOR_TORCH_DTYPE=bfloat16
-```
 
 可选 Qwen rerank：
 
@@ -320,7 +306,7 @@ RAG 本体回归样本位于 `data/eval/rag_quality_regression.jsonl`，覆盖�
 - embedding 不会把多模态输入降级成文本；embedding client 必须支持 `embed_items`。
 - freshness 过滤不会追加旧版本内容作为兜底上下文；需要通过显式 `source_key` 管理版本组。
 - 附件索引默认开启：`RAG_DOCUMENT_ATTACHMENT_INDEX_ENABLED=true`。PDF page attachment 页数上限由 `RAG_PDF_ATTACHMENT_MAX_PAGES` 控制；PDF rendered image 需要运行环境存在 `pdftoppm`，并可用 `RAG_RENDERED_PAGE_IMAGE_INDEX_ENABLED`、`RAG_RENDERED_PAGE_IMAGE_DPI` 控制；OOXML 内嵌图片由 `RAG_EMBEDDED_IMAGE_INDEX_ENABLED`、`RAG_EMBEDDED_IMAGE_MAX_COUNT` 控制。
-- Multi-vector 默认不内联到 Milvus metadata，sidecar 存放在 `PARSED_OUTPUT_DIR/multivectors`，重建索引时会保留仍被引用的内容寻址 ref 并清理提交失败或旧版本留下的 ref；`RAG_MULTIVECTOR_INLINE=true` 仅适合调试或小规模实验。`MULTIVECTOR_PROVIDER=lightweight` 不是生产路径，只有设置 `RAG_ALLOW_LIGHTWEIGHT_MULTIVECTOR=true` 时才允许启动。
+
 
 ## 测试
 

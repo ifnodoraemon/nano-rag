@@ -17,13 +17,7 @@ from app.retrieval.filters import (
     sanitize_metadata_filters,
 )
 from app.retrieval.hybrid_retriever import HybridRetriever
-from app.retrieval.multivector import (
-    MultiVectorProvider,
-    MultiVectorStore,
-    late_interaction_score,
-    multivector_provider_from_config,
-    multivector_store_from_config,
-)
+
 from app.retrieval.query_rewriter import QueryRewriter
 from app.retrieval.query_router import QueryRoute, QueryRouter
 from app.retrieval.reranker import RetrievalReranker
@@ -71,8 +65,7 @@ class RetrievalPipeline:
         self.tracing_manager = tracing_manager
         self.query_router = query_router or QueryRouter()
         self.evidence_planner = evidence_planner or EvidencePlanner()
-        self.multivector_provider = multivector_provider_from_config(config)
-        self.multivector_store = multivector_store_from_config(config)
+
 
     async def run(
         self,
@@ -129,13 +122,7 @@ class RetrievalPipeline:
                 kb_id=kb_id,
                 metadata_filters=effective_metadata_filters,
             )
-            retrieved = await _apply_late_interaction_route(
-                retrieval_result.hits,
-                query,
-                query_route,
-                self.multivector_provider,
-                self.multivector_store,
-            )
+            retrieved = retrieval_result.hits
             retrieval_seconds = round(perf_counter() - retrieval_started, 4)
             rerank_seconds = 0.0
             rerank_error: str | None = None
@@ -302,43 +289,7 @@ def _prioritize_by_query_route(
     return sorted(adjusted, key=lambda item: item.score, reverse=True)
 
 
-async def _apply_late_interaction_route(
-    hits: list[SearchHit],
-    query: str,
-    query_route: QueryRoute,
-    multivector_provider: MultiVectorProvider | None = None,
-    multivector_store: MultiVectorStore | None = None,
-) -> list[SearchHit]:
-    if query_route.route != "visual" or not hits:
-        return hits
-    adjusted: list[SearchHit] = []
-    changed = False
-    for hit in hits:
-        late_score = await asyncio.to_thread(
-            late_interaction_score,
-            query,
-            hit.chunk,
-            provider=multivector_provider,
-            store=multivector_store,
-        )
-        if late_score <= 0:
-            adjusted.append(hit)
-            continue
-        changed = True
-        metadata = {**(hit.chunk.metadata or {})}
-        metadata["late_interaction_score"] = late_score
-        metadata["late_interaction_model"] = metadata.get(
-            "multi_vector_model", "unknown-multivector"
-        )
-        adjusted.append(
-            SearchHit(
-                chunk=hit.chunk.model_copy(update={"metadata": metadata}),
-                score=round((hit.score * 0.7) + (late_score * 0.3), 6),
-            )
-        )
-    if not changed:
-        return hits
-    return sorted(adjusted, key=lambda item: item.score, reverse=True)
+
 
 
 def _promote_visual_sibling_contexts(

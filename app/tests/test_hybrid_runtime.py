@@ -636,9 +636,7 @@ async def test_ingestion_pipeline_preserves_existing_document_when_upsert_fails(
         kb_id="default",
         source_path_overrides={str(source_file.resolve()): stable_source},
     )
-    original_multivectors = {
-        path.name for path in (tmp_path / "parsed" / "multivectors").glob("*.json")
-    }
+
     source_file.write_text("second replacement content", encoding="utf-8")
 
     with pytest.raises(RuntimeError, match="repository upsert failed"):
@@ -656,9 +654,7 @@ async def test_ingestion_pipeline_preserves_existing_document_when_upsert_fails(
     )
     assert parsed_artifact["document"]["content"] == "first committed content"
     assert not list((tmp_path / "parsed").glob("*.tmp"))
-    assert {
-        path.name for path in (tmp_path / "parsed" / "multivectors").glob("*.json")
-    } == original_multivectors
+
 
 
 @pytest.mark.asyncio
@@ -701,7 +697,7 @@ async def test_ingestion_pipeline_is_atomic_before_apply(
 
     parsed_dir = tmp_path / "parsed"
     assert not parsed_dir.exists() or not any(parsed_dir.glob("*.json"))
-    assert not list((parsed_dir / "multivectors").glob("*.json"))
+
     assert not repository.documents
     assert not repository.entries
     assert not hybrid.bm25_index.search("safe", top_k=5)

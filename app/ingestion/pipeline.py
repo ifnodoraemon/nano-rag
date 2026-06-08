@@ -34,11 +34,7 @@ from app.model_client.multimodal_embedding import (
     VideoItem,
 )
 from app.retrieval.hybrid_retriever import HybridRetriever
-from app.retrieval.multivector import (
-    attach_chunk_multivectors,
-    multivector_provider_from_config,
-    multivector_store_from_config,
-)
+
 from app.retrieval.graph_store import GraphStore
 from app.schemas.chunk import Chunk
 from app.schemas.document import Document, IngestResponse
@@ -147,8 +143,7 @@ class IngestionPipeline:
         self.wiki_searcher = wiki_searcher
         self.structured_parser = StructuredDocumentParser(document_parser)
         self.graph_extractor = GraphExtractor(generation_client)
-        self.multivector_provider = multivector_provider_from_config(config)
-        self.multivector_store = multivector_store_from_config(config)
+
 
     async def run(
         self,
@@ -183,7 +178,7 @@ class IngestionPipeline:
                         doc_count += 1
                         chunk_count += len(prepared.chunks)
             except Exception:
-                self._delete_prepared_multivector_refs(prepared_documents)
+
                 raise
 
             self.config.parsed_dir.mkdir(parents=True, exist_ok=True)
@@ -198,13 +193,8 @@ class IngestionPipeline:
                     kb_id=kb_id,
                     active_doc_id=prepared.doc_id,
                 )
-                old_multivector_refs = self._committed_multivector_refs(
-                    prepared.source_path,
-                    kb_id=kb_id,
-                    active_doc_id=prepared.doc_id,
-                )
                 new_chunk_ids = {chunk.chunk_id for chunk in prepared.chunks}
-                new_multivector_refs = _chunk_multivector_refs(prepared.chunks)
+
                 upsert_started = False
                 try:
                     self.repository.upsert(
@@ -227,9 +217,7 @@ class IngestionPipeline:
                             prepared.source_path,
                             exc,
                         )
-                    self.multivector_store.delete_refs(
-                        old_multivector_refs - new_multivector_refs
-                    )
+
                     if self.hybrid_retriever:
                         try:
                             self.hybrid_retriever.remove_by_source(
@@ -268,9 +256,7 @@ class IngestionPipeline:
                             )
                 except Exception:
                     artifact_tmp.unlink(missing_ok=True)
-                    self.multivector_store.delete_refs(
-                        new_multivector_refs - old_multivector_refs
-                    )
+
                     if upsert_started:
                         self._rollback_uncommitted_vector_state(
                             prepared.source_path,
@@ -386,7 +372,7 @@ class IngestionPipeline:
             raise ModelGatewayError(
                 "embedding service returned an inconsistent number of vectors"
             )
-        chunks = await self._attach_multivectors(chunks)
+
         return PreparedDocument(
             source_path=source_path,
             doc_id=doc_id,
@@ -982,7 +968,7 @@ class IngestionPipeline:
             raise ModelGatewayError(
                 "embedding service returned an inconsistent number of vectors"
             )
-        chunks = await self._attach_multivectors(chunks)
+
         return PreparedDocument(
             source_path=source_path,
             doc_id=doc_id,
@@ -992,20 +978,7 @@ class IngestionPipeline:
             structured_document=structured_document,
         )
 
-    async def _attach_multivectors(self, chunks: list[Chunk]) -> list[Chunk]:
-        if self.multivector_provider is None:
-            return chunks
-        enriched: list[Chunk] = []
-        for chunk in chunks:
-            enriched.append(
-                await asyncio.to_thread(
-                    attach_chunk_multivectors,
-                    chunk,
-                    provider=self.multivector_provider,
-                    store=self.multivector_store,
-                )
-            )
-        return enriched
+
 
     async def _try_parse_image_text(
         self,
@@ -1181,49 +1154,7 @@ class IngestionPipeline:
             if isinstance(chunk, dict) and chunk.get("chunk_id")
         }
 
-    def _committed_multivector_refs(
-        self,
-        source_path: str,
-        kb_id: str,
-        active_doc_id: str,
-    ) -> set[str]:
-        artifact = self.config.parsed_dir / f"{active_doc_id}.json"
-        if not artifact.exists():
-            return set()
-        try:
-            payload = json.loads(artifact.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            return set()
-        document = payload.get("document") if isinstance(payload, dict) else None
-        metadata = document.get("metadata", {}) if isinstance(document, dict) else {}
-        if not (
-            isinstance(document, dict)
-            and document.get("source_path") == source_path
-            and metadata.get("kb_id", "default") == kb_id
-        ):
-            return set()
-        raw_chunks = payload.get("chunks", []) if isinstance(payload, dict) else []
-        if not isinstance(raw_chunks, list):
-            return set()
-        refs: set[str] = set()
-        for chunk in raw_chunks:
-            if not isinstance(chunk, dict):
-                continue
-            metadata = chunk.get("metadata")
-            if not isinstance(metadata, dict):
-                continue
-            ref = metadata.get("multi_vector_ref")
-            if isinstance(ref, str) and ref:
-                refs.add(ref)
-        return refs
 
-    def _delete_prepared_multivector_refs(
-        self, prepared_documents: list[PreparedDocument]
-    ) -> None:
-        refs: set[str] = set()
-        for prepared in prepared_documents:
-            refs.update(_chunk_multivector_refs(prepared.chunks))
-        self.multivector_store.delete_refs(refs)
 
     def _rollback_uncommitted_vector_state(
         self,
@@ -1481,10 +1412,4 @@ def _file_sha256(path: Path) -> str | None:
     return digest.hexdigest()
 
 
-def _chunk_multivector_refs(chunks: list[Chunk]) -> set[str]:
-    refs: set[str] = set()
-    for chunk in chunks:
-        ref = (chunk.metadata or {}).get("multi_vector_ref")
-        if isinstance(ref, str) and ref:
-            refs.add(ref)
-    return refs
+

@@ -36,7 +36,13 @@ class FakeGenerationClient:
     async def generate(self, messages: list[dict[str, str]]) -> dict[str, str]:
         prompt = messages[0]["content"]
         self.calls.append(prompt)
+        if "query decomposition assistant" in prompt:
+            return {"content": "1. What is the vacation policy?\n2. What is the reimbursement process?"}
         if "Rewritten query:" in prompt:
+            if "vacation policy" in prompt:
+                return {"content": "vacation carryover"}
+            if "reimbursement process" in prompt:
+                return {"content": "expense reimbursement steps"}
             return {"content": "vacation carryover"}
         if "Generate 2 queries" in prompt:
             return {"content": "1. PTO carryover\n2. leave rollover"}
@@ -87,3 +93,23 @@ def test_query_rewriter_degrades_on_generation_error() -> None:
     assert plan.rewritten_query is None
     assert plan.retrieval_queries == ["original query"]
     assert plan.hyde_query is None
+
+
+def test_query_rewriter_build_plan_with_decomposition() -> None:
+    generation_client = FakeGenerationClient()
+    rewriter = QueryRewriter(
+        generation_client=generation_client,
+        config=QueryRewriterConfig(
+            enable_decomposition=True,
+            enable_rewrite=True,
+            enable_multi_query=False,
+            enable_hyde=False,
+        ),
+    )
+
+    plan = asyncio.run(rewriter.build_plan("vacation policy and reimbursement process"))
+
+    assert plan.retrieval_queries == [
+        "vacation carryover",
+        "expense reimbursement steps",
+    ]

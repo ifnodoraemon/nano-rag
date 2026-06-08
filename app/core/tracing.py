@@ -179,6 +179,17 @@ class TraceStore(_PersistedStore[TraceRecord]):
         with self._lock:
             return self._records.get(trace_id)
 
+    def get_history(self, session_id: str, limit: int = 3) -> list[TraceRecord]:
+        if not session_id:
+            return []
+        with self._lock:
+            matches = [
+                record
+                for record in self._records.values()
+                if record.session_id == session_id and record.answer
+            ]
+            return matches[-limit:]
+
     def list(
         self,
         page: int = 1,

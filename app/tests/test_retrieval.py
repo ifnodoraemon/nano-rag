@@ -342,8 +342,7 @@ async def test_retrieval_pipeline_uses_ai_route_when_rerank_is_disabled(monkeypa
 @pytest.mark.asyncio
 async def test_retrieval_pipeline_prioritizes_visual_chunks_for_visual_route(monkeypatch) -> None:
     monkeypatch.setenv("DISABLE_RERANK", "1")
-    monkeypatch.setenv("MULTIVECTOR_PROVIDER", "lightweight")
-    monkeypatch.setenv("RAG_ALLOW_LIGHTWEIGHT_MULTIVECTOR", "true")
+
     repository = InMemoryVectorRepository()
     document = Document(
         doc_id="doc",
@@ -374,8 +373,7 @@ async def test_retrieval_pipeline_prioritizes_visual_chunks_for_visual_route(mon
                 "chunk_kind": "rendered_page_image",
                 "chunk_strategy": "rendered_page_image",
                 "attachment_scope": "page_image",
-                "multi_vector": [[1.0, 0.0], [0.0, 1.0]],
-                "multi_vector_model": "test-multivector",
+
             },
             modality="image",
             media_uri="/tmp/contract-page.png",
@@ -411,7 +409,7 @@ async def test_retrieval_pipeline_prioritizes_visual_chunks_for_visual_route(mon
 
     assert contexts[0]["chunk_id"] == "page-image"
     assert contexts[0]["chunk_strategy"] == "rendered_page_image"
-    assert contexts[0]["late_interaction_score"] is not None
+
     assert trace["reranked_chunk_ids"] == ["page-image", "text"]
 
 

@@ -28,6 +28,7 @@ class QueryRewriterConfig:
     enable_multi_query: bool = False
     multi_query_count: int = 3
     enable_hyde: bool = False
+    enable_decomposition: bool = False
 
     @classmethod
     def from_env(cls) -> "QueryRewriterConfig":
@@ -38,6 +39,8 @@ class QueryRewriterConfig:
             in ("true", "1", "yes"),
             multi_query_count=int(os.getenv("RAG_MULTI_QUERY_COUNT", "3")),
             enable_hyde=os.getenv("RAG_HYDE_ENABLED", "false").lower()
+            in ("true", "1", "yes"),
+            enable_decomposition=os.getenv("RAG_QUERY_DECOMPOSITION_ENABLED", "false").lower()
             in ("true", "1", "yes"),
         )
 
@@ -63,6 +66,14 @@ Input JSON:
 {input_json}
 
 Generate a brief hypothetical document that answers this query:"""
+
+DECOMPOSITION_PROMPT = """You are a query decomposition assistant. If the input query contains multiple independent questions or intents, break them down into separate, self-contained queries. If it is a single question, return just that question. Each sub-query must be fully self-contained without pronouns.
+
+Input JSON:
+{input_json}
+
+Generate independent queries, one per line:
+1."""
 
 
 class QueryRewriter:
@@ -125,16 +136,50 @@ class QueryRewriter:
             logger.warning("hyde generation failed: %s", exc)
             return query
 
+    async def decompose(self, query: str) -> list[str]:
+        if not self.generation_client or not self.config.enable_decomposition:
+            return [query]
+        try:
+            prompt = DECOMPOSITION_PROMPT.format(input_json=_query_input_json(query))
+            result = await self.generation_client.generate(
+                [{"role": "user", "content": prompt}]
+            )
+            content = result.get("content", "").strip()
+            queries = []
+            for line in content.split("\n"):
+                line = line.strip()
+                if line and len(line) > 3:
+                    cleaned = LIST_ITEM_PREFIX_RE.sub("", line, count=1).strip()
+                    if cleaned:
+                        queries.append(cleaned)
+            return queries if queries else [query]
+        except Exception as exc:
+            logger.warning("query decomposition failed: %s", exc)
+            return [query]
+
     async def build_plan(self, query: str) -> QueryExpansionPlan:
-        rewritten = await self.rewrite(query)
-        retrieval_queries = [rewritten]
-        if self.config.enable_multi_query:
-            retrieval_queries = await self.generate_multi_queries(rewritten)
-        hyde_query: str | None = None
-        if self.config.enable_hyde:
-            generated_hyde = await self.generate_hyde(rewritten)
-            if generated_hyde and generated_hyde.strip():
-                hyde_query = generated_hyde.strip()
+        decomposed = await self.decompose(query)
+        retrieval_queries: list[str] = []
+        rewritten_query = None
+        hyde_query = None
+
+        for sub_query in decomposed:
+            rewritten = await self.rewrite(sub_query)
+            if not rewritten_query and rewritten != query:
+                rewritten_query = rewritten
+            
+            sub_retrieval_queries = [rewritten]
+            if self.config.enable_multi_query:
+                sub_retrieval_queries = await self.generate_multi_queries(rewritten)
+            
+            for q in sub_retrieval_queries:
+                retrieval_queries.append(q)
+
+            if self.config.enable_hyde and not hyde_query:
+                generated_hyde = await self.generate_hyde(rewritten)
+                if generated_hyde and generated_hyde.strip() and generated_hyde.strip() != rewritten:
+                    hyde_query = generated_hyde.strip()
+
         unique_queries: list[str] = []
         seen: set[str] = set()
         for candidate in retrieval_queries:
@@ -149,9 +194,9 @@ class QueryRewriter:
         if not unique_queries:
             unique_queries = [query]
         return QueryExpansionPlan(
-            rewritten_query=rewritten if rewritten != query else None,
+            rewritten_query=rewritten_query,
             retrieval_queries=unique_queries,
-            hyde_query=hyde_query if hyde_query and hyde_query != rewritten else None,
+            hyde_query=hyde_query,
         )
 
 
