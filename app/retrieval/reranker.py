@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from datetime import date, datetime
 
 from app.model_client.rerank import RerankClient
@@ -41,7 +42,10 @@ class RetrievalReranker:
     ) -> list[SearchHit]:
         results = await self.client.rerank(query, [hit.chunk.text for hit in hits], top_k)
         reranked: list[SearchHit] = []
+        threshold = float(os.getenv("RAG_RERANK_THRESHOLD", "0.3"))
         for result in results:
+            if result.score < threshold:
+                continue
             hit = hits[result.index]
             reranked.append(
                 SearchHit(
