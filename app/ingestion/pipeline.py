@@ -77,8 +77,8 @@ DOCUMENT_ATTACHMENT_MIME_TYPES = {
     ".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
     ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
 }
-DEFAULT_TEXT_CHUNK_MAX_CHARS = 6000
-DEFAULT_TEXT_CHUNK_OVERLAP_CHARS = 300
+DEFAULT_TEXT_CHUNK_MAX_CHARS = 1500
+DEFAULT_TEXT_CHUNK_OVERLAP_CHARS = 150
 DEFAULT_CODE_CHUNK_MAX_CHARS = 3000
 DEFAULT_CODE_CHUNK_OVERLAP_CHARS = 400
 DEFAULT_LOG_CHUNK_MAX_CHARS = 4000

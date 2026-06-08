@@ -25,8 +25,8 @@ agent:
 
 hybrid_search:
   enabled: ${RAG_HYBRID_SEARCH_ENABLED:-true}
-  dense_weight: 0.7
-  sparse_weight: 0.3
+  dense_weight: 0.5
+  sparse_weight: 0.5
 
 evidence_planner:
   enabled: ${RAG_EVIDENCE_PLANNER_ENABLED:-true}
