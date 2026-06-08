@@ -80,7 +80,8 @@ class DeepevalRunner:
         ]
 
         results = []
-        for record in records:
+        for i, record in enumerate(records):
+            logger.info(f"Evaluating record {i+1}/{len(records)}: {record.get('query')}")
             contexts = record.get("retrieved_contexts", []) or []
             if contexts and isinstance(contexts[0], dict):
                 contexts = [str(c.get("text", c)) for c in contexts]
@@ -98,7 +99,8 @@ class DeepevalRunner:
             )
             
             row_metrics = {}
-            for metric in metrics:
+            
+            async def evaluate_metric(metric):
                 try:
                     await metric.a_measure(test_case)
                     name = metric.__class__.__name__.replace("Metric", "").lower()
@@ -108,9 +110,15 @@ class DeepevalRunner:
                         name = "context_recall"
                     elif name == "answerrelevancy":
                         name = "answer_relevancy"
-                    row_metrics[name] = round(metric.score, 4)
+                    return name, round(metric.score, 4)
                 except Exception as e:
                     logger.error(f"Error computing metric {metric.__class__.__name__}: {e}")
+                    return None, None
+            
+            metric_results = await asyncio.gather(*(evaluate_metric(m) for m in metrics))
+            for name, score in metric_results:
+                if name:
+                    row_metrics[name] = score
             
             entry = {**self._builtin_fields(record), **row_metrics}
             results.append(entry)

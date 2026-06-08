@@ -12,10 +12,10 @@ fi
 
 if [ -f "$DATASET" ]; then
     echo "Running RAGAS evaluation on regression dataset..."
-    python scripts/run_eval.py --dataset "$DATASET" --min-answer-relevancy 0.7
+    python -u scripts/run_eval.py --dataset "$DATASET" --min-answer-relevancy 0.7
 else
     echo "No negative feedback available to form regression dataset. Running manual dataset..."
-    python scripts/run_eval.py --dataset data/eval/employee_handbook_eval.jsonl --min-answer-relevancy 0.7
+    python -u scripts/run_eval.py --dataset data/eval/employee_handbook_eval.jsonl --min-answer-relevancy 0.7
 fi
 
 echo "CI Evaluation passed!"

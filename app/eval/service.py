@@ -88,11 +88,15 @@ def _claim_verification_stats(claims: object) -> dict[str, object]:
     }
 
 
+import logging
+logger = logging.getLogger(__name__)
+
 async def materialize_eval_records(
     container: AppContainer, records: list[dict]
 ) -> list[dict]:
     prepared_records: list[dict] = []
     for index, record in enumerate(records):
+        logger.info(f"Materializing record {index+1}/{len(records)}: {record.get('query')}")
         prepared = dict(record)
         prepared.setdefault("sample_id", f"sample-{index + 1}")
         query = str(prepared.get("query", "")).strip()
