@@ -184,10 +184,70 @@ class AgenticReasoningService:
             agent_state=agent_state,
         )
         generation_started = perf_counter()
-        result = await self.generation_client.generate(messages)
+        schema = {
+            "type": "json_schema",
+            "json_schema": {
+                "name": "answer_structure",
+                "schema": {
+                    "type": "object",
+                    "properties": {
+                        "is_answerable": {
+                            "type": "boolean",
+                            "description": "如果上下文中完全找不到问题核心实体，请设为 false"
+                        },
+                        "missing_entities": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "列出找不到的具体专有名词，如果找到了则为空数组"
+                        },
+                        "extracted_answer": {
+                            "type": "string",
+                            "description": "带引用的极简答案，例如：xxx为xxx [C1]。"
+                        },
+                        "supporting_claims": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "如: - [factual] <证据支撑点 1> [C#]"
+                        }
+                    },
+                    "required": ["is_answerable", "missing_entities", "extracted_answer", "supporting_claims"],
+                    "additionalProperties": False
+                },
+                "strict": True
+            }
+        }
+        
+        result = await self.generation_client.generate(messages, response_format=schema)
         generation_seconds = round(perf_counter() - generation_started, 4)
+        
+        raw_content = str(result["content"]).strip()
+        if raw_content.startswith("```json"):
+            raw_content = raw_content[7:]
+            if raw_content.endswith("```"):
+                raw_content = raw_content[:-3]
+            raw_content = raw_content.strip()
+            
+        try:
+            parsed = json.loads(raw_content)
+            is_answerable = parsed.get("is_answerable", True)
+            if not is_answerable:
+                missing = parsed.get("missing_entities", [])
+                if missing:
+                    ans = f"文档中未包含关于“{'、'.join(missing)}”的相关信息。"
+                else:
+                    ans = "文档中未包含相关信息。"
+                fake_answer = f"Final Answer:\n{ans}\n\nSupporting Claims:\n- None"
+            else:
+                ans = parsed.get("extracted_answer", "")
+                claims_list = parsed.get("supporting_claims", [])
+                claims = "\n".join(claims_list) if claims_list else "- None"
+                fake_answer = f"Final Answer:\n{ans}\n\nSupporting Claims:\n{claims}"
+        except Exception as e:
+            logger.warning(f"Failed to parse structured JSON: {e}, falling back to raw")
+            fake_answer = f"Final Answer:\n{raw_content}\n\nSupporting Claims:\n- None"
+
         response = self.answer_formatter.format(
-            answer=str(result["content"]),
+            answer=fake_answer,
             contexts=contexts,
             trace_id=state.get("trace_id"),
         )
