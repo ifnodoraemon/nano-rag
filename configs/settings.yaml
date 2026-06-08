@@ -1,10 +1,10 @@
 retrieval:
   top_k: 20
   rerank_top_k: 10
-  final_contexts: 6
+  final_contexts: 10
   context_quota:
     topic: 2
-    raw: 6
+    raw: 10
     source: 1
     index: 1
   metadata_rerank:

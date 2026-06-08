@@ -33,14 +33,14 @@ class QueryRewriterConfig:
     @classmethod
     def from_env(cls) -> "QueryRewriterConfig":
         return cls(
-            enable_rewrite=os.getenv("RAG_QUERY_REWRITE_ENABLED", "false").lower()
+            enable_rewrite=os.getenv("RAG_QUERY_REWRITE_ENABLED", "true").lower()
             in ("true", "1", "yes"),
-            enable_multi_query=os.getenv("RAG_MULTI_QUERY_ENABLED", "false").lower()
+            enable_multi_query=os.getenv("RAG_MULTI_QUERY_ENABLED", "true").lower()
             in ("true", "1", "yes"),
             multi_query_count=int(os.getenv("RAG_MULTI_QUERY_COUNT", "3")),
-            enable_hyde=os.getenv("RAG_HYDE_ENABLED", "false").lower()
+            enable_hyde=os.getenv("RAG_HYDE_ENABLED", "true").lower()
             in ("true", "1", "yes"),
-            enable_decomposition=os.getenv("RAG_QUERY_DECOMPOSITION_ENABLED", "false").lower()
+            enable_decomposition=os.getenv("RAG_QUERY_DECOMPOSITION_ENABLED", "true").lower()
             in ("true", "1", "yes"),
         )
 
