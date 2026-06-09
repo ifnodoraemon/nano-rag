@@ -221,7 +221,8 @@ def _vllm_config(
 
 
 @pytest.mark.asyncio
-async def test_dashscope_text_payload_shape() -> None:
+async def test_dashscope_text_payload_shape(monkeypatch) -> None:
+    monkeypatch.delenv("EMBEDDING_MODEL_ALIAS", raising=False)
     config = _dashscope_config(dimension=8)
     client = DashScopeMultimodalEmbedding(config)
     captured: list[httpx.Request] = []
@@ -283,7 +284,8 @@ async def test_dashscope_missing_key_raises() -> None:
 
 
 @pytest.mark.asyncio
-async def test_vllm_messages_style_payload() -> None:
+async def test_vllm_messages_style_payload(monkeypatch) -> None:
+    monkeypatch.delenv("EMBEDDING_MODEL_ALIAS", raising=False)
     config = _vllm_config(dimension=4)
     client = VLLMMultimodalEmbedding(config)
     captured: list[httpx.Request] = []

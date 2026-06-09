@@ -8,12 +8,12 @@ from time import time
 from uuid import uuid4
 
 from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, Query, Request, UploadFile
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import StreamingResponse
 
 from app.api.auth import RequestContext, require_admin_key, require_api_key
 from app.core.config import AppContainer
 from app.diagnostics.service import DiagnosisService
-from app.eval.ragas_runner import RagasRunner
+from app.eval.deepeval_runner import DeepevalRunner
 from app.ingestion.executor import submit_ingest_paths
 from app.ingestion.loader import (
     SUPPORTED_EXTENSIONS,
@@ -94,8 +94,8 @@ def _ensure_kb_access(container, kb_id: str, context: RequestContext | None = No
         )
 
 
-def _require_eval_runner(container: AppContainer) -> RagasRunner:
-    runner = getattr(container, "ragas_runner", None)
+def _require_eval_runner(container: AppContainer) -> DeepevalRunner:
+    runner = getattr(container, "eval_runner", None)
     if runner is None:
         raise HTTPException(
             status_code=503,
@@ -115,11 +115,11 @@ def _require_diagnosis_service(container: AppContainer) -> DiagnosisService:
 
 
 async def _run_eval_report(
-    ragas_runner: RagasRunner, records: list[dict], use_ragas_lib: bool
+    eval_runner: DeepevalRunner, records: list[dict], use_ragas_lib: bool
 ) -> dict:
     if use_ragas_lib:
-        return await ragas_runner.run_async(records)
-    return ragas_runner.run(records)
+        return await eval_runner.run_async(records)
+    return eval_runner.run(records)
 
 
 def _ensure_trace_scope(
@@ -294,24 +294,57 @@ async def rag_chat_stream(
 ) -> StreamingResponse:
     """
     流式响应接口 (SSE)。
-    目前作为骨架存在，用于支持前端逐步迁移至流式 UX。
+    支持通过 LangGraph stream_queue 进行打字机式流式输出。
     """
     container = request.app.state.container
     _ensure_kb_access(container, payload.kb_id, context)
     
     async def event_generator():
-        yield "data: {\"status\": \"thinking\", \"message\": \"Retrieving and synthesizing...\"}\n\n"
-        # Temporarily call the synchronous pipeline and dump at the end
-        response = await container.chat_pipeline.run(
-            ChatRequest(
-                query=payload.query,
-                top_k=payload.top_k,
-                kb_id=payload.kb_id,
-                session_id=payload.session_id,
-                metadata_filters=payload.metadata_filters,
-            )
+        import asyncio
+        from time import perf_counter
+        from app.schemas.chat import ChatResponse
+        
+        try:
+            yield "data: {\"status\": \"thinking\", \"message\": \"Retrieving and synthesizing...\"}\n\n"
+        except asyncio.CancelledError:
+            return
+            
+        queue = asyncio.Queue()
+        payload_copy = ChatRequest(
+            query=payload.query,
+            top_k=payload.top_k,
+            kb_id=payload.kb_id,
+            session_id=payload.session_id,
+            metadata_filters=payload.metadata_filters,
         )
-        yield f"data: {{\"status\": \"success\", \"answer\": {json.dumps(response.answer)}, \"trace_id\": \"{response.trace_id}\"}}\n\n"
+        
+        state_input = {"payload": payload_copy, "started_at": perf_counter(), "stream_queue": queue}
+        
+        async def run_workflow():
+            try:
+                state = await container.chat_pipeline.workflow.ainvoke(state_input)
+                await queue.put(state["response"])
+            except Exception as e:
+                import logging
+                logging.getLogger(__name__).error(f"Stream error: {e}")
+                await queue.put(e)
+                
+        task = asyncio.create_task(run_workflow())
+        
+        try:
+            while True:
+                chunk = await queue.get()
+                if isinstance(chunk, Exception):
+                    yield f"data: {{\"status\": \"error\", \"message\": \"{str(chunk)}\"}}\n\n"
+                    break
+                elif isinstance(chunk, ChatResponse):
+                    yield f"data: {{\"status\": \"success\", \"answer\": {json.dumps(chunk.answer)}, \"trace_id\": \"{chunk.trace_id}\"}}\n\n"
+                    break
+                elif isinstance(chunk, str):
+                    yield f"data: {{\"status\": \"generating\", \"chunk\": {json.dumps(chunk)}}}\n\n"
+        except asyncio.CancelledError:
+            task.cancel()
+            raise
 
     return StreamingResponse(event_generator(), media_type="text/event-stream")
 
@@ -711,7 +744,7 @@ async def rag_benchmark(
     context: RequestContext = Depends(require_admin_key),
 ) -> BenchmarkRunResponse:
     container = request.app.state.container
-    ragas_runner = _require_eval_runner(container)
+    eval_runner = _require_eval_runner(container)
     diagnosis_service = _require_diagnosis_service(container)
     try:
         dataset_path = resolve_eval_dataset_path(payload.dataset_path)
@@ -723,7 +756,7 @@ async def rag_benchmark(
         _ensure_kb_access(container, kb_id, context)
     evaluated_records = await materialize_eval_records(container, dataset)
     eval_report = await _run_eval_report(
-        ragas_runner, evaluated_records, payload.use_ragas_lib
+        eval_runner, evaluated_records, payload.use_ragas_lib
     )
     benchmark_report = build_benchmark_report(
         dataset_path=str(dataset_path),

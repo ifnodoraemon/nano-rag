@@ -54,7 +54,7 @@ def _load_yaml(path: Path) -> dict[str, Any]:
     return yaml.safe_load(_render_env(path.read_text())) or {}
 
 
-INSECURE_DEFAULT_KEYS = frozenset({"change-me", "sk-xxx", "your-api-key", ""})
+INSECURE_DEFAULT_KEYS = frozenset({"change-me", "sk-xxx", "your-api-key", "", "nano-rag-local"})
 
 
 @dataclass

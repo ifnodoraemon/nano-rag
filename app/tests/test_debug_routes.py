@@ -27,7 +27,6 @@ from app.eval.dataset import (
     list_eval_reports,
     resolve_eval_dataset_path,
 )
-from app.eval.ragas_runner import RagasRunner
 from app.schemas.diagnosis import AutoDiagnosisRequest, EvalDiagnosisRequest, TraceDiagnosisRequest
 from app.schemas.eval import EvalRunRequest
 
@@ -67,7 +66,7 @@ async def test_benchmark_report_detail_rejects_path_outside_benchmark_dir() -> N
 @pytest.mark.asyncio
 async def test_run_eval_rejects_dataset_outside_eval_dir() -> None:
     container = SimpleNamespace(
-        ragas_runner=SimpleNamespace(
+        eval_runner=SimpleNamespace(
             run=lambda records: {
                 "status": "ok",
                 "records": len(records),
@@ -106,7 +105,7 @@ async def test_run_eval_uses_ragas_lib_when_requested(monkeypatch, tmp_path) -> 
         async def run_async(self, records):  # noqa: ANN001
             return {"mode": "ragas", "records": len(records)}
 
-    container = SimpleNamespace(ragas_runner=FakeRunner())
+    container = SimpleNamespace(eval_runner=FakeRunner())
 
     response = await run_eval(
         EvalRunRequest(dataset_path=str(dataset_path), use_ragas_lib=True),
@@ -200,7 +199,10 @@ async def test_generated_eval_report_preserves_kb_id_for_scoped_filtering(
 ) -> None:
     report_dir = tmp_path / "reports"
     report_dir.mkdir()
-    report = RagasRunner().run(
+    class FakeRunner:
+        def run(self, records):
+            return {"results": records}
+    report = FakeRunner().run(
         [
             {
                 "sample_id": "other",
@@ -436,7 +438,7 @@ async def test_run_eval_rejects_dataset_kb_outside_context(monkeypatch, tmp_path
     monkeypatch.setenv("EVAL_DATASET_DIR", str(dataset_dir))
 
     container = SimpleNamespace(
-        ragas_runner=SimpleNamespace(run=lambda records: {"results": records}),
+        eval_runner=SimpleNamespace(run=lambda records: {"results": records}),
         knowledge_base_catalog=FakeCatalog(),
     )
 
@@ -452,7 +454,7 @@ async def test_run_eval_rejects_dataset_kb_outside_context(monkeypatch, tmp_path
 
 @pytest.mark.asyncio
 async def test_run_eval_returns_503_when_eval_disabled() -> None:
-    container = SimpleNamespace(ragas_runner=None)
+    container = SimpleNamespace(eval_runner=None)
 
     with pytest.raises(HTTPException) as exc_info:
         await run_eval(

@@ -86,6 +86,8 @@ def test_capability_gateway_requires_explicit_capability_config() -> None:
 @pytest.mark.asyncio
 async def test_rerank_client_uses_configured_qwen_endpoint(monkeypatch) -> None:
     monkeypatch.delenv("DISABLE_RERANK", raising=False)
+    monkeypatch.delenv("RERANK_API_BASE_URL", raising=False)
+    monkeypatch.delenv("RERANK_API_PATH", raising=False)
     config = AppConfig(
         config_dir=None,  # type: ignore[arg-type]
         settings={"timeout": {"rerank_seconds": 5}},
@@ -179,7 +181,7 @@ async def test_app_container_close_accepts_sync_repository_close() -> None:
         ingestion_pipeline=None,  # type: ignore[arg-type]
         retrieval_pipeline=None,  # type: ignore[arg-type]
         chat_pipeline=None,  # type: ignore[arg-type]
-        ragas_runner=None,
+        eval_runner=None,
         trace_store=None,  # type: ignore[arg-type]
         tracing_manager=None,  # type: ignore[arg-type]
         diagnosis_service=None,

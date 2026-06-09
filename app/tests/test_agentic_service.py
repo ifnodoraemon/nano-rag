@@ -61,7 +61,7 @@ class FakeRetrievalPipeline:
 class FakeGenerationClient:
     alias = "fake-generator"
 
-    async def generate(self, messages):  # noqa: ANN001
+    async def generate(self, messages, **kwargs):  # noqa: ANN001
         rendered = str(messages)
         if "Break the user question" in rendered:
             return {
@@ -91,14 +91,14 @@ class FakeGenerationClient:
 
 
 class BrokenPlannerGenerationClient:
-    async def generate(self, messages):  # noqa: ANN001, ARG002
+    async def generate(self, messages, **kwargs):  # noqa: ANN001, ARG002
         raise RuntimeError("planner unavailable")
 
 
 class StringBooleanVerifierClient:
     alias = "string-bool-verifier"
 
-    async def generate(self, messages):  # noqa: ANN001, ARG002
+    async def generate(self, messages, **kwargs):  # noqa: ANN001, ARG002
         return {
             "content": (
                 '{"sufficient":"false","coverage_ratio":"0.25",'

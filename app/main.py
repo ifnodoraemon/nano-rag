@@ -16,6 +16,7 @@ from starlette.types import ASGIApp
 from app.api.auth import is_auth_disabled, require_api_key
 from app.api.routes_business import router as business_router
 from app.api.routes_debug import router as debug_router
+from app.api.routes_openai import router as openai_router
 from app.core.config import AppContainer
 from app.core.exceptions import ConfigurationError, ModelGatewayError, ParsingError
 from app.core.logging import configure_logging
@@ -66,6 +67,7 @@ app.add_middleware(SecurityHeadersMiddleware)
 
 app.include_router(debug_router)
 app.include_router(business_router)
+app.include_router(openai_router)
 
 
 def _log_startup_readiness(config) -> None:  # noqa: ANN001

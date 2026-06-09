@@ -1,14 +1,10 @@
 import asyncio
 import logging
-import math
-import os
-from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
-from app.utils.text import normalize_text, normalize_for_comparison
 
 if TYPE_CHECKING:
-    from app.model_client.generation import GenerationClient
+    pass
 
 logger = logging.getLogger(__name__)
 
@@ -88,8 +84,7 @@ class DeepevalRunner:
             else:
                 contexts = [str(c) for c in contexts]
 
-            reference_contexts = record.get("reference_contexts", []) or []
-            reference_contexts_strs = [str(c) for c in reference_contexts] if reference_contexts else None
+
 
             test_case = LLMTestCase(
                 input=str(record.get("query", "")),

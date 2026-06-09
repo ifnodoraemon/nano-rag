@@ -3,12 +3,17 @@ import asyncio
 from app.retrieval.query_rewriter import QueryRewriter, QueryRewriterConfig
 
 
-def test_query_rewriter_config_defaults() -> None:
+def test_query_rewriter_config_defaults(monkeypatch) -> None:
+    monkeypatch.delenv("RAG_QUERY_REWRITE_ENABLED", raising=False)
+    monkeypatch.delenv("RAG_MULTI_QUERY_ENABLED", raising=False)
+    monkeypatch.delenv("RAG_HYDE_ENABLED", raising=False)
+    monkeypatch.delenv("RAG_QUERY_DECOMPOSITION_ENABLED", raising=False)
     config = QueryRewriterConfig.from_env()
-    assert config.enable_rewrite is False
-    assert config.enable_multi_query is False
+    assert config.enable_rewrite is True
+    assert config.enable_multi_query is True
     assert config.multi_query_count == 3
-    assert config.enable_hyde is False
+    assert config.enable_hyde is True
+    assert config.enable_decomposition is True
 
 
 def test_query_rewriter_returns_original_when_disabled() -> None:

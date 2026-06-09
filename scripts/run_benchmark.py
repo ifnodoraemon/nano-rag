@@ -48,11 +48,11 @@ def main() -> int:
     container = AppContainer.from_env()
     dataset = load_jsonl_dataset(str(dataset_path))
     evaluated_records = asyncio.run(materialize_eval_records(container, dataset))
-    runner = container.ragas_runner
+    runner = container.eval_runner
     if runner is None:
-        from app.eval.ragas_runner import RagasRunner
+        from app.eval.deepeval_runner import DeepevalRunner
 
-        runner = RagasRunner(generation_client=container.generation_client)
+        runner = DeepevalRunner(generation_client=container.generation_client)
     eval_report = (
         asyncio.run(runner.run_async(evaluated_records))
         if args.ragas_lib

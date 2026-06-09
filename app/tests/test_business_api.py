@@ -410,7 +410,7 @@ async def test_business_benchmark_rejects_dataset_kb_outside_context(
     monkeypatch.setenv("EVAL_DATASET_DIR", str(dataset_dir))
 
     container = SimpleNamespace(
-        ragas_runner=SimpleNamespace(run=lambda records: {"results": records}),
+        eval_runner=SimpleNamespace(run=lambda records: {"results": records}),
         diagnosis_service=DiagnosisService(),
     )
 

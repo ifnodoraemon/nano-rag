@@ -7,6 +7,9 @@ from app.schemas.chat import ChatRequest
 if TYPE_CHECKING:
     from app.core.config import AppContainer
 
+import logging
+logger = logging.getLogger(__name__)
+
 
 def _context_to_text(context: object) -> str:
     if isinstance(context, dict):
@@ -88,8 +91,6 @@ def _claim_verification_stats(claims: object) -> dict[str, object]:
     }
 
 
-import logging
-logger = logging.getLogger(__name__)
 
 async def materialize_eval_records(
     container: AppContainer, records: list[dict]

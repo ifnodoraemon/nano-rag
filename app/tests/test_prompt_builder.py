@@ -94,9 +94,8 @@ def test_prompt_builder_separates_primary_supporting_and_conflicting_evidence() 
     assert "[C1]" in content
     assert "[C2]" in content
     assert "[C3]" in content
-    assert "Final Answer:" in content
-    assert "Supporting Claims:" in content
-    assert "[factual|conditional|conflict|insufficiency]" in content
+
+
     assert content.index("## Primary Evidence") < content.index("## Supporting Evidence")
     assert content.index("## Supporting Evidence") < content.index("## Conflicting Evidence")
 

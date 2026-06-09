@@ -7,7 +7,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from app.api.auth import RequestContext, require_admin_key
 from app.core.config import AppContainer
 from app.diagnostics.service import DiagnosisService
-from app.eval.ragas_runner import RagasRunner
+from app.eval.deepeval_runner import DeepevalRunner
 from app.eval.dataset import (
     get_eval_report_dir,
     list_benchmark_reports,
@@ -37,8 +37,8 @@ from app.utils.text import safe_float
 router = APIRouter()
 
 
-def _require_eval_runner(container: AppContainer) -> RagasRunner:
-    runner = getattr(container, "ragas_runner", None)
+def _require_eval_runner(container: AppContainer) -> DeepevalRunner:
+    runner = getattr(container, "eval_runner", None)
     if runner is None:
         raise HTTPException(
             status_code=503,
@@ -215,11 +215,11 @@ def _scope_report_summary(
 
 
 async def _run_eval_report(
-    ragas_runner: RagasRunner, records: list[dict], use_ragas_lib: bool
+    eval_runner: DeepevalRunner, records: list[dict], use_ragas_lib: bool
 ) -> dict:
     if use_ragas_lib:
-        return await ragas_runner.run_async(records)
-    return ragas_runner.run(records)
+        return await eval_runner.run_async(records)
+    return eval_runner.run(records)
 
 
 @router.post(
@@ -372,7 +372,7 @@ async def run_eval(
     context: RequestContext = Depends(require_admin_key),
 ) -> EvalRunResponse:
     container = request.app.state.container
-    ragas_runner = _require_eval_runner(container)
+    eval_runner = _require_eval_runner(container)
     try:
         dataset_path = resolve_eval_dataset_path(payload.dataset_path)
     except ValueError as exc:
@@ -383,7 +383,7 @@ async def run_eval(
         _ensure_kb_access(container, kb_id, context)
     evaluated_records = await materialize_eval_records(container, dataset)
     report = await _run_eval_report(
-        ragas_runner, evaluated_records, payload.use_ragas_lib
+        eval_runner, evaluated_records, payload.use_ragas_lib
     )
     output_path = payload.output_path
     if output_path:
