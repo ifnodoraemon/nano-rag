@@ -1,9 +1,8 @@
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass
 
-from app.retrieval.filters import parse_date
+from app.retrieval.versioning import version_sort_key
 from app.vectorstore.repository import SearchHit
 
 
@@ -87,25 +86,7 @@ def _group_key(hit: SearchHit) -> str | None:
 
 
 def _freshness_sort_key(hit: SearchHit) -> tuple[int, object, tuple[int, ...], float]:
-    metadata = hit.chunk.metadata or {}
-    effective_date = parse_date(metadata.get("effective_date"))
-    version = _version_key(metadata.get("version"))
-    has_date = 1 if effective_date else 0
-    return (
-        has_date,
-        effective_date or "",
-        version,
-        hit.score,
-    )
-
-
-def _version_key(value: object) -> tuple[int, ...]:
-    if not isinstance(value, str):
-        return ()
-    parts = re.findall(r"\d+", value)
-    if not parts:
-        return ()
-    return tuple(int(part) for part in parts)
+    return version_sort_key(hit.chunk.metadata or {}, score=hit.score)
 
 
 def _annotate_hit(

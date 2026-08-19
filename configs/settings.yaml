@@ -28,6 +28,11 @@ hybrid_search:
   dense_weight: 0.5
   sparse_weight: 0.5
 
+# Document-level BM25 discovery layer (the wiki). On by default: it is the
+# agent's first-hop index. RAG_WIKI_ENABLED=true|false overrides at runtime.
+discovery:
+  enabled: ${RAG_WIKI_ENABLED:-true}
+
 evidence_planner:
   enabled: ${RAG_EVIDENCE_PLANNER_ENABLED:-true}
   max_contexts: 8

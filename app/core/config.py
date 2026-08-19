@@ -276,7 +276,16 @@ class AppConfig:
 
     @property
     def wiki_enabled(self) -> bool:
-        return parse_bool_env(os.getenv("RAG_WIKI_ENABLED"))
+        # The wiki is the document-level BM25 discovery layer. RAG_WIKI_ENABLED,
+        # when set, overrides the configured value; otherwise the discovery
+        # section of settings.yaml governs (effective default: on).
+        raw = os.getenv("RAG_WIKI_ENABLED")
+        if raw is not None:
+            return parse_bool_env(raw)
+        configured = self.settings.get("discovery", {}).get("enabled", False)
+        if isinstance(configured, bool):
+            return configured
+        return parse_bool_env(str(configured))
 
     @property
     def hybrid_search_enabled(self) -> bool:
@@ -438,6 +447,13 @@ class AppContainer:
                 enabled_config=config.hybrid_search_enabled,
             )
             hybrid_retriever.bootstrap_from_parsed_dir(config.parsed_dir)
+        if wiki_compiler is not None:
+            # Rebuild wiki pages from committed parsed artifacts (durable source
+            # of truth) in case the wiki volume is fresh, then re-index the
+            # searcher (its __init__ refresh ran before the bootstrap).
+            rebuilt = wiki_compiler.bootstrap_from_parsed_dir(config.parsed_dir)
+            if rebuilt and wiki_searcher is not None:
+                wiki_searcher.refresh()
         eval_runner = None
         if config.eval_enabled:
             from app.eval.deepeval_runner import DeepevalRunner

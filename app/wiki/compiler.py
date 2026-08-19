@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import json
 import re
 from datetime import datetime, timezone
 from pathlib import Path
 
 import yaml
+from pydantic import ValidationError
 
+from app.retrieval.versioning import version_sort_key
 from app.schemas.chunk import Chunk
 from app.schemas.document import Document
 
@@ -26,21 +29,132 @@ class WikiCompiler:
         self.indexes_dir = self.root_dir / "indexes"
         self._ensure_structure()
 
-    def upsert_document(self, document: Document, chunks: list[Chunk]) -> Path:
+    def upsert_document(
+        self, document: Document, chunks: list[Chunk], *, record_log: bool = True
+    ) -> Path:
         self._ensure_structure()
-        page_path = self.sources_dir / f"{document.doc_id}.md"
+        metadata = self._write_source_page(document, chunks)
+        self._record_version_chain()
+        self._write_index()
+        if record_log:
+            self._append_log(document, metadata["updated_at"])
+        return self.sources_dir / f"{document.doc_id}.md"
+
+    def _write_source_page(
+        self, document: Document, chunks: list[Chunk]
+    ) -> dict[str, object]:
+        """Write one source page and return its metadata (no chain/index/log)."""
         metadata = self._build_page_metadata(document, chunks)
-        page_path.write_text(
+        (self.sources_dir / f"{document.doc_id}.md").write_text(
             self._render_source_page(document, chunks, metadata), encoding="utf-8"
         )
-        self._write_index()
-        self._append_log(document, metadata["updated_at"])
-        return page_path
+        return metadata
 
     def remove_document(self, doc_id: str) -> None:
         self._ensure_structure()
         (self.sources_dir / f"{doc_id}.md").unlink(missing_ok=True)
+        self._record_version_chain()
         self._write_index()
+
+    def _record_version_chain(self) -> None:
+        """Deterministically mark the latest version within each source_key group.
+
+        The winner is chosen by (effective_date, version) ordering — the same
+        rule as retrieval freshness — so the ledger never depends on LLM
+        judgment. Non-winners get is_latest_version=false and superseded_by set
+        to the winner's doc_id. Pages without a source_key are left untouched.
+        """
+        groups: dict[tuple[str, str], list[dict[str, object]]] = {}
+        for page_path in sorted(self.sources_dir.glob("*.md")):
+            metadata, body = self._read_frontmatter(page_path)
+            source_key = metadata.get("source_key")
+            kb_id = str(metadata.get("kb_id", "default"))
+            if not source_key:
+                continue
+            groups.setdefault((kb_id, str(source_key)), []).append(
+                {"path": page_path, "metadata": metadata, "body": body}
+            )
+        for (kb_id, _source_key), entries in groups.items():
+            if len(entries) <= 1:
+                for entry in entries:
+                    entry["metadata"]["is_latest_version"] = True
+                    entry["metadata"]["superseded_by"] = None
+                continue
+            ranked = sorted(
+                entries,
+                key=lambda entry: version_sort_key(
+                    entry["metadata"],
+                    score=self._chain_tiebreak(entry["metadata"]),
+                ),
+                reverse=True,
+            )
+            winner = ranked[0]
+            for entry in ranked[1:]:
+                entry["metadata"]["is_latest_version"] = False
+                entry["metadata"]["superseded_by"] = winner["metadata"].get("doc_id")
+            winner["metadata"]["is_latest_version"] = True
+            winner["metadata"]["superseded_by"] = None
+        for entries in groups.values():
+            for entry in entries:
+                frontmatter = yaml.safe_dump(
+                    entry["metadata"],
+                    allow_unicode=True,
+                    sort_keys=False,
+                    default_flow_style=False,
+                ).strip()
+                entry["path"].write_text(
+                    "\n".join(
+                        [FRONTMATTER_BOUNDARY, frontmatter, FRONTMATTER_BOUNDARY, "", entry["body"], ""]
+                    ),
+                    encoding="utf-8",
+                )
+
+    @staticmethod
+    def _chain_tiebreak(metadata: dict[str, object]) -> tuple[float, str]:
+        """Deterministic tie-break when date and version agree.
+
+        Prefers the source file mtime (stable across re-bootstraps from parsed
+        artifacts); falls back to the page's updated_at string.
+        """
+        modified = metadata.get("source_modified_at")
+        modified_value = float(modified) if isinstance(modified, (int, float)) else 0.0
+        return (modified_value, str(metadata.get("updated_at") or ""))
+
+    def bootstrap_from_parsed_dir(self, parsed_dir: Path) -> int:
+        """Rebuild wiki pages from committed parsed artifacts on startup.
+
+        The wiki directory is persisted (named volume) but can be empty after a
+        fresh container or a rebuild; parsed artifacts are the durable source
+        of truth. Mirrors HybridRetriever.bootstrap_from_parsed_dir.
+        Returns the number of source pages (re)written.
+        """
+        self._ensure_structure()
+        if not parsed_dir.exists():
+            return 0
+        count = 0
+        for artifact in sorted(parsed_dir.glob("*.json")):
+            try:
+                payload = json.loads(artifact.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            if not isinstance(payload, dict):
+                continue
+            try:
+                document = Document.model_validate(payload.get("document", {}))
+                raw_chunks = payload.get("chunks", [])
+                chunks = (
+                    [Chunk.model_validate(raw) for raw in raw_chunks if isinstance(raw, dict)]
+                    if isinstance(raw_chunks, list)
+                    else []
+                )
+            except ValidationError:
+                continue
+            self._write_source_page(document, chunks)
+            count += 1
+        if count:
+            self._record_version_chain()
+            self._write_index()
+        return count
 
     def _ensure_structure(self) -> None:
         self.root_dir.mkdir(parents=True, exist_ok=True)
@@ -78,6 +192,12 @@ class WikiCompiler:
                 self._preview(chunk.text, MAX_CHUNK_PREVIEW_CHARS) for chunk in chunks[:8]
             ],
             "chunk_count": len(chunks),
+            "content_hash": document.metadata.get("source_content_hash"),
+            "source_modified_at": document.metadata.get("source_modified_at"),
+            # Version-ledger fields, finalized by _record_version_chain() so that
+            # every page in a source_key group reflects the deterministic pick.
+            "is_latest_version": True,
+            "superseded_by": None,
             "updated_at": datetime.now(timezone.utc).isoformat(),
         }
 

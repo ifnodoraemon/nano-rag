@@ -101,6 +101,8 @@ class WikiSearcher:
                             "source_key": document.metadata.get("source_key"),
                             "effective_date": document.metadata.get("effective_date"),
                             "version": document.metadata.get("version"),
+                            "is_latest_version": document.metadata.get("is_latest_version"),
+                            "superseded_by": document.metadata.get("superseded_by"),
                         },
                     ),
                     score=score,
