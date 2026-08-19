@@ -11,6 +11,7 @@ from typing import Any
 import yaml
 
 from app.core.exceptions import ConfigurationError
+from app.utils.constants import INSECURE_DEFAULT_KEYS
 from app.core.tracing import FeedbackStore, TraceStore, TracingManager
 from app.agentic import AgenticReasoningService
 from app.generation.answer_formatter import AnswerFormatter
@@ -52,9 +53,6 @@ def _render_env(raw: str) -> str:
 
 def _load_yaml(path: Path) -> dict[str, Any]:
     return yaml.safe_load(_render_env(path.read_text())) or {}
-
-
-INSECURE_DEFAULT_KEYS = frozenset({"change-me", "sk-xxx", "your-api-key", "", "nano-rag-local"})
 
 
 @dataclass

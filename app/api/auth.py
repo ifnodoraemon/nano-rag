@@ -10,11 +10,18 @@ from time import monotonic
 
 from fastapi import Header, HTTPException, Request
 
+from app.utils.constants import INSECURE_DEFAULT_KEYS
+
 logger = logging.getLogger(__name__)
 AUTH_TRUE_VALUES = {"true", "1"}
-INSECURE_DEFAULT_KEYS = frozenset({"", "change-me", "nano-rag-local", "sk-xxx", "your-api-key"})
+# Environments where a known default key is acceptable for development.
+# Everything else (unset, "prod", "production", or any other value) is treated
+# as production and rejects insecure defaults.
+_LOCAL_ENVS = {"local", "dev", "development", "test", "testing", "unittest"}
 _RATE_LOCK = threading.Lock()
 _RATE_WINDOW: dict[str, tuple[float, int]] = {}
+_RATE_SWEEP_INTERVAL_SECONDS = 60.0
+_LAST_RATE_SWEEP = 0.0
 
 
 @dataclass(frozen=True)
@@ -26,26 +33,34 @@ class RequestContext:
 
 
 def _constant_time_check(token: str, keys: set[str]) -> bool:
+    # http headers arrive latin-1 decoded: non-ASCII tokens would make
+    # hmac.compare_digest raise TypeError (unauthenticated 500). They can
+    # never match a configured ASCII key, so treat them as a plain miss.
+    if not token.isascii():
+        return False
     return any(hmac.compare_digest(token, key) for key in keys)
 
 
-def _is_production() -> bool:
-    return os.getenv("RAG_ENV", os.getenv("ENVIRONMENT", "")).lower() in {
-        "prod",
-        "production",
-    }
+def _allows_insecure_defaults() -> bool:
+    """Fail-closed: insecure default keys are only tolerated in explicit
+    local/dev/test environments. An unset or unrecognized RAG_ENV (including
+    "prod"/"production") rejects them, so a deployment that forgets to set a
+    strong secret cannot silently serve with a known key."""
+    env = os.getenv("RAG_ENV", os.getenv("ENVIRONMENT", "")).strip().lower()
+    return env in _LOCAL_ENVS
 
 
 def _reject_insecure_defaults(keys: set[str], *, capability: str) -> None:
-    if not _is_production():
+    if _allows_insecure_defaults():
         return
     insecure = sorted(keys.intersection(INSECURE_DEFAULT_KEYS))
     if insecure:
         raise HTTPException(
             status_code=503,
             detail=(
-                f"{capability} contains insecure default credentials in production. "
-                "Set a strong secret and rotate any exposed defaults."
+                f"{capability} contains insecure default credentials outside a "
+                "local/dev/test environment. Set a strong secret and rotate any "
+                "exposed defaults."
             ),
         )
 
@@ -75,20 +90,24 @@ def _rate_limit_enabled() -> int:
 
 
 def _enforce_rate_limit(key: str) -> None:
+    global _LAST_RATE_SWEEP
     limit = _rate_limit_enabled()
     if limit <= 0:
         return
     now = monotonic()
     bucket = hashlib.sha256(key.encode("utf-8")).hexdigest()
     with _RATE_LOCK:
-        if len(_RATE_WINDOW) > 10000:
+        # Time-based sweep (not only when huge): a proxy client rotating
+        # principal ids must not be able to keep the window unbounded.
+        if len(_RATE_WINDOW) > 10000 or now - _LAST_RATE_SWEEP >= _RATE_SWEEP_INTERVAL_SECONDS:
             stale = [
-                bucket
-                for bucket, (window_start, _) in _RATE_WINDOW.items()
+                old_bucket
+                for old_bucket, (window_start, _) in _RATE_WINDOW.items()
                 if now - window_start >= 120
             ]
-            for bucket in stale:
-                _RATE_WINDOW.pop(bucket, None)
+            for old_bucket in stale:
+                _RATE_WINDOW.pop(old_bucket, None)
+            _LAST_RATE_SWEEP = now
         window_start, count = _RATE_WINDOW.get(bucket, (now, 0))
         if now - window_start >= 60:
             window_start, count = now, 0
@@ -111,7 +130,7 @@ def _proxy_context(
     secret = _trusted_proxy_secret()
     if not secret:
         return None
-    if not x_rag_proxy_secret or not hmac.compare_digest(x_rag_proxy_secret, secret):
+    if not x_rag_proxy_secret or not _constant_time_check(x_rag_proxy_secret, {secret}):
         return None
     principal = (x_rag_principal_id or "").strip() or None
     org_id = (x_rag_org_id or "").strip() or None
@@ -188,6 +207,9 @@ def require_admin_key(
         x_rag_allowed_kb_ids=x_rag_allowed_kb_ids,
     )
     if proxy_context is not None:
+        _enforce_rate_limit(
+            f"admin:{proxy_context.principal_id or proxy_context.external_org_id or 'trusted_proxy'}"
+        )
         return RequestContext(
             auth_mode="trusted_proxy_admin",
             principal_id=proxy_context.principal_id,

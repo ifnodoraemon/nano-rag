@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 from pathlib import Path
@@ -9,6 +10,8 @@ from uuid import uuid4
 
 from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.responses import StreamingResponse
+
+logger = logging.getLogger(__name__)
 
 from app.api.auth import RequestContext, require_admin_key, require_api_key
 from app.core.config import AppContainer
@@ -303,13 +306,13 @@ async def rag_chat_stream(
         import asyncio
         from time import perf_counter
         from app.schemas.chat import ChatResponse
-        
-        try:
-            yield "data: {\"status\": \"thinking\", \"message\": \"Retrieving and synthesizing...\"}\n\n"
-        except asyncio.CancelledError:
-            return
-            
-        queue = asyncio.Queue()
+
+        def _frame(payload: dict[str, object]) -> str:
+            return "data: " + json.dumps(payload, ensure_ascii=False) + "\n\n"
+
+        yield _frame({"status": "thinking", "message": "Retrieving and synthesizing..."})
+
+        queue: "asyncio.Queue[object]" = asyncio.Queue()
         payload_copy = ChatRequest(
             query=payload.query,
             top_k=payload.top_k,
@@ -317,31 +320,45 @@ async def rag_chat_stream(
             session_id=payload.session_id,
             metadata_filters=payload.metadata_filters,
         )
-        
+
         state_input = {"payload": payload_copy, "started_at": perf_counter(), "stream_queue": queue}
-        
+
         async def run_workflow():
             try:
                 state = await container.chat_pipeline.workflow.ainvoke(state_input)
                 await queue.put(state["response"])
-            except Exception as e:
-                import logging
-                logging.getLogger(__name__).error(f"Stream error: {e}")
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:  # noqa: BLE001 - surfaced as a generic SSE error frame
+                # Full detail stays server-side; only a safe message crosses the wire.
+                logger.exception("chat stream workflow failed: %s", e)
                 await queue.put(e)
-                
+
         task = asyncio.create_task(run_workflow())
-        
+
         try:
             while True:
                 chunk = await queue.get()
-                if isinstance(chunk, Exception):
-                    yield f"data: {{\"status\": \"error\", \"message\": \"{str(chunk)}\"}}\n\n"
+                if isinstance(chunk, BaseException):
+                    yield _frame({"status": "error", "message": "upstream generation error"})
                     break
-                elif isinstance(chunk, ChatResponse):
-                    yield f"data: {{\"status\": \"success\", \"answer\": {json.dumps(chunk.answer)}, \"trace_id\": \"{chunk.trace_id}\"}}\n\n"
+                if isinstance(chunk, ChatResponse):
+                    yield _frame(
+                        {
+                            "status": "success",
+                            "answer": chunk.answer,
+                            "trace_id": chunk.trace_id,
+                            "citations": [c.model_dump() for c in chunk.citations],
+                        }
+                    )
                     break
-                elif isinstance(chunk, str):
-                    yield f"data: {{\"status\": \"generating\", \"chunk\": {json.dumps(chunk)}}}\n\n"
+                if isinstance(chunk, str):
+                    yield _frame({"status": "generating", "chunk": chunk})
+                # Fail loud on unexpected queue payloads instead of spinning
+                # the consumer loop forever with a dead stream.
+                logger.error("unexpected chat stream queue payload: %r", type(chunk))
+                yield _frame({"status": "error", "message": "internal stream error"})
+                break
         except asyncio.CancelledError:
             task.cancel()
             raise

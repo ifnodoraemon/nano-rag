@@ -489,12 +489,16 @@ class AgenticReasoningService:
                 ]
             )
         except Exception as exc:
+            # Fail closed: an unavailable verifier must not be treated as
+            # "evidence is sufficient" (that is a silent fallback path). We
+            # report insufficiency and request follow-up retrieval; the loop is
+            # bounded by max_retrieval_loops in _route_after_verification.
             logger.warning("agent evidence verification failed: %s", exc)
             return EvidenceCheck(
-                sufficient=True,
-                coverage_ratio=1.0,
+                sufficient=False,
+                coverage_ratio=0.0,
                 missing_terms=[],
-                follow_up_queries=[],
+                follow_up_queries=subqueries[1:] or [query],
                 has_contexts=True,
                 has_conflicts=self._has_conflicts(contexts),
                 reason="verifier_unavailable",

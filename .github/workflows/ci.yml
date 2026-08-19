@@ -33,7 +33,6 @@ jobs:
 
       - name: Run pytest
         env:
-          MODEL_GATEWAY_MODE: mock
           RAG_AUTH_DISABLED: "true"
           RAG_INGEST_ALLOWED_DIRS: ${{ github.workspace }}/data/raw
         run: python -m pytest app/tests

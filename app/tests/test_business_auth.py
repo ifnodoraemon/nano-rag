@@ -49,6 +49,33 @@ def test_business_auth_rejects_local_default_in_production(monkeypatch) -> None:
     assert exc_info.value.status_code == 503
 
 
+def test_business_auth_rejects_local_default_when_env_unset(monkeypatch) -> None:
+    # Fail-closed: with no RAG_ENV set, a known default key must be rejected.
+    monkeypatch.delenv("RAG_ENV", raising=False)
+    monkeypatch.delenv("ENVIRONMENT", raising=False)
+    monkeypatch.delenv("RAG_AUTH_DISABLED", raising=False)
+    with pytest.raises(HTTPException) as exc_info:
+        require_api_key(
+            _request_with_keys({"nano-rag-local"}),
+            authorization="Bearer nano-rag-local",
+            x_api_key=None,
+        )
+
+    assert exc_info.value.status_code == 503
+
+
+def test_business_auth_allows_local_default_in_local_env(monkeypatch) -> None:
+    monkeypatch.setenv("RAG_ENV", "local")
+    monkeypatch.delenv("RAG_AUTH_DISABLED", raising=False)
+    context = require_api_key(
+        _request_with_keys({"nano-rag-local"}),
+        authorization="Bearer nano-rag-local",
+        x_api_key=None,
+    )
+
+    assert context.auth_mode == "api_key"
+
+
 def test_trusted_proxy_context_scopes_kbs(monkeypatch) -> None:
     monkeypatch.delenv("RAG_AUTH_DISABLED", raising=False)
     monkeypatch.setenv("RAG_TRUSTED_PROXY_SECRET", "proxy-secret")
@@ -95,3 +122,34 @@ def test_admin_auth_accepts_admin_key(monkeypatch) -> None:
     )
 
     assert context.auth_mode == "admin_api_key"
+
+
+def test_business_auth_rejects_non_ascii_token_without_500(monkeypatch) -> None:
+    # HTTP headers arrive latin-1 decoded; a non-ASCII token would make
+    # hmac.compare_digest raise TypeError (unauthenticated 500). It must be
+    # a plain 401 instead — it can never match a configured ASCII key.
+    monkeypatch.delenv("RAG_AUTH_DISABLED", raising=False)
+    with pytest.raises(HTTPException) as exc_info:
+        require_api_key(
+            _request_with_keys({"secret-token"}),
+            authorization=None,
+            x_api_key="bé",
+        )
+
+    assert exc_info.value.status_code == 401
+
+
+def test_trusted_proxy_rejects_non_ascii_secret_without_500(monkeypatch) -> None:
+    monkeypatch.delenv("RAG_AUTH_DISABLED", raising=False)
+    monkeypatch.setenv("RAG_TRUSTED_PROXY_SECRET", "proxy-secret")
+    monkeypatch.setenv("RAG_API_KEYS", "business-secret")
+
+    with pytest.raises(HTTPException) as exc_info:
+        require_api_key(
+            _request_with_keys({"business-secret"}),
+            authorization=None,
+            x_api_key=None,
+            x_rag_proxy_secret="proxy-é",
+        )
+
+    assert exc_info.value.status_code == 401

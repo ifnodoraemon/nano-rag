@@ -136,17 +136,24 @@ async def openai_chat_completions(
                         }
                     ]
                 }) + "\n\n"
-                
+
                 while True:
                     chunk = await queue.get()
-                    if isinstance(chunk, Exception):
-                        yield make_chunk(f"\n[Error: {str(chunk)}]", "stop")
+                    if isinstance(chunk, BaseException):
+                        # Full detail stays server-side (logged in run_workflow);
+                        # only a safe marker crosses the wire.
+                        yield make_chunk("\n[upstream generation error]", "error")
                         break
-                    elif isinstance(chunk, ChatResponse):
+                    if isinstance(chunk, ChatResponse):
                         yield make_chunk(None, "stop")
                         break
-                    elif isinstance(chunk, str):
+                    if isinstance(chunk, str):
                         yield make_chunk(chunk, None)
+                    # Fail loud on unexpected queue payloads instead of
+                    # spinning the consumer loop forever.
+                    logger.error("unexpected stream queue payload: %r", type(chunk))
+                    yield make_chunk(None, "error")
+                    break
             except asyncio.CancelledError:
                 task.cancel()
                 raise

@@ -1,6 +1,8 @@
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import json
+
 import httpx
 import pytest
 
@@ -469,3 +471,25 @@ async def test_health_route_reports_configured_auth(monkeypatch) -> None:
     assert payload["auth_enabled"] is True
     assert payload["auth_configured"] is True
     assert payload["auth_status"] == "configured"
+
+
+@pytest.mark.asyncio
+async def test_global_exception_handlers_never_echo_upstream_detail() -> None:
+    # Provider error bodies (quota, key scope, request echoes) must stay
+    # server-side; the wire response carries a fixed safe message.
+    from app.core.exceptions import ModelGatewayError, ParsingError
+    from app.main import handle_model_gateway_error, handle_parsing_error
+
+    gateway = await handle_model_gateway_error(
+        SimpleNamespace(), ModelGatewayError("embedding request failed: 403 {\"error\":\"quota exceeded for key sk-secret\"}")
+    )
+    assert gateway.status_code == 502
+    assert json.loads(gateway.body) == {"detail": "upstream model gateway error"}
+    assert b"quota" not in gateway.body and b"sk-secret" not in gateway.body
+
+    parsing = await handle_parsing_error(
+        SimpleNamespace(), ParsingError("document parser returned HTTP 500: internal provider detail")
+    )
+    assert parsing.status_code == 400
+    assert json.loads(parsing.body) == {"detail": "document parsing failed"}
+    assert b"provider detail" not in parsing.body

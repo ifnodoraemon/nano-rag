@@ -20,4 +20,6 @@ pytest==8.4.1
 pytest-asyncio==1.1.0
 pyyaml==6.0.2
 uvicorn==0.35.0
-deepeval
+# deepeval: fully pinned — the runner (app/eval/deepeval_runner.py) is verified
+# against this exact 2.x API surface; bump deliberately, not via a float.
+deepeval==2.9.7

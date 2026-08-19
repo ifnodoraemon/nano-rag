@@ -232,12 +232,16 @@ async def _probe_langfuse(
 async def handle_model_gateway_error(
     _: Request, exc: ModelGatewayError
 ) -> JSONResponse:
-    return JSONResponse(status_code=502, content={"detail": str(exc)})
+    # Full provider detail (status body, request echoes) stays server-side;
+    # only a safe message crosses the wire.
+    logger.exception("model gateway request failed: %s", exc)
+    return JSONResponse(status_code=502, content={"detail": "upstream model gateway error"})
 
 
 @app.exception_handler(ParsingError)
 async def handle_parsing_error(_: Request, exc: ParsingError) -> JSONResponse:
-    return JSONResponse(status_code=400, content={"detail": str(exc)})
+    logger.exception("document parsing failed: %s", exc)
+    return JSONResponse(status_code=400, content={"detail": "document parsing failed"})
 
 
 @app.get("/health")

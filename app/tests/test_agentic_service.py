@@ -174,7 +174,11 @@ async def test_agent_planner_helpers_degrade_on_generation_error() -> None:
         [{"chunk_id": "c1", "text": "evidence"}],
     )
 
-    assert check.sufficient is True
+    # An unavailable verifier must fail closed (insufficient + follow-up),
+    # never be treated as "evidence is sufficient".
+    assert check.sufficient is False
+    assert check.coverage_ratio == 0.0
+    assert check.follow_up_queries == ["原始问题"]
     assert check.reason == "verifier_unavailable"
 
 

@@ -1,6 +1,8 @@
 from io import BytesIO
 from types import SimpleNamespace
 
+import json
+
 import pytest
 from fastapi import HTTPException
 from starlette.datastructures import UploadFile
@@ -21,6 +23,7 @@ from app.api.routes_business import (
     rag_ingest,
     rag_ingest_upload,
     rag_benchmark,
+    rag_chat_stream,
     rag_knowledge_bases,
     rag_retrieve,
     rag_trace,
@@ -422,3 +425,65 @@ async def test_business_benchmark_rejects_dataset_kb_outside_context(
         )
 
     assert exc_info.value.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_rag_chat_stream_surfaces_safe_error_frame() -> None:
+    # Upstream failures must cross the wire as a fixed, safe message — never
+    # the raw exception text (which can embed provider bodies/paths).
+    class _Boom(Exception):
+        pass
+
+    async def fake_ainvoke(state):  # noqa: ANN001
+        raise _Boom("provider said: secret body and /abs/path/leak")
+
+    container = SimpleNamespace(
+        chat_pipeline=SimpleNamespace(workflow=SimpleNamespace(ainvoke=fake_ainvoke)),
+        knowledge_base_catalog=SimpleNamespace(exists=lambda kb: True),
+    )
+
+    response = await rag_chat_stream(
+        BusinessChatRequest(query="policy", kb_id="default"),
+        _request_with_container(container),
+        CONTEXT,
+    )
+
+    frames = []
+    async for raw in response.body_iterator:
+        text = raw.decode("utf-8") if isinstance(raw, bytes) else raw
+        for line in text.splitlines():
+            if line.startswith("data: "):
+                frames.append(json.loads(line[6:]))
+
+    assert {"status": "error", "message": "upstream generation error"} in frames
+    assert not any("secret body" in str(frame) for frame in frames)
+
+
+@pytest.mark.asyncio
+async def test_rag_chat_stream_fails_loud_on_unknown_queue_payload() -> None:
+    # An unexpected queue item must end the stream explicitly instead of
+    # leaving the consumer loop spinning on a dead stream.
+    class _Workflow:
+        async def ainvoke(self, state):  # noqa: ANN001
+            state["stream_queue"].put_nowait(object())
+            return {"response": None}
+
+    container = SimpleNamespace(
+        chat_pipeline=SimpleNamespace(workflow=_Workflow()),
+        knowledge_base_catalog=SimpleNamespace(exists=lambda kb: True),
+    )
+
+    response = await rag_chat_stream(
+        BusinessChatRequest(query="policy", kb_id="default"),
+        _request_with_container(container),
+        CONTEXT,
+    )
+
+    frames = []
+    async for raw in response.body_iterator:
+        text = raw.decode("utf-8") if isinstance(raw, bytes) else raw
+        for line in text.splitlines():
+            if line.startswith("data: "):
+                frames.append(json.loads(line[6:]))
+
+    assert {"status": "error", "message": "internal stream error"} in frames
