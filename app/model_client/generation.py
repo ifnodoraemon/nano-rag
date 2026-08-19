@@ -18,18 +18,6 @@ class GenerationClient(GatewayClient):
         )
         self.alias = config.models["generation"]["default_alias"]
 
-async def stream_generate(
-    self, messages: list[dict[str, Any]], model_alias: str | None = None, **kwargs: Any
-):
-    async for chunk in self.provider_client.stream_chat_completions(messages, model_alias or self.alias, **kwargs):
-        choices = chunk.get("choices", [])
-        if choices:
-            delta = choices[0].get("delta", {})
-            yield {
-                "content": delta.get("content", ""),
-                "finish_reason": choices[0].get("finish_reason"),
-            }
-
     async def generate(
         self, messages: list[dict[str, Any]], model_alias: str | None = None, **kwargs: Any
     ) -> dict[str, Any]:
@@ -58,3 +46,15 @@ async def stream_generate(
             "model": data.get("model") or model_alias or self.alias,
             "raw": data,
         }
+
+    async def stream_generate(
+        self, messages: list[dict[str, Any]], model_alias: str | None = None, **kwargs: Any
+    ):
+        async for chunk in self.provider_client.stream_chat_completions(messages, model_alias or self.alias, **kwargs):
+            choices = chunk.get("choices", [])
+            if choices:
+                delta = choices[0].get("delta", {})
+                yield {
+                    "content": delta.get("content", ""),
+                    "finish_reason": choices[0].get("finish_reason"),
+                }
