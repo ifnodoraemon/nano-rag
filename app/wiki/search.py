@@ -6,7 +6,7 @@ from pathlib import Path
 from app.retrieval.bm25 import BM25Index
 from app.retrieval.filters import match_metadata_filters
 from app.schemas.chunk import Chunk
-from app.vectorstore.repository import SearchHit
+from app.retrieval.hits import SearchHit
 from app.wiki.compiler import WikiCompiler
 
 MAX_WIKI_CONTEXT_CHARS = 2200
@@ -32,20 +32,62 @@ class WikiSearcher:
         self.indexes_dir = self.root_dir / "indexes"
         self.index = BM25Index()
         self.documents: dict[str, WikiDocument] = {}
+        self._page_snapshot: set[tuple[str, int]] = set()
         self.refresh()
 
     @property
     def enabled(self) -> bool:
         return self.root_dir.exists()
 
+    def _collect_page_snapshot(self) -> set[tuple[str, int]]:
+        """The on-disk page set as (path, mtime_ns) pairs.
+
+        Cheap (a few directories of a few files) and covers additions,
+        edits, and removals — the mtime alone would miss deletions.
+        """
+        snapshot: set[tuple[str, int]] = set()
+        for directory in (self.root_dir, self.sources_dir, self.topics_dir, self.indexes_dir):
+            if not directory.exists():
+                continue
+            for path in directory.iterdir():
+                if path.is_file():
+                    snapshot.add((str(path), path.stat().st_mtime_ns))
+        return snapshot
+
+    def _sync_if_stale(self) -> None:
+        # The in-memory BM25 index is process-local, but the wiki directory is
+        # shared across processes: in the standard runtime the Celery ingest
+        # worker writes pages while the app serves search. A refresh() in the
+        # worker cannot reach this process, so re-index here whenever the
+        # on-disk page set changed since the last refresh — otherwise the app
+        # stays blind to every document ingested after it started.
+        if self._collect_page_snapshot() != self._page_snapshot:
+            self.refresh()
+
     def refresh(self) -> None:
         self.index.clear()
         self.documents.clear()
         if not self.root_dir.exists():
+            self._page_snapshot = set()
             return
         self._index_topic_pages()
         self._index_scoped_indexes()
         self._index_source_pages()
+        self._page_snapshot = self._collect_page_snapshot()
+
+    def stats(self) -> dict[str, object]:
+        """Storage summary for the debug endpoints (replaces the old vectorstore stats)."""
+        self._sync_if_stale()
+        kinds: dict[str, int] = {}
+        for document in self.documents.values():
+            kinds[document.kind] = kinds.get(document.kind, 0) + 1
+        return {
+            "backend": "wiki-bm25",
+            "document_count": len(self.documents),
+            "source_pages": kinds.get("source", 0),
+            "topic_pages": kinds.get("topic", 0),
+            "index_pages": kinds.get("index", 0),
+        }
 
     def search(
         self,
@@ -54,6 +96,7 @@ class WikiSearcher:
         kb_id: str = "default",
         metadata_filters: dict[str, object] | None = None,
     ) -> list[SearchHit]:
+        self._sync_if_stale()
         scope_id = WikiCompiler.scope_id(kb_id=kb_id)
         allowed_doc_ids = {
             doc_id

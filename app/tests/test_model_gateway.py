@@ -69,18 +69,20 @@ def test_capability_gateway_prefers_capability_specific_env(monkeypatch) -> None
     }
 
 
-def test_capability_gateway_requires_explicit_capability_config() -> None:
+def test_capability_gateway_requires_explicit_capability_config(monkeypatch) -> None:
+    monkeypatch.delenv("DOCUMENT_PARSER_API_BASE_URL", raising=False)
+    monkeypatch.delenv("DOCUMENT_PARSER_API_KEY", raising=False)
     config = AppConfig(
         config_dir=None,  # type: ignore[arg-type]
         settings={},
         models={
             "model_gateway": {"base_url": "http://localhost:4000", "api_key": "secret"},
-            "embedding": {"default_alias": "gemini-embedding-2"},
+            "document_parser": {"default_alias": "gemini-flash-latest"},
         },
         prompts={},
     )
-    with pytest.raises(ConfigurationError, match="EMBEDDING_API_BASE_URL"):
-        config.gateway_for("embedding")
+    with pytest.raises(ConfigurationError, match="DOCUMENT_PARSER_API_BASE_URL"):
+        config.gateway_for("document_parser")
 
 
 @pytest.mark.asyncio
@@ -160,26 +162,26 @@ async def test_disabled_rerank_client_close_is_noop(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
-async def test_app_container_close_accepts_sync_repository_close() -> None:
+async def test_app_container_close_closes_all_client_capabilities() -> None:
     closed: list[str] = []
 
     class AsyncClosable:
-        async def close(self) -> None:
-            closed.append("async")
+        def __init__(self, name: str) -> None:
+            self.name = name
 
-    class SyncRepository:
+        async def close(self) -> None:
+            closed.append(self.name)
+
+    class SyncGraphStore:
         def close(self) -> None:
-            closed.append("repository")
+            closed.append("graph_store")
 
     container = AppContainer(
         config=None,  # type: ignore[arg-type]
-        repository=SyncRepository(),  # type: ignore[arg-type]
-        embedding_client=AsyncClosable(),  # type: ignore[arg-type]
-        rerank_client=AsyncClosable(),  # type: ignore[arg-type]
-        generation_client=AsyncClosable(),  # type: ignore[arg-type]
-        document_parser=AsyncClosable(),  # type: ignore[arg-type]
+        rerank_client=AsyncClosable("rerank"),  # type: ignore[arg-type]
+        generation_client=AsyncClosable("generation"),  # type: ignore[arg-type]
+        document_parser=AsyncClosable("document_parser"),  # type: ignore[arg-type]
         ingestion_pipeline=None,  # type: ignore[arg-type]
-        retrieval_pipeline=None,  # type: ignore[arg-type]
         chat_pipeline=None,  # type: ignore[arg-type]
         eval_runner=None,
         trace_store=None,  # type: ignore[arg-type]
@@ -187,8 +189,9 @@ async def test_app_container_close_accepts_sync_repository_close() -> None:
         diagnosis_service=None,
         feedback_store=None,  # type: ignore[arg-type]
         knowledge_base_catalog=None,  # type: ignore[arg-type]
+        graph_store=SyncGraphStore(),
     )
 
     await container.close()
 
-    assert closed == ["async", "async", "async", "async", "repository"]
+    assert closed == ["rerank", "generation", "document_parser", "graph_store"]

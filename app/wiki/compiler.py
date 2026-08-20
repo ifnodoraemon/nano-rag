@@ -125,7 +125,7 @@ class WikiCompiler:
 
         The wiki directory is persisted (named volume) but can be empty after a
         fresh container or a rebuild; parsed artifacts are the durable source
-        of truth. Mirrors HybridRetriever.bootstrap_from_parsed_dir.
+        of truth.
         Returns the number of source pages (re)written.
         """
         self._ensure_structure()

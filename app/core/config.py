@@ -3,7 +3,6 @@ from __future__ import annotations
 import os
 import re
 import base64
-import inspect
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -19,22 +18,10 @@ from app.generation.prompt_builder import PromptBuilder
 from app.ingestion.pipeline import IngestionPipeline
 from app.ingestion.jobs import IngestJobStore
 from app.model_client.document_parser import DocumentParserClient
-from app.model_client.embeddings import EmbeddingClient
 from app.model_client.generation import GenerationClient
 from app.model_client.rerank import RerankClient
 from app.retrieval.graph_store import GraphStore, Neo4jGraphStore
-from app.retrieval.evidence_planner import EvidencePlanner, EvidencePlannerConfig
-from app.retrieval.hybrid_fusion import HybridSearchConfig
-from app.retrieval.hybrid_retriever import HybridRetriever
-from app.retrieval.pipeline import RetrievalPipeline
-from app.retrieval.query_rewriter import QueryRewriter, QueryRewriterConfig
-from app.retrieval.query_router import QueryRouter, QueryRouterConfig
 from app.utils.text import parse_bool_env
-from app.vectorstore.repository import (
-    InMemoryVectorRepository,
-    MilvusVectorRepository,
-    VectorRepository,
-)
 from app.knowledge_bases.catalog import KnowledgeBaseCatalog
 from app.wiki.compiler import WikiCompiler
 from app.wiki.search import WikiSearcher
@@ -81,7 +68,6 @@ class AppConfig:
 
     def gateway_for(self, capability: str, validate: bool = True) -> dict[str, str]:
         env_prefix_map = {
-            "embedding": "EMBEDDING",
             "generation": "GENERATION",
             "rerank": "RERANK",
         }
@@ -288,28 +274,8 @@ class AppConfig:
         return parse_bool_env(str(configured))
 
     @property
-    def hybrid_search_enabled(self) -> bool:
-        raw = os.getenv("RAG_HYBRID_SEARCH_ENABLED")
-        if raw is not None:
-            return parse_bool_env(raw)
-        configured = self.settings.get("hybrid_search", {}).get("enabled", False)
-        if isinstance(configured, bool):
-            return configured
-        return parse_bool_env(str(configured))
-
-    @property
     def graph_backend(self) -> str:
         return os.getenv("RAG_GRAPH_BACKEND", "artifact").strip().lower()
-
-    @property
-    def query_rewrite_enabled(self) -> bool:
-        query_rewriter_config = QueryRewriterConfig.from_env()
-        return (
-            query_rewriter_config.enable_rewrite
-            or query_rewriter_config.enable_multi_query
-            or query_rewriter_config.enable_hyde
-            or query_rewriter_config.enable_decomposition
-        )
 
     @property
     def diagnosis_enabled(self) -> bool:
@@ -336,17 +302,6 @@ def load_config() -> AppConfig:
     )
 
 
-def build_repository(config: AppConfig) -> VectorRepository:
-    backend = os.getenv("VECTORSTORE_BACKEND", "milvus").lower()
-    if backend == "milvus":
-        return MilvusVectorRepository.from_config(config)
-    if backend == "memory":
-        return InMemoryVectorRepository()
-    raise ConfigurationError(
-        f"Unsupported VECTORSTORE_BACKEND={backend!r}; expected 'milvus' or 'memory'."
-    )
-
-
 def build_graph_store(config: AppConfig) -> GraphStore | None:
     backend = config.graph_backend
     if backend in {"", "artifact", "none", "disabled"}:
@@ -361,13 +316,10 @@ def build_graph_store(config: AppConfig) -> GraphStore | None:
 @dataclass
 class AppContainer:
     config: AppConfig
-    repository: VectorRepository
-    embedding_client: EmbeddingClient
     rerank_client: RerankClient
     generation_client: GenerationClient
     document_parser: DocumentParserClient
     ingestion_pipeline: IngestionPipeline
-    retrieval_pipeline: RetrievalPipeline
     chat_pipeline: AgenticReasoningService
     eval_runner: object | None
     trace_store: TraceStore
@@ -377,31 +329,20 @@ class AppContainer:
     knowledge_base_catalog: KnowledgeBaseCatalog
     graph_store: GraphStore | None = None
     ingest_job_store: IngestJobStore | None = None
-    query_rewriter: QueryRewriter | None = None
-    query_router: QueryRouter | None = None
-    evidence_planner: EvidencePlanner | None = None
-    hybrid_retriever: HybridRetriever | None = None
     wiki_compiler: WikiCompiler | None = None
     wiki_searcher: WikiSearcher | None = None
 
     async def close(self) -> None:
-        await self.embedding_client.close()
         await self.rerank_client.close()
         await self.generation_client.close()
         await self.document_parser.close()
-        if hasattr(self.repository, "close"):
-            result = self.repository.close()
-            if inspect.isawaitable(result):
-                await result
         if self.graph_store is not None:
             self.graph_store.close()
 
     @classmethod
     def from_env(cls) -> "AppContainer":
         config = load_config()
-        repository = build_repository(config)
         graph_store = build_graph_store(config)
-        embedding_client = EmbeddingClient(config)
         rerank_client = RerankClient(config)
         generation_client = GenerationClient(config)
         document_parser = DocumentParserClient(config)
@@ -417,36 +358,17 @@ class AppContainer:
             config.langfuse_otel_endpoint,
             headers=config.langfuse_otel_headers,
         )
-        wiki_compiler = WikiCompiler(config.wiki_dir) if config.wiki_enabled else None
-        wiki_searcher = WikiSearcher(config.wiki_dir) if config.wiki_enabled else None
-        query_rewriter = None
-        if config.query_rewrite_enabled:
-            query_rewriter_config = QueryRewriterConfig.from_env()
-            query_rewriter = QueryRewriter(
-                generation_client=generation_client,
-                config=query_rewriter_config,
+        # The wiki discovery layer is the retrieval engine's first hop and a hard
+        # dependency of the agentic service (no dense fallback). A disabled wiki
+        # is a startup-time misconfiguration, not a silent reroute.
+        if not config.wiki_enabled:
+            raise ConfigurationError(
+                "RAG_WIKI_ENABLED must be true: the document-level wiki discovery "
+                "layer is the RAG retrieval engine. There is no dense-vector "
+                "fallback in this build."
             )
-        query_router = QueryRouter(
-            generation_client=generation_client,
-            config=QueryRouterConfig.from_env(),
-        )
-        evidence_planner = EvidencePlanner(
-            generation_client=generation_client,
-            config=EvidencePlannerConfig.from_settings(
-                config.settings.get("evidence_planner", {})
-            ),
-        )
-        hybrid_retriever = None
-        if config.hybrid_search_enabled:
-            hybrid_retriever = HybridRetriever(
-                repository=repository,
-                embedding_client=embedding_client,
-                hybrid_config=HybridSearchConfig.from_settings(
-                    config.settings.get("hybrid_search", {})
-                ),
-                enabled_config=config.hybrid_search_enabled,
-            )
-            hybrid_retriever.bootstrap_from_parsed_dir(config.parsed_dir)
+        wiki_compiler = WikiCompiler(config.wiki_dir)
+        wiki_searcher = WikiSearcher(config.wiki_dir)
         if wiki_compiler is not None:
             # Rebuild wiki pages from committed parsed artifacts (durable source
             # of truth) in case the wiki volume is fresh, then re-index the
@@ -464,49 +386,30 @@ class AppContainer:
             from app.diagnostics.service import DiagnosisService
 
             diagnosis_service = DiagnosisService(generation_client=generation_client)
-        retrieval_pipeline = RetrievalPipeline(
-            config,
-            repository,
-            embedding_client,
-            rerank_client,
-            trace_store,
-            tracing_manager,
-            query_rewriter=query_rewriter,
-            query_router=query_router,
-            evidence_planner=evidence_planner,
-            hybrid_retriever=hybrid_retriever,
-            wiki_searcher=wiki_searcher,
-        )
         chat_pipeline = AgenticReasoningService(
             config=config,
-            retrieval_pipeline=retrieval_pipeline,
             generation_client=generation_client,
             prompt_builder=PromptBuilder(config.prompts),
             answer_formatter=AnswerFormatter(),
             trace_store=trace_store,
             tracing_manager=tracing_manager,
             graph_store=graph_store,
+            wiki_searcher=wiki_searcher,
         )
         return cls(
             config=config,
-            repository=repository,
-            embedding_client=embedding_client,
             rerank_client=rerank_client,
             generation_client=generation_client,
             document_parser=document_parser,
             ingestion_pipeline=IngestionPipeline(
                 config,
-                repository,
-                embedding_client,
                 generation_client,
                 tracing_manager,
                 document_parser=document_parser,
-                hybrid_retriever=hybrid_retriever,
                 graph_store=graph_store,
                 wiki_compiler=wiki_compiler,
                 wiki_searcher=wiki_searcher,
             ),
-            retrieval_pipeline=retrieval_pipeline,
             chat_pipeline=chat_pipeline,
             graph_store=graph_store,
             eval_runner=eval_runner,
@@ -516,10 +419,6 @@ class AppContainer:
             feedback_store=feedback_store,
             ingest_job_store=ingest_job_store,
             knowledge_base_catalog=knowledge_base_catalog,
-            query_rewriter=query_rewriter,
-            query_router=query_router,
-            evidence_planner=evidence_planner,
-            hybrid_retriever=hybrid_retriever,
             wiki_compiler=wiki_compiler,
             wiki_searcher=wiki_searcher,
         )

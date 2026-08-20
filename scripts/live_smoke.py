@@ -41,13 +41,12 @@ def normalize_provider_env() -> None:
     gateway_key = os.getenv("MODEL_GATEWAY_API_KEY", "")
     if gateway_key:
         os.environ.setdefault("GENERATION_API_KEY", gateway_key)
-        os.environ.setdefault("EMBEDDING_API_KEY", gateway_key)
         os.environ.setdefault("DOCUMENT_PARSER_API_KEY", gateway_key)
     gateway_base_url = os.getenv("MODEL_GATEWAY_BASE_URL", "")
     if gateway_base_url:
         os.environ.setdefault("GENERATION_API_BASE_URL", gateway_base_url)
-    os.environ.setdefault("EMBEDDING_API_BASE_URL", "https://generativelanguage.googleapis.com")
     os.environ.setdefault("DOCUMENT_PARSER_API_BASE_URL", "https://generativelanguage.googleapis.com")
+    os.environ.setdefault("RAG_WIKI_ENABLED", "true")
 
 
 async def run_smoke(args: argparse.Namespace) -> int:
@@ -58,14 +57,10 @@ async def run_smoke(args: argparse.Namespace) -> int:
             os.environ["MODEL_GATEWAY_API_KEY"] = api_key
     if args.generation_model:
         os.environ["GENERATION_MODEL_ALIAS"] = args.generation_model
-    if args.embedding_model:
-        os.environ["EMBEDDING_MODEL_ALIAS"] = args.embedding_model
     if args.rerank_model:
         os.environ["RERANK_MODEL_ALIAS"] = args.rerank_model
     normalize_provider_env()
     os.environ["MODEL_GATEWAY_MODE"] = "live"
-    if not args.use_config_vectorstore:
-        os.environ["VECTORSTORE_BACKEND"] = "memory"
     os.environ["RAG_INGEST_ALLOWED_DIRS"] = str((ROOT / "data/raw").resolve())
     os.environ.setdefault("RAG_AUTH_DISABLED", "true")
 
@@ -76,18 +71,10 @@ async def run_smoke(args: argparse.Namespace) -> int:
         print(f"MODEL_GATEWAY_BASE_URL={container.config.gateway_base_url}", flush=True)
         print(f"MODEL_GATEWAY_API_KEY={configured('MODEL_GATEWAY_API_KEY')}", flush=True)
         print(f"GENERATION_MODEL_ALIAS={container.generation_client.alias}", flush=True)
-        print(f"EMBEDDING_MODEL_ALIAS={container.embedding_client.alias}", flush=True)
         print(f"RERANK_MODEL_ALIAS={container.rerank_client.alias}", flush=True)
         print(f"rerank_enabled={container.config.rerank_enabled}", flush=True)
-        print(
-            f"vectorstore={container.repository.stats().get('backend', 'unknown')}",
-            flush=True,
-        )
-
-        vectors = await container.embedding_client.embed_texts(
-            ["差旅报销多久内提交？"]
-        )
-        print(f"embedding_ok=true count={len(vectors)} dim={len(vectors[0])}", flush=True)
+        if container.wiki_searcher is not None:
+            print(f"discovery={container.wiki_searcher.stats()}", flush=True)
 
         generated = await container.generation_client.generate(
             [
@@ -147,14 +134,8 @@ async def run_smoke(args: argparse.Namespace) -> int:
 def main() -> int:
     parser = argparse.ArgumentParser(description="Run live model gateway smoke test.")
     parser.add_argument("--generation-model")
-    parser.add_argument("--embedding-model")
     parser.add_argument("--rerank-model")
     parser.add_argument("--api-key-stdin", action="store_true")
-    parser.add_argument(
-        "--use-config-vectorstore",
-        action="store_true",
-        help="Use VECTORSTORE_BACKEND from .env instead of forcing memory.",
-    )
     args = parser.parse_args()
     return asyncio.run(run_smoke(args))
 

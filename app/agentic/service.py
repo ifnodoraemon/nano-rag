@@ -7,11 +7,12 @@ from dataclasses import dataclass
 from time import perf_counter
 from typing import TYPE_CHECKING, TypedDict
 
+from app.agentic.discovery import AgenticDiscovery
+from app.core.exceptions import ConfigurationError
 from app.generation.answer_formatter import AnswerFormatter
 from app.generation.prompt_builder import PromptBuilder
 from app.model_client.generation import GenerationClient
 from app.retrieval.graph_expander import GraphExpander
-from app.retrieval.pipeline import RetrievalPipeline
 from app.schemas.chat import ChatRequest, ChatResponse
 from langgraph.graph import END, StateGraph
 
@@ -21,6 +22,7 @@ if TYPE_CHECKING:
     from app.core.config import AppConfig
     from app.core.tracing import TraceStore, TracingManager
     from app.retrieval.graph_store import GraphStore
+    from app.wiki.search import WikiSearcher
 
 
 @dataclass(frozen=True)
@@ -66,22 +68,37 @@ class AgenticReasoningService:
     def __init__(
         self,
         config: AppConfig,
-        retrieval_pipeline: RetrievalPipeline,
         generation_client: GenerationClient,
         prompt_builder: PromptBuilder,
         answer_formatter: AnswerFormatter,
         trace_store: TraceStore,
         tracing_manager: TracingManager,
         graph_store: GraphStore | None = None,
+        wiki_searcher: "WikiSearcher | None" = None,
     ) -> None:
+        if wiki_searcher is None:
+            raise ConfigurationError(
+                "wiki_searcher is required: the agentic engine has no dense "
+                "fallback. Set RAG_WIKI_ENABLED=true (the default) so the "
+                "document-level discovery layer is built."
+            )
         self.config = config
-        self.retrieval_pipeline = retrieval_pipeline
         self.generation_client = generation_client
         self.prompt_builder = prompt_builder
         self.answer_formatter = answer_formatter
         self.trace_store = trace_store
         self.tracing_manager = tracing_manager
         self.graph_expander = GraphExpander(config.parsed_dir, graph_store)
+        # The wiki discovery layer is the only retrieval engine. It is a hard
+        # dependency (not an optional fallback): RAG_WIKI_ENABLED=false is a
+        # misconfiguration that surfaces at startup, not a silent dense reroute.
+        self.agentic_discovery = AgenticDiscovery(
+            config=config,
+            wiki_searcher=wiki_searcher,
+            generation_client=generation_client,
+            trace_store=trace_store,
+            tracing_manager=tracing_manager,
+        )
         agent_settings = config.settings.get("agent", {})
         self.max_retrieval_loops = int(agent_settings.get("max_retrieval_loops", 2))
         self.max_subqueries = int(agent_settings.get("max_subqueries", 4))
@@ -312,6 +329,7 @@ class AgenticReasoningService:
     ) -> dict[str, object]:
         return {
             "engine": "langgraph",
+            "retrieval_engine": "agentic_wiki",
             "workflow_nodes": [
                 "intent_decomposition",
                 "initial_recall",
@@ -331,14 +349,15 @@ class AgenticReasoningService:
     async def _retrieve(
         self, payload: ChatRequest, query: str
     ) -> tuple[list[dict[str, object]], dict[str, object]]:
-        return await self.retrieval_pipeline.run(
-            query,
-            payload.top_k,
-            kb_id=payload.kb_id or "default",
-            session_id=payload.session_id,
-            sample_id=payload.sample_id,
-            metadata_filters=payload.metadata_filters,
-        )
+        return await self.agentic_discovery.retrieve(payload, query)
+
+    async def retrieve(self, payload: ChatRequest) -> tuple[list[dict[str, object]], dict[str, object]]:
+        """Run the discovery+deep-read engine for a query.
+
+        Exposed for the /retrieve and /retrieve/debug endpoints and the eval
+        service: they get the same contexts+trace the chat workflow consumes.
+        """
+        return await self.agentic_discovery.retrieve(payload, payload.query)
 
     def _evidence_plans_from_trace(self, trace: dict[str, object]) -> list[dict[str, object]]:
         retrieval_params = trace.get("retrieval_params")
@@ -465,6 +484,46 @@ class AgenticReasoningService:
             "subqueries": subqueries,
             "evidence": evidence,
         }
+        # Native JSON Schema (same contract as the agentic reading plan) so the
+        # verification decision is as reliably structured as the read plan. The
+        # defensive parse below is kept on purpose: it still handles a model
+        # that returns string-typed booleans / out-of-range numbers, and the
+        # fail-closed path is unchanged.
+        verify_schema = {
+            "type": "json_schema",
+            "json_schema": {
+                "name": "evidence_verification",
+                "schema": {
+                    "type": "object",
+                    "properties": {
+                        "sufficient": {"type": "boolean"},
+                        "coverage_ratio": {
+                            "type": "number",
+                            "minimum": 0,
+                            "maximum": 1,
+                        },
+                        "missing_terms": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                        },
+                        "follow_up_queries": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                        },
+                        "reason": {"type": "string"},
+                    },
+                    "required": [
+                        "sufficient",
+                        "coverage_ratio",
+                        "missing_terms",
+                        "follow_up_queries",
+                        "reason",
+                    ],
+                    "additionalProperties": False,
+                },
+                "strict": True,
+            },
+        }
         try:
             result = await self.generation_client.generate(
                 [
@@ -486,7 +545,8 @@ class AgenticReasoningService:
                             f"{json.dumps(auditor_input, ensure_ascii=False)}"
                         ),
                     },
-                ]
+                ],
+                response_format=verify_schema,
             )
         except Exception as exc:
             # Fail closed: an unavailable verifier must not be treated as

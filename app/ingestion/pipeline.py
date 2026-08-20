@@ -17,23 +17,12 @@ from uuid import uuid4
 from app.ingestion.loader import discover_files
 from app.ingestion.metadata import extract_document_metadata
 from app.ingestion.graph_extractor import GraphExtractor
-from app.vectorstore.repository import VectorRepository
 from app.wiki.compiler import WikiCompiler
 from app.wiki.search import WikiSearcher
 from app.ingestion.structured_parser import StructuredDocumentParser
-from app.core.exceptions import ModelGatewayError, ParsingError
-from app.model_client.embeddings import EmbeddingClient
+from app.core.exceptions import ParsingError
 from app.model_client.document_parser import DocumentParserClient
 from app.model_client.generation import GenerationClient
-from app.model_client.multimodal_embedding import (
-    AudioItem,
-    EmbedItem,
-    FileItem,
-    ImageItem,
-    TextItem,
-    VideoItem,
-)
-from app.retrieval.hybrid_retriever import HybridRetriever
 
 from app.retrieval.graph_store import GraphStore
 from app.schemas.chunk import Chunk
@@ -113,7 +102,6 @@ class PreparedDocument:
     doc_id: str
     document: Document
     chunks: list[Chunk]
-    embeddings: list[list[float]]
     structured_document: StructuredDocument | None = None
 
 
@@ -121,23 +109,17 @@ class IngestionPipeline:
     def __init__(
         self,
         config: AppConfig,
-        repository: VectorRepository,
-        embedding_client: EmbeddingClient,
         generation_client: GenerationClient,
         tracing_manager: TracingManager,
         document_parser: DocumentParserClient | None = None,
-        hybrid_retriever: HybridRetriever | None = None,
         graph_store: GraphStore | None = None,
         wiki_compiler: WikiCompiler | None = None,
         wiki_searcher: WikiSearcher | None = None,
     ) -> None:
         self.config = config
-        self.repository = repository
-        self.embedding_client = embedding_client
         self.generation_client = generation_client
         self.tracing_manager = tracing_manager
         self.document_parser = document_parser
-        self.hybrid_retriever = hybrid_retriever
         self.graph_store = graph_store
         self.wiki_compiler = wiki_compiler
         self.wiki_searcher = wiki_searcher
@@ -188,50 +170,8 @@ class IngestionPipeline:
                     prepared.chunks,
                     prepared.structured_document,
                 )
-                old_chunk_ids = self._committed_chunk_ids(
-                    prepared.source_path,
-                    kb_id=kb_id,
-                    active_doc_id=prepared.doc_id,
-                )
-                new_chunk_ids = {chunk.chunk_id for chunk in prepared.chunks}
-
-                upsert_started = False
                 try:
-                    self.repository.upsert(
-                        prepared.document,
-                        prepared.chunks,
-                        prepared.embeddings,
-                    )
-                    upsert_started = True
                     self._commit_parsed_artifact(artifact_tmp, prepared.document.doc_id)
-                    try:
-                        self._delete_stale_committed_state(
-                            prepared.source_path,
-                            kb_id=kb_id,
-                            doc_id=prepared.doc_id,
-                            keep_chunk_ids=new_chunk_ids,
-                        )
-                    except Exception as exc:
-                        logger.warning(
-                            "stale vector cleanup failed for %s; new index remains committed: %s",
-                            prepared.source_path,
-                            exc,
-                        )
-
-                    if self.hybrid_retriever:
-                        try:
-                            self.hybrid_retriever.remove_by_source(
-                                prepared.source_path,
-                                kb_id=kb_id,
-                                keep_chunk_ids=new_chunk_ids,
-                            )
-                            self.hybrid_retriever.index_chunks(prepared.chunks)
-                        except Exception as exc:
-                            logger.warning(
-                                "hybrid index refresh failed for %s; vector index remains committed: %s",
-                                prepared.source_path,
-                                exc,
-                            )
                     if self.graph_store and prepared.structured_document:
                         try:
                             await asyncio.to_thread(
@@ -240,7 +180,7 @@ class IngestionPipeline:
                             )
                         except Exception as exc:
                             logger.warning(
-                                "graph store update failed for %s; vector index remains committed: %s",
+                                "graph store update failed for %s; parsed artifact remains committed: %s",
                                 prepared.source_path,
                                 exc,
                             )
@@ -250,19 +190,12 @@ class IngestionPipeline:
                             wiki_updated = True
                         except Exception as exc:
                             logger.warning(
-                                "wiki compiler update failed for %s; vector index remains committed: %s",
+                                "wiki compiler update failed for %s; parsed artifact remains committed: %s",
                                 prepared.source_path,
                                 exc,
                             )
                 except Exception:
                     artifact_tmp.unlink(missing_ok=True)
-
-                    if upsert_started:
-                        self._rollback_uncommitted_vector_state(
-                            prepared.source_path,
-                            kb_id=kb_id,
-                            keep_chunk_ids=old_chunk_ids,
-                        )
                     raise
 
             if wiki_updated and self.wiki_searcher:
@@ -366,19 +299,11 @@ class IngestionPipeline:
                 start_index=len(chunks),
             )
         )
-        embed_inputs = self._chunks_to_embed_inputs(chunks, file_path=file_path)
-        embeddings = await self._embed_items(embed_inputs)
-        if len(embeddings) != len(chunks):
-            raise ModelGatewayError(
-                "embedding service returned an inconsistent number of vectors"
-            )
-
         return PreparedDocument(
             source_path=source_path,
             doc_id=doc_id,
             document=document,
             chunks=chunks,
-            embeddings=embeddings,
             structured_document=structured_document,
         )
 
@@ -821,16 +746,6 @@ class IngestionPipeline:
             logger.warning("failed to extract embedded images from %s: %s", source_path, exc)
         return chunks
 
-    async def _embed_items(
-        self, items: list[list[EmbedItem]]
-    ) -> list[list[float]]:
-        embed_items_fn = getattr(self.embedding_client, "embed_items", None)
-        if embed_items_fn is None:
-            raise ModelGatewayError(
-                "embedding client must implement embed_items; text-only compatibility path is disabled"
-            )
-        return await embed_items_fn(items)
-
     async def _prepare_media_document(
         self,
         file_path: Path,
@@ -886,22 +801,6 @@ class IngestionPipeline:
             media_uri=str(document_metadata["media_uri"]),
             mime_type=mime_type,
         )
-        try:
-            media_bytes = file_path.read_bytes()
-        except OSError as exc:
-            raise ParsingError(
-                f"failed to read {modality} bytes for {source_path}: {exc}"
-            ) from exc
-        item: EmbedItem
-        if modality == "image":
-            item = ImageItem(data=media_bytes, mime_type=mime_type)
-        elif modality == "audio":
-            item = AudioItem(data=media_bytes, mime_type=mime_type)
-        elif modality == "video":
-            item = VideoItem(data=media_bytes, mime_type=mime_type)
-        else:  # pragma: no cover — guarded by MEDIA_SUFFIXES
-            raise ParsingError(f"unsupported media modality for {source_path}")
-
         chunks = [media_chunk]
         structured_document: StructuredDocument | None = None
         text = ""
@@ -962,19 +861,11 @@ class IngestionPipeline:
             content=text,
             metadata=document_metadata,
         )
-        embed_inputs = [[item], *self._chunks_to_embed_inputs(chunks[1:], file_path=file_path)]
-        embeddings = await self._embed_items(embed_inputs)
-        if len(embeddings) != len(chunks):
-            raise ModelGatewayError(
-                "embedding service returned an inconsistent number of vectors"
-            )
-
         return PreparedDocument(
             source_path=source_path,
             doc_id=doc_id,
             document=document,
             chunks=chunks,
-            embeddings=embeddings,
             structured_document=structured_document,
         )
 
@@ -1002,50 +893,6 @@ class IngestionPipeline:
                 exc,
             )
             return None
-
-    def _chunks_to_embed_inputs(
-        self,
-        chunks: list[Chunk],
-        file_path: Path | None = None,
-    ) -> list[list[EmbedItem]]:
-        inputs: list[list[EmbedItem]] = []
-        for chunk in chunks:
-            if chunk.modality in ("image", "audio", "video", "document"):
-                source = None
-                if chunk.media_uri:
-                    candidate = Path(chunk.media_uri)
-                    source = candidate if candidate.exists() else None
-                if source is None and file_path is not None:
-                    allowed_suffixes = (
-                        DOCUMENT_ATTACHMENT_SUFFIXES
-                        if chunk.modality == "document"
-                        else MEDIA_SUFFIXES
-                    )
-                    source = file_path if file_path.suffix.lower() in allowed_suffixes else None
-                if source is None:
-                    raise ModelGatewayError(
-                        f"cannot re-embed {chunk.modality} chunk {chunk.chunk_id}: "
-                        "bytes not available; the upload directory may have been "
-                        "pruned. Re-ingest the original file."
-                    )
-                mime = (
-                    chunk.mime_type
-                    or MEDIA_MIME_TYPES.get(source.suffix.lower())
-                    or DOCUMENT_ATTACHMENT_MIME_TYPES.get(source.suffix.lower())
-                    or "application/octet-stream"
-                )
-                payload = source.read_bytes()
-                if chunk.modality == "image":
-                    inputs.append([ImageItem(data=payload, mime_type=mime)])
-                elif chunk.modality == "audio":
-                    inputs.append([AudioItem(data=payload, mime_type=mime)])
-                elif chunk.modality == "video":
-                    inputs.append([VideoItem(data=payload, mime_type=mime)])
-                else:
-                    inputs.append([FileItem(path=source, mime_type=mime)])
-            else:
-                inputs.append([TextItem(chunk.text)])
-        return inputs
 
     def _resolve_source_path(
         self, file_path: Path, source_path_overrides: dict[str, str] | None = None
@@ -1077,110 +924,6 @@ class IngestionPipeline:
         identity = "|".join([kb_id, source_path])
         digest = hashlib.sha256(identity.encode("utf-8")).hexdigest()
         return f"doc-{digest[:24]}"
-
-    def _cleanup_parsed_artifacts(
-        self,
-        source_path: str,
-        active_doc_id: str,
-        kb_id: str,
-        remove_active_doc: bool = False,
-    ) -> None:
-        if not self.config.parsed_dir.exists():
-            return
-        for artifact in self.config.parsed_dir.glob("*.json"):
-            if artifact.stem == active_doc_id and not remove_active_doc:
-                continue
-            try:
-                payload = json.loads(artifact.read_text(encoding="utf-8"))
-            except json.JSONDecodeError:
-                continue
-            document = payload.get("document") if isinstance(payload, dict) else None
-            metadata = (
-                document.get("metadata", {}) if isinstance(document, dict) else {}
-            )
-            if (
-                isinstance(document, dict)
-                and document.get("source_path") == source_path
-                and metadata.get("kb_id", "default") == kb_id
-            ):
-                artifact.unlink(missing_ok=True)
-
-    def _delete_stale_committed_state(
-        self,
-        source_path: str,
-        doc_id: str,
-        kb_id: str,
-        keep_chunk_ids: set[str],
-    ) -> None:
-        self.repository.delete_by_source(
-            source_path,
-            kb_id=kb_id,
-            keep_chunk_ids=keep_chunk_ids,
-        )
-        self._cleanup_parsed_artifacts(
-            source_path,
-            doc_id,
-            kb_id,
-            remove_active_doc=False,
-        )
-
-    def _committed_chunk_ids(
-        self,
-        source_path: str,
-        kb_id: str,
-        active_doc_id: str,
-    ) -> set[str]:
-        artifact = self.config.parsed_dir / f"{active_doc_id}.json"
-        if not artifact.exists():
-            return set()
-        try:
-            payload = json.loads(artifact.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            return set()
-        document = payload.get("document") if isinstance(payload, dict) else None
-        metadata = document.get("metadata", {}) if isinstance(document, dict) else {}
-        if not (
-            isinstance(document, dict)
-            and document.get("source_path") == source_path
-            and metadata.get("kb_id", "default") == kb_id
-        ):
-            return set()
-        raw_chunks = payload.get("chunks", []) if isinstance(payload, dict) else []
-        if not isinstance(raw_chunks, list):
-            return set()
-        return {
-            str(chunk.get("chunk_id"))
-            for chunk in raw_chunks
-            if isinstance(chunk, dict) and chunk.get("chunk_id")
-        }
-
-
-
-    def _rollback_uncommitted_vector_state(
-        self,
-        source_path: str,
-        kb_id: str,
-        keep_chunk_ids: set[str],
-    ) -> None:
-        try:
-            self.repository.delete_by_source(
-                source_path,
-                kb_id=kb_id,
-                keep_chunk_ids=keep_chunk_ids,
-            )
-            if self.hybrid_retriever:
-                self.hybrid_retriever.remove_by_source(
-                    source_path,
-                    kb_id=kb_id,
-                    keep_chunk_ids=keep_chunk_ids,
-                )
-        except Exception as exc:
-            logger.warning(
-                "failed to roll back uncommitted vector state for %s: %s",
-                source_path,
-                exc,
-            )
-
 
     def _stage_parsed_artifact(
         self,

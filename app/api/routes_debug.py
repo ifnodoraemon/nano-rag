@@ -234,11 +234,13 @@ async def retrieve_debug(
     container = request.app.state.container
     kb_id = payload.kb_id or "default"
     _ensure_kb_access(container, kb_id, context)
-    return await container.retrieval_pipeline.debug(
-        payload.query,
-        payload.top_k,
-        kb_id=kb_id,
-        session_id=payload.session_id,
+    contexts, trace = await container.chat_pipeline.retrieve(payload)
+    return RetrievalDebugResponse(
+        query=payload.query,
+        retrieved=contexts,
+        reranked=contexts,
+        contexts=contexts,
+        trace_id=str(trace.get("trace_id")),
     )
 
 
@@ -614,7 +616,7 @@ async def storage_debug(
             if metadata.get("kb_id", "default") in allowed_kb_ids:
                 parsed_files.append(path.name)
     return {
-        "vectorstore": container.repository.stats(),
+        "wiki": container.wiki_searcher.stats() if container.wiki_searcher else {},
         "parsed_dir": str(parsed_dir),
         "parsed_files": parsed_files,
     }

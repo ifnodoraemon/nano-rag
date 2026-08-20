@@ -113,10 +113,10 @@ class DiagnosisService:
                 DiagnosisFinding(
                     category="retrieval_empty",
                     severity="high",
-                    rationale="The retrieval stage returned no candidate chunks, so the likely issue is ingestion, embeddings, or retrieval configuration.",
+                    rationale="The retrieval stage returned no candidate documents, so the likely issue is ingestion or discovery (wiki/BM25) configuration.",
                     suggested_actions=[
-                        "Confirm that documents were ingested successfully and the vector store contains data.",
-                        "Check that the embedding model and collection dimensions are aligned.",
+                        "Confirm that documents were ingested successfully and wiki source pages exist.",
+                        "Check that the BM25 discovery index has indexed the expected kb_id.",
                         "Increase retrieval top_k first, then inspect the retrieve/debug output.",
                     ],
                     evidence={"retrieved_count": 0, "context_count": len(contexts)},
@@ -177,23 +177,6 @@ class DiagnosisService:
                     )
                 )
 
-        if contexts and retrieved and len(contexts) < min(len(retrieved), 1):
-            findings.append(
-                DiagnosisFinding(
-                    category="context_trimmed",
-                    severity="low",
-                    rationale="Retrieval produced results, but only a small number of final contexts remained, likely because final_contexts is too restrictive.",
-                    suggested_actions=[
-                        "Check whether retrieval.final_contexts is set too low.",
-                    ],
-                    evidence={
-                        "retrieved_count": len(retrieved),
-                        "context_count": len(contexts),
-                        "retrieval_params": trace.retrieval_params,
-                    },
-                )
-            )
-
         if not findings:
             findings.append(
                 DiagnosisFinding(
@@ -243,8 +226,8 @@ class DiagnosisService:
                     rationale="The reference evidence did not appear completely in retrieved_contexts, so the primary issue is in retrieval.",
                     suggested_actions=[
                         "Check whether chunking is too coarse or too fine.",
-                        "Increase retrieval top_k and inspect the rank of the correct chunk.",
-                        "Introduce rerank or change the embedding model if needed.",
+                        "Increase retrieval top_k and inspect the rank of the correct document.",
+                        "Review the wiki discovery layer: page summaries, topic pages, and version metadata.",
                     ],
                     evidence={
                         "reference_context_recall": context_recall,

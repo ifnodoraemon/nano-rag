@@ -170,16 +170,18 @@ async def materialize_eval_records(
             claim_stats = _claim_verification_stats(prepared.get("supporting_claims", []))
 
         if not retrieved_contexts:
-            retrieval = await container.retrieval_pipeline.debug(
-                query,
-                top_k,
-                kb_id=kb_id,
-                session_id=session_id,
+            contexts, trace = await container.chat_pipeline.retrieve(
+                ChatRequest(
+                    query=query,
+                    top_k=top_k,
+                    kb_id=kb_id,
+                    session_id=session_id,
+                )
             )
             prepared["retrieved_contexts"] = [
-                _context_to_text(context) for context in retrieval.contexts
+                _context_to_text(context) for context in contexts
             ]
-            conflicting_context_count = _count_conflicting_contexts(retrieval.contexts)
+            conflicting_context_count = _count_conflicting_contexts(contexts)
 
         if not conflicting_context_count and prepared.get("trace_id"):
             trace = container.trace_store.get(str(prepared["trace_id"]))

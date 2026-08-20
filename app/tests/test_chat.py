@@ -88,8 +88,14 @@ async def test_health_route(monkeypatch) -> None:
             rerank_enabled=False,
             business_api_keys=set(),
         ),
-        repository=SimpleNamespace(
-            stats=lambda: {"backend": "memory", "documents": 0, "chunks": 0}
+        wiki_searcher=SimpleNamespace(
+            stats=lambda: {
+                "backend": "wiki-bm25",
+                "document_count": 0,
+                "source_pages": 0,
+                "topic_pages": 0,
+                "index_pages": 0,
+            }
         ),
         trace_store=SimpleNamespace(list=lambda: fake_trace_list),
     )
@@ -130,7 +136,6 @@ async def test_health_route(monkeypatch) -> None:
     assert payload["auth_enabled"] is True
     assert payload["auth_configured"] is False
     assert payload["auth_status"] == "missing_keys"
-    assert payload["vectorstore_backend"] == "memory"
     assert payload["parsed_dir"] == "/tmp/parsed"
     assert payload["gateway"]["reachable"] is True
     assert payload["gateway"]["base_url"] == "http://gateway.local"
@@ -139,7 +144,8 @@ async def test_health_route(monkeypatch) -> None:
     assert payload["langfuse"]["otel_reachable"] is True
     assert payload["langfuse"]["enabled"] is True
     assert payload["providers"]["document_parser"]["configured"] is True
-    assert payload["vectorstore"]["details"]["backend"] == "memory"
+    assert payload["discovery"]["status"] == "ok"
+    assert payload["discovery"]["details"]["backend"] == "wiki-bm25"
     assert payload["features"]["wiki"] is False
     assert payload["features"]["eval"] is False
     assert payload["features"]["diagnosis"] is False
@@ -171,8 +177,14 @@ async def test_health_detail_uses_cache_for_repeated_probes(monkeypatch) -> None
             rerank_enabled=False,
             business_api_keys=set(),
         ),
-        repository=SimpleNamespace(
-            stats=lambda: {"backend": "memory", "documents": 0, "chunks": 0}
+        wiki_searcher=SimpleNamespace(
+            stats=lambda: {
+                "backend": "wiki-bm25",
+                "document_count": 0,
+                "source_pages": 0,
+                "topic_pages": 0,
+                "index_pages": 0,
+            }
         ),
         trace_store=SimpleNamespace(list=lambda: fake_trace_list),
     )
@@ -209,7 +221,9 @@ async def test_health_detail_uses_cache_for_repeated_probes(monkeypatch) -> None
     assert first["cached"] is False
     assert second["cached"] is True
     assert third["cached"] is False
-    assert calls["get"] == 4
+    # Only the generation capability is probed now (embedding was removed); each
+    # non-cached probe does one GET, and the middle call is served from cache.
+    assert calls["get"] == 2
 
 
 @pytest.mark.asyncio
@@ -239,8 +253,14 @@ async def test_health_route_marks_gateway_4xx_as_degraded(monkeypatch) -> None:
             rerank_enabled=False,
             business_api_keys=set(),
         ),
-        repository=SimpleNamespace(
-            stats=lambda: {"backend": "memory", "documents": 0, "chunks": 0}
+        wiki_searcher=SimpleNamespace(
+            stats=lambda: {
+                "backend": "wiki-bm25",
+                "document_count": 0,
+                "source_pages": 0,
+                "topic_pages": 0,
+                "index_pages": 0,
+            }
         ),
         trace_store=SimpleNamespace(list=lambda: fake_trace_list),
     )
@@ -315,8 +335,14 @@ async def test_health_route_does_not_degrade_when_langfuse_is_disabled(monkeypat
             rerank_enabled=False,
             business_api_keys=set(),
         ),
-        repository=SimpleNamespace(
-            stats=lambda: {"backend": "memory", "documents": 0, "chunks": 0}
+        wiki_searcher=SimpleNamespace(
+            stats=lambda: {
+                "backend": "wiki-bm25",
+                "document_count": 0,
+                "source_pages": 0,
+                "topic_pages": 0,
+                "index_pages": 0,
+            }
         ),
         trace_store=SimpleNamespace(list=lambda: fake_trace_list),
     )
@@ -377,8 +403,14 @@ async def test_health_route_respects_auth_disabled_override(monkeypatch) -> None
             rerank_enabled=False,
             business_api_keys={"secret"},
         ),
-        repository=SimpleNamespace(
-            stats=lambda: {"backend": "memory", "documents": 0, "chunks": 0}
+        wiki_searcher=SimpleNamespace(
+            stats=lambda: {
+                "backend": "wiki-bm25",
+                "document_count": 0,
+                "source_pages": 0,
+                "topic_pages": 0,
+                "index_pages": 0,
+            }
         ),
         trace_store=SimpleNamespace(list=lambda: fake_trace_list),
     )
@@ -439,8 +471,14 @@ async def test_health_route_reports_configured_auth(monkeypatch) -> None:
             rerank_enabled=False,
             business_api_keys={"secret"},
         ),
-        repository=SimpleNamespace(
-            stats=lambda: {"backend": "memory", "documents": 0, "chunks": 0}
+        wiki_searcher=SimpleNamespace(
+            stats=lambda: {
+                "backend": "wiki-bm25",
+                "document_count": 0,
+                "source_pages": 0,
+                "topic_pages": 0,
+                "index_pages": 0,
+            }
         ),
         trace_store=SimpleNamespace(list=lambda: fake_trace_list),
     )
@@ -481,7 +519,7 @@ async def test_global_exception_handlers_never_echo_upstream_detail() -> None:
     from app.main import handle_model_gateway_error, handle_parsing_error
 
     gateway = await handle_model_gateway_error(
-        SimpleNamespace(), ModelGatewayError("embedding request failed: 403 {\"error\":\"quota exceeded for key sk-secret\"}")
+        SimpleNamespace(), ModelGatewayError("generation request failed: 403 {\"error\":\"quota exceeded for key sk-secret\"}")
     )
     assert gateway.status_code == 502
     assert json.loads(gateway.body) == {"detail": "upstream model gateway error"}

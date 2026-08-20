@@ -80,7 +80,7 @@ def _log_startup_readiness(config) -> None:  # noqa: ANN001
             ", ".join(document_parser.get("missing", [])),
         )
 
-    capabilities = ["generation", "embedding"]
+    capabilities = ["generation"]
     if config.rerank_enabled:
         capabilities.append("rerank")
     for capability in capabilities:
@@ -142,41 +142,6 @@ async def _probe_gateway(
                 else:
                     errors.append(f"{path}: {response.status_code}")
             return False, "; ".join(errors) if errors else None
-    except httpx.HTTPError as exc:
-        detail = str(exc).strip() or exc.__class__.__name__
-        return False, detail
-
-
-async def _probe_embedding_gateway(config, gateway: dict[str, str]) -> tuple[bool, str | None]:  # noqa: ANN001
-    provider = (
-        os.getenv("EMBEDDING_PROVIDER")
-        or getattr(config, "models", {}).get("embedding", {}).get("provider")
-        or "gemini"
-    ).lower()
-    if provider != "gemini":
-        return await _probe_gateway(
-            gateway["base_url"],
-            gateway["api_key"],
-            config.gateway_models_probe_paths,
-        )
-
-    alias = (
-        os.getenv("EMBEDDING_MODEL_ALIAS")
-        or getattr(config, "models", {}).get("embedding", {}).get("default_alias")
-        or "gemini-embedding-2-preview"
-    )
-    base_url = gateway["base_url"].rstrip("/")
-    for suffix in ("/v1beta/openai", "/v1/openai", "/openai", "/v1beta", "/v1"):
-        if base_url.endswith(suffix):
-            base_url = base_url[: -len(suffix)]
-            break
-    url = f"{base_url}/v1beta/models/{alias}"
-    try:
-        async with httpx.AsyncClient(timeout=5) as client:
-            response = await client.get(url, headers={"x-goog-api-key": gateway["api_key"]})
-            if 200 <= response.status_code < 400:
-                return True, None
-            return False, f"{response.status_code} {response.text.strip()}"
     except httpx.HTTPError as exc:
         detail = str(exc).strip() or exc.__class__.__name__
         return False, detail
@@ -312,7 +277,7 @@ async def _build_health_detail(container) -> dict[str, object]:  # noqa: ANN001
     }
     document_parser = config.document_parser_configured
 
-    required_capabilities = ["generation", "embedding"]
+    required_capabilities = ["generation"]
     if config.rerank_enabled:
         required_capabilities.append("rerank")
 
@@ -328,14 +293,11 @@ async def _build_health_detail(container) -> dict[str, object]:  # noqa: ANN001
             }
             gateway_ok = False
             continue
-        if capability == "embedding":
-            reachable, error = await _probe_embedding_gateway(config, gateway)
-        else:
-            reachable, error = await _probe_gateway(
-                gateway["base_url"],
-                gateway["api_key"],
-                config.gateway_models_probe_paths,
-            )
+        reachable, error = await _probe_gateway(
+            gateway["base_url"],
+            gateway["api_key"],
+            config.gateway_models_probe_paths,
+        )
         capability_gateways[capability] = {
             "base_url": gateway["base_url"],
             "reachable": reachable,
@@ -353,15 +315,6 @@ async def _build_health_detail(container) -> dict[str, object]:  # noqa: ANN001
             getattr(config, "langfuse_otel_headers", {}),
         )
 
-    vectorstore_status = "ok"
-    vectorstore_error: str | None = None
-    vectorstore_stats: dict[str, object] = {}
-    try:
-        vectorstore_stats = container.repository.stats()
-    except Exception as exc:  # pragma: no cover
-        vectorstore_status = "error"
-        vectorstore_error = str(exc)
-
     graphstore_status = "disabled"
     graphstore_error: str | None = None
     graph_backend = getattr(config, "graph_backend", "artifact")
@@ -375,13 +328,25 @@ async def _build_health_detail(container) -> dict[str, object]:  # noqa: ANN001
             graphstore_status = "error"
             graphstore_error = str(exc)
 
+    # The wiki BM25 layer is the retrieval engine's storage; surface it where
+    # the vectorstore used to live so the ops console stays informative.
+    discovery_status = "disabled"
+    discovery_error: str | None = None
+    discovery_stats: dict[str, object] = {"backend": "wiki-bm25"}
+    wiki_searcher = getattr(container, "wiki_searcher", None)
+    if wiki_searcher is not None:
+        discovery_status = "ok"
+        try:
+            discovery_stats = wiki_searcher.stats()
+        except Exception as exc:  # pragma: no cover
+            discovery_status = "error"
+            discovery_error = str(exc)
+
     features = {
         "wiki": bool(getattr(config, "wiki_enabled", False)),
-        "hybrid_search": bool(getattr(config, "hybrid_search_enabled", False)),
         "structured_ingestion": True,
         "agent_workflow": "langgraph",
         "graph_store": graphstore_stats.get("backend", graph_backend),
-        "query_rewrite": bool(getattr(config, "query_rewrite_enabled", False)),
         "diagnosis": bool(getattr(config, "diagnosis_enabled", False)),
         "eval": bool(getattr(config, "eval_enabled", False)),
         "benchmark": bool(getattr(config, "benchmark_enabled", False)),
@@ -390,8 +355,8 @@ async def _build_health_detail(container) -> dict[str, object]:  # noqa: ANN001
     status = (
         "ok"
         if gateway_ok
-        and vectorstore_status == "ok"
         and graphstore_status != "error"
+        and discovery_status != "error"
         else "degraded"
     )
     generation_gateway = capability_gateways.get("generation", {})
@@ -400,7 +365,6 @@ async def _build_health_detail(container) -> dict[str, object]:  # noqa: ANN001
         "service": "nano-rag",
         "gateway_mode": config.gateway_mode,
         **auth_state,
-        "vectorstore_backend": vectorstore_stats.get("backend", "unknown"),
         "parsed_dir": str(config.parsed_dir),
         "gateway": {
             "base_url": generation_gateway.get("base_url"),
@@ -424,15 +388,15 @@ async def _build_health_detail(container) -> dict[str, object]:  # noqa: ANN001
             "ui_endpoint": config.langfuse_ui_endpoint or None,
             **langfuse_status,
         },
-        "vectorstore": {
-            "status": vectorstore_status,
-            "error": vectorstore_error,
-            "details": vectorstore_stats,
-        },
         "graphstore": {
             "status": graphstore_status,
             "error": graphstore_error,
             "details": graphstore_stats,
+        },
+        "discovery": {
+            "status": discovery_status,
+            "error": discovery_error,
+            "details": discovery_stats,
         },
         "ingestion": {
             "executor": getattr(config, "ingest_executor", "background"),

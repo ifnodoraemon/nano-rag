@@ -1,7 +1,7 @@
 import re
 import os
 
-from app.vectorstore.repository import SearchHit
+from app.retrieval.hits import SearchHit
 
 DEFAULT_BUCKET_ORDER = ["topic", "raw", "source", "index"]
 DEFAULT_EVIDENCE_ORDER = ["primary", "supporting", "conflicting"]

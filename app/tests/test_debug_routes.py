@@ -528,7 +528,7 @@ async def test_retrieve_debug_rejects_inaccessible_kb() -> None:
         raise AssertionError("debug retrieval should not run")
 
     container = SimpleNamespace(
-        retrieval_pipeline=SimpleNamespace(debug=fake_debug),
+        chat_pipeline=SimpleNamespace(retrieve=fake_debug),
         knowledge_base_catalog=FakeCatalog(),
     )
 
@@ -598,7 +598,15 @@ async def test_storage_and_parsed_debug_filter_by_allowed_kbs(tmp_path) -> None:
     )
     container = SimpleNamespace(
         config=SimpleNamespace(parsed_dir=parsed_dir),
-        repository=SimpleNamespace(stats=lambda: {"backend": "memory"}),
+        wiki_searcher=SimpleNamespace(
+            stats=lambda: {
+                "backend": "wiki-bm25",
+                "document_count": 0,
+                "source_pages": 0,
+                "topic_pages": 0,
+                "index_pages": 0,
+            }
+        ),
         knowledge_base_catalog=FakeCatalog(),
     )
     context = RequestContext(auth_mode="api_key", allowed_kb_ids={"default"})

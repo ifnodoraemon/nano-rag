@@ -137,7 +137,6 @@ def parse_args() -> argparse.Namespace:
         help="Only ingest corpus records whose file name contains this substring. Can be repeated.",
     )
     parser.add_argument("--skip-queries", action="store_true")
-    parser.add_argument("--vectorstore", choices=["milvus", "memory"], default="milvus")
     parser.add_argument("--graph-backend", choices=["neo4j", "artifact", "none"], default="neo4j")
     return parser.parse_args()
 
@@ -147,14 +146,11 @@ def configure_runtime(args: argparse.Namespace, corpus_dir: Path) -> None:
     for key in (
         "MODEL_GATEWAY_API_KEY",
         "GENERATION_API_KEY",
-        "EMBEDDING_API_KEY",
         "DOCUMENT_PARSER_API_KEY",
         "MODEL_GATEWAY_BASE_URL",
         "GENERATION_API_BASE_URL",
-        "EMBEDDING_API_BASE_URL",
         "DOCUMENT_PARSER_API_BASE_URL",
         "GENERATION_MODEL_ALIAS",
-        "EMBEDDING_MODEL_ALIAS",
         "DOCUMENT_PARSER_MODEL",
     ):
         value = os.getenv(f"COMPOSE_{key}", "")
@@ -162,13 +158,11 @@ def configure_runtime(args: argparse.Namespace, corpus_dir: Path) -> None:
             os.environ.setdefault(key, value)
     normalize_provider_env()
     os.environ["MODEL_GATEWAY_MODE"] = "live"
-    os.environ["VECTORSTORE_BACKEND"] = args.vectorstore
+    os.environ.setdefault("RAG_WIKI_ENABLED", "true")
     os.environ["RAG_GRAPH_BACKEND"] = "artifact" if args.graph_backend == "none" else args.graph_backend
     os.environ["RAG_INGEST_ALLOWED_DIRS"] = str(corpus_dir.resolve())
     os.environ.setdefault("RAG_AUTH_DISABLED", "true")
     os.environ.setdefault("DISABLE_RERANK", "true")
-    if args.vectorstore == "milvus":
-        os.environ.setdefault("MILVUS_URI", "http://127.0.0.1:19530")
     if args.graph_backend == "neo4j":
         os.environ.setdefault("NEO4J_URI", "bolt://127.0.0.1:7687")
         os.environ.setdefault("NEO4J_USER", "neo4j")
@@ -416,7 +410,7 @@ async def main_async() -> int:
             "status": "ok" if ingest_failed == 0 and query_failed == 0 else "partial",
             "created_at": int(time.time()),
             "runtime": {
-                "vectorstore": container.repository.stats(),
+                "discovery": container.wiki_searcher.stats() if container.wiki_searcher else {},
                 "graph_backend": args.graph_backend,
                 "kb_id": args.kb_id,
                 "top_k": args.top_k,

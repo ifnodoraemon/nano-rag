@@ -109,28 +109,17 @@ async def test_business_chat_uses_kb_scope_and_metadata_filters() -> None:
 
 @pytest.mark.asyncio
 async def test_business_retrieve_uses_kb_scope_and_metadata_filters() -> None:
-    async def fake_retrieve_debug(  # noqa: ANN001
-        query,
-        top_k=None,
-        kb_id="default",
-        session_id=None,
-        metadata_filters=None,
-    ):
-        assert query == "policy"
-        assert top_k == 5
-        assert kb_id == "default"
-        assert session_id == "session-a"
-        assert metadata_filters == {"doc_types": ["policy"]}
-        return SimpleNamespace(
-            query=query,
-            contexts=[{"chunk_id": "c1", "text": "answer context"}],
-            retrieved=[{"chunk_id": "c1", "score": 0.9}],
-            reranked=[{"chunk_id": "c1", "score": 0.95}],
-            trace_id="trace-retrieve-1",
-        )
+    async def fake_retrieve(chat_request):  # noqa: ANN001
+        assert chat_request.query == "policy"
+        assert chat_request.top_k == 5
+        assert chat_request.kb_id == "default"
+        assert chat_request.session_id == "session-a"
+        assert chat_request.metadata_filters == {"doc_types": ["policy"]}
+        contexts = [{"chunk_id": "c1", "text": "answer context"}]
+        return contexts, {"trace_id": "trace-retrieve-1"}
 
     container = SimpleNamespace(
-        retrieval_pipeline=SimpleNamespace(debug=fake_retrieve_debug)
+        chat_pipeline=SimpleNamespace(retrieve=fake_retrieve)
     )
 
     response = await rag_retrieve(
@@ -149,14 +138,15 @@ async def test_business_retrieve_uses_kb_scope_and_metadata_filters() -> None:
     assert response.session_id == "session-a"
     assert response.trace_id == "trace-retrieve-1"
     assert response.contexts == [{"chunk_id": "c1", "text": "answer context"}]
-    assert response.retrieved == [{"chunk_id": "c1", "score": 0.9}]
-    assert response.reranked == [{"chunk_id": "c1", "score": 0.95}]
+    # contexts is fanned out to retrieved/reranked by the discovery-based route.
+    assert response.retrieved == response.contexts
+    assert response.reranked == response.contexts
 
 
 @pytest.mark.asyncio
 async def test_business_retrieve_rejects_inaccessible_kb() -> None:
     container = SimpleNamespace(
-        retrieval_pipeline=SimpleNamespace(debug=None),
+        chat_pipeline=SimpleNamespace(retrieve=None),
     )
 
     with pytest.raises(HTTPException) as exc_info:

@@ -15,7 +15,8 @@ RUN mkdir -p \
     /workspace/data/parsed \
     /workspace/data/reports/traces \
     /workspace/data/reports/feedback \
-    /workspace/data/uploads
+    /workspace/data/uploads \
+    /workspace/data/wiki
 RUN chown -R appuser:appgroup /workspace
 
 USER appuser

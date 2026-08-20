@@ -9,17 +9,12 @@ services:
     environment: &app-env
       APP_CONFIG_DIR: /workspace/configs
       RAG_ENV: ${RAG_ENV:-local}
-      VECTORSTORE_BACKEND: ${VECTORSTORE_BACKEND:-milvus}
-      MILVUS_URI: ${MILVUS_URI:-http://milvus:19530}
-      MILVUS_TOKEN: ${MILVUS_TOKEN:-}
-      MILVUS_USER: ${MILVUS_USER:-}
-      MILVUS_PASSWORD: ${MILVUS_PASSWORD:-}
       HTTP_PROXY: ${HTTP_PROXY:-}
       HTTPS_PROXY: ${HTTPS_PROXY:-}
-      NO_PROXY: ${NO_PROXY:-localhost,127.0.0.1,::1},app,redis,neo4j,milvus,etcd,minio
+      NO_PROXY: ${NO_PROXY:-localhost,127.0.0.1,::1},app,redis,neo4j
       http_proxy: ${http_proxy:-}
       https_proxy: ${https_proxy:-}
-      no_proxy: ${no_proxy:-localhost,127.0.0.1,::1},app,redis,neo4j,milvus,etcd,minio
+      no_proxy: ${no_proxy:-localhost,127.0.0.1,::1},app,redis,neo4j
       ALL_PROXY: ""
       all_proxy: ""
       PARSED_OUTPUT_DIR: /workspace/data/parsed
@@ -49,19 +44,13 @@ services:
       MODEL_GATEWAY_MODE: ${MODEL_GATEWAY_MODE:-live}
       MODEL_GATEWAY_BASE_URL: ${COMPOSE_MODEL_GATEWAY_BASE_URL:-https://generativelanguage.googleapis.com/v1beta/openai}
       MODEL_GATEWAY_API_KEY: ${COMPOSE_MODEL_GATEWAY_API_KEY:-}
-      GENERATION_MODEL_ALIAS: ${COMPOSE_GENERATION_MODEL_ALIAS:-gemini-flash-lite-latest}
+      GENERATION_MODEL_ALIAS: ${COMPOSE_GENERATION_MODEL_ALIAS:-gemini-flash-latest}
       GENERATION_API_BASE_URL: ${COMPOSE_GENERATION_API_BASE_URL:-https://generativelanguage.googleapis.com/v1beta/openai}
       GENERATION_API_KEY: ${COMPOSE_GENERATION_API_KEY:-}
-      # Multimodal embedding calls the configured provider directly.
-      # No alternate provider key is applied.
-      EMBEDDING_PROVIDER: ${COMPOSE_EMBEDDING_PROVIDER:-gemini}
-      EMBEDDING_MODEL_ALIAS: ${COMPOSE_EMBEDDING_MODEL_ALIAS:-gemini-embedding-2-preview}
-      EMBEDDING_API_BASE_URL: ${COMPOSE_EMBEDDING_API_BASE_URL:-https://generativelanguage.googleapis.com}
-      EMBEDDING_API_KEY: ${COMPOSE_EMBEDDING_API_KEY:-}
 
       DOCUMENT_PARSER_ENABLED: ${DOCUMENT_PARSER_ENABLED:-true}
       DOCUMENT_PARSER_PROVIDER: ${COMPOSE_DOCUMENT_PARSER_PROVIDER:-gemini}
-      DOCUMENT_PARSER_MODEL: ${COMPOSE_DOCUMENT_PARSER_MODEL:-gemini-flash-lite-latest}
+      DOCUMENT_PARSER_MODEL: ${COMPOSE_DOCUMENT_PARSER_MODEL:-gemini-flash-latest}
       DOCUMENT_PARSER_API_BASE_URL: ${COMPOSE_DOCUMENT_PARSER_API_BASE_URL:-https://generativelanguage.googleapis.com}
       DOCUMENT_PARSER_API_KEY: ${COMPOSE_DOCUMENT_PARSER_API_KEY:-}
       RERANK_MODEL_ALIAS: ${COMPOSE_RERANK_MODEL_ALIAS:-disabled}
@@ -79,8 +68,6 @@ services:
       - app-wiki-data:/workspace/data/wiki
     depends_on:
       redis:
-        condition: service_healthy
-      milvus:
         condition: service_healthy
       neo4j:
         condition: service_healthy
@@ -129,8 +116,6 @@ services:
     depends_on:
       redis:
         condition: service_healthy
-      milvus:
-        condition: service_healthy
       neo4j:
         condition: service_healthy
     restart: unless-stopped
@@ -173,72 +158,6 @@ services:
       retries: 18
       start_period: 25s
 
-  etcd:
-    image: quay.io/coreos/etcd:v3.5.25
-    container_name: nanorag-etcd
-    environment:
-      ETCDCTL_API: "3"
-      ETCD_AUTO_COMPACTION_MODE: revision
-      ETCD_AUTO_COMPACTION_RETENTION: "1000"
-      ETCD_QUOTA_BACKEND_BYTES: "4294967296"
-      ETCD_SNAPSHOT_COUNT: "50000"
-    command: >
-      /usr/local/bin/etcd
-      -advertise-client-urls=http://etcd:2379
-      -listen-client-urls=http://0.0.0.0:2379
-      --data-dir=/etcd
-    volumes:
-      - etcd-data:/etcd
-    healthcheck:
-      test: ["CMD", "etcdctl", "--endpoints=http://127.0.0.1:2379", "endpoint", "health"]
-      interval: 10s
-      timeout: 5s
-      retries: 10
-      start_period: 5s
-
-  minio:
-    image: minio/minio:RELEASE.2024-05-28T17-19-04Z
-    container_name: nanorag-minio
-    environment:
-      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
-      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin}
-    command: minio server /minio_data
-    expose:
-      - "9000"
-    volumes:
-      - minio-data:/minio_data
-    healthcheck:
-      test: ["CMD", "bash", "-lc", "exec 3<>/dev/tcp/127.0.0.1/9000 && exec 3<&- && exec 3>&-"]
-      interval: 10s
-      timeout: 5s
-      retries: 12
-      start_period: 10s
-
-  milvus:
-    image: milvusdb/milvus:v2.6.15
-    container_name: nanorag-milvus
-    command: ["milvus", "run", "standalone"]
-    environment:
-      ETCD_ENDPOINTS: etcd:2379
-      MINIO_ADDRESS: minio:9000
-    expose:
-      - "19530"
-      - "9091"
-    depends_on:
-      etcd:
-        condition: service_healthy
-      minio:
-        condition: service_healthy
-    volumes:
-      - milvus-data:/var/lib/milvus
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:9091/healthz"]
-      interval: 10s
-      timeout: 5s
-      retries: 18
-      start_period: 20s
-
   frontend:
     build:
       context: ..
@@ -259,8 +178,5 @@ volumes:
   app-upload-data:
   app-wiki-data:
   redis-data:
-  etcd-data:
-  minio-data:
-  milvus-data:
   neo4j-data:
   neo4j-logs:

@@ -2,7 +2,6 @@
 import asyncio
 import json
 import logging
-import os
 import random
 import sys
 from pathlib import Path
@@ -12,41 +11,44 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from app.core.config import AppContainer
+from app.schemas.chunk import Chunk
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
-def _embedding_dimension(container: AppContainer) -> int:
-    # Source of truth is the vector store config (matches the collection dim);
-    # never hardcode it here or a model/dimension change breaks the probe vector.
-    dimension = getattr(container.repository, "dimension", None)
-    if isinstance(dimension, int) and dimension > 0:
-        return dimension
-    configured = container.config.models.get("embedding", {}).get("dimension")
-    if isinstance(configured, int) and configured > 0:
-        return configured
-    raise SystemExit("Unable to determine embedding dimension from container config.")
+def _sample_chunks(parsed_dir: Path, limit: int) -> list[Chunk]:
+    """Pull chunks from the committed parsed artifacts (the durable source of
+    truth that replaced the vector store). Each artifact's `chunks` list is
+    hydrated and sampled without replacement."""
+    pool: list[Chunk] = []
+    if parsed_dir.exists():
+        for path in sorted(parsed_dir.glob("*.json")):
+            try:
+                payload = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            for raw in payload.get("chunks", []):
+                try:
+                    pool.append(Chunk.model_validate(raw))
+                except Exception:  # noqa: BLE001
+                    continue
+    return random.sample(pool, min(limit, len(pool)))
 
 
 async def generate_synthetic_data(container: AppContainer, limit: int = 10) -> int:
     """
-    Scrapes chunks from the vector store and asks the LLM to generate Q&A pairs
-    to create a synthetic dataset for robust evaluation. Returns the record count.
+    Samples chunks from the committed parsed artifacts and asks the LLM to
+    generate Q&A pairs to create a synthetic dataset for robust evaluation.
+    Returns the record count.
     """
     logger.info("Initializing synthetic dataset generation...")
-    vector_repo = container.repository
     generation_client = container.generation_client
 
-    dummy_vector = [random.random() for _ in range(_embedding_dimension(container))]
-
-    hits = vector_repo.search(
-        vector=dummy_vector,
-        top_k=limit * 2,
-    )
+    hits = _sample_chunks(container.config.parsed_dir, limit * 2)
 
     if not hits:
-        logger.error("No chunks found in the database. Please ingest documents first.")
+        logger.error("No chunks found in parsed artifacts. Please ingest documents first.")
         return 0
 
     logger.info(f"Retrieved {len(hits)} chunks for generation.")

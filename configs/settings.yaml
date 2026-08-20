@@ -1,43 +1,20 @@
-retrieval:
-  top_k: 20
-  rerank_top_k: 10
-  final_contexts: 10
-  context_quota:
-    topic: 2
-    raw: 10
-    source: 1
-    index: 1
-  metadata_rerank:
-    stable_topic: 0.35
-    stable_source: 0.15
-    conflicting_penalty: 0.25
-    section_match: 0.1
-    doc_type_match: 0.08
-    effective_date_recency: 0.12
-  freshness_policy:
-    enabled: true
-    include_stale: false
-  max_context_text_chars: 6000
-
 agent:
   max_retrieval_loops: 2
   max_subqueries: 4
-
-hybrid_search:
-  enabled: ${RAG_HYBRID_SEARCH_ENABLED:-true}
-  dense_weight: 0.5
-  sparse_weight: 0.5
+  # Agentic (wiki) retrieval engine. The wiki discovery layer is the retrieval
+  # engine (RAG_WIKI_ENABLED=true is required; there is no dense fallback).
+  discovery_top_k: 12
+  max_read_docs: 4
+  max_read_chunks_per_doc: 24
+  max_context_text_chars: 6000
+  freshness_policy:
+    enabled: true
+    include_stale: false
 
 # Document-level BM25 discovery layer (the wiki). On by default: it is the
 # agent's first-hop index. RAG_WIKI_ENABLED=true|false overrides at runtime.
 discovery:
   enabled: ${RAG_WIKI_ENABLED:-true}
-
-evidence_planner:
-  enabled: ${RAG_EVIDENCE_PLANNER_ENABLED:-true}
-  max_contexts: 8
-  max_context_chars: 1200
-  pairwise: true
 
 prompt:
   version: v1
@@ -45,7 +22,6 @@ prompt:
   max_context_item_chars: 6000
 
 timeout:
-  embeddings_seconds: 30
   rerank_seconds: 30
   generation_seconds: 120
   document_parser_seconds: 120

@@ -109,7 +109,7 @@ Gemini 示例：
 ```bash
 COMPOSE_GENERATION_API_KEY=<your-gemini-key>
 COMPOSE_GENERATION_API_BASE_URL=https://generativelanguage.googleapis.com/v1beta/openai
-COMPOSE_GENERATION_MODEL_ALIAS=gemini-flash-lite-latest
+COMPOSE_GENERATION_MODEL_ALIAS=gemini-flash-latest
 
 COMPOSE_EMBEDDING_PROVIDER=gemini
 COMPOSE_EMBEDDING_API_KEY=<your-embedding-key>
@@ -118,7 +118,7 @@ COMPOSE_EMBEDDING_MODEL_ALIAS=gemini-embedding-2-preview
 
 COMPOSE_DOCUMENT_PARSER_API_KEY=<your-parser-key>
 COMPOSE_DOCUMENT_PARSER_API_BASE_URL=https://generativelanguage.googleapis.com
-COMPOSE_DOCUMENT_PARSER_MODEL=gemini-flash-lite-latest
+COMPOSE_DOCUMENT_PARSER_MODEL=gemini-flash-latest
 ```
 
 ## 公开 RAG 评测

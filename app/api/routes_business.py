@@ -354,6 +354,7 @@ async def rag_chat_stream(
                     break
                 if isinstance(chunk, str):
                     yield _frame({"status": "generating", "chunk": chunk})
+                    continue
                 # Fail loud on unexpected queue payloads instead of spinning
                 # the consumer loop forever with a dead stream.
                 logger.error("unexpected chat stream queue payload: %r", type(chunk))
@@ -377,19 +378,20 @@ async def rag_retrieve(
 ) -> BusinessRetrieveResponse:
     container = request.app.state.container
     _ensure_kb_access(container, payload.kb_id, context)
-    response = await container.retrieval_pipeline.debug(
-        payload.query,
-        payload.top_k,
+    chat_request = ChatRequest(
+        query=payload.query,
+        top_k=payload.top_k,
         kb_id=payload.kb_id,
         session_id=payload.session_id,
         metadata_filters=payload.metadata_filters,
     )
+    contexts, trace = await container.chat_pipeline.retrieve(chat_request)
     return BusinessRetrieveResponse(
-        query=response.query,
-        contexts=response.contexts,
-        retrieved=response.retrieved,
-        reranked=response.reranked,
-        trace_id=response.trace_id,
+        query=payload.query,
+        contexts=contexts,
+        retrieved=contexts,
+        reranked=contexts,
+        trace_id=str(trace.get("trace_id")),
         kb_id=payload.kb_id,
         session_id=payload.session_id,
     )

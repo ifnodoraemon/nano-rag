@@ -9,7 +9,6 @@ services:
     environment:
       APP_CONFIG_DIR: /workspace/configs
       RAG_ENV: ${RAG_ENV:-local}
-      VECTORSTORE_BACKEND: memory
       RAG_GRAPH_BACKEND: artifact
       RAG_INGEST_EXECUTOR: background
       RAG_AUTH_DISABLED: ${RAG_AUTH_DISABLED:-}
@@ -19,6 +18,7 @@ services:
       RAG_RATE_LIMIT_REQUESTS_PER_MINUTE: ${RAG_RATE_LIMIT_REQUESTS_PER_MINUTE:-0}
       RAG_DIAGNOSIS_ENABLED: ${RAG_DIAGNOSIS_ENABLED:-true}
       RAG_EVAL_ENABLED: ${RAG_EVAL_ENABLED:-true}
+      RAG_WIKI_ENABLED: ${RAG_WIKI_ENABLED:-true}
       MODEL_PROVIDER_MAX_RETRIES: ${MODEL_PROVIDER_MAX_RETRIES:-2}
       MODEL_PROVIDER_RETRY_BASE_SECONDS: ${MODEL_PROVIDER_RETRY_BASE_SECONDS:-0.5}
       MODEL_PROVIDER_RETRY_MAX_SECONDS: ${MODEL_PROVIDER_RETRY_MAX_SECONDS:-8}
@@ -30,17 +30,13 @@ services:
       MODEL_GATEWAY_MODE: ${MODEL_GATEWAY_MODE:-live}
       MODEL_GATEWAY_BASE_URL: ${COMPOSE_MODEL_GATEWAY_BASE_URL:-https://generativelanguage.googleapis.com/v1beta/openai}
       MODEL_GATEWAY_API_KEY: ${COMPOSE_MODEL_GATEWAY_API_KEY:-}
-      GENERATION_MODEL_ALIAS: ${COMPOSE_GENERATION_MODEL_ALIAS:-gemini-flash-lite-latest}
+      GENERATION_MODEL_ALIAS: ${COMPOSE_GENERATION_MODEL_ALIAS:-gemini-flash-latest}
       GENERATION_API_BASE_URL: ${COMPOSE_GENERATION_API_BASE_URL:-https://generativelanguage.googleapis.com/v1beta/openai}
       GENERATION_API_KEY: ${COMPOSE_GENERATION_API_KEY:-}
-      EMBEDDING_PROVIDER: ${COMPOSE_EMBEDDING_PROVIDER:-gemini}
-      EMBEDDING_MODEL_ALIAS: ${COMPOSE_EMBEDDING_MODEL_ALIAS:-gemini-embedding-2-preview}
-      EMBEDDING_API_BASE_URL: ${COMPOSE_EMBEDDING_API_BASE_URL:-https://generativelanguage.googleapis.com}
-      EMBEDDING_API_KEY: ${COMPOSE_EMBEDDING_API_KEY:-}
 
       DOCUMENT_PARSER_ENABLED: ${DOCUMENT_PARSER_ENABLED:-true}
       DOCUMENT_PARSER_PROVIDER: ${COMPOSE_DOCUMENT_PARSER_PROVIDER:-gemini}
-      DOCUMENT_PARSER_MODEL: ${COMPOSE_DOCUMENT_PARSER_MODEL:-gemini-flash-lite-latest}
+      DOCUMENT_PARSER_MODEL: ${COMPOSE_DOCUMENT_PARSER_MODEL:-gemini-flash-latest}
       DOCUMENT_PARSER_API_BASE_URL: ${COMPOSE_DOCUMENT_PARSER_API_BASE_URL:-https://generativelanguage.googleapis.com}
       DOCUMENT_PARSER_API_KEY: ${COMPOSE_DOCUMENT_PARSER_API_KEY:-}
       RERANK_MODEL_ALIAS: ${COMPOSE_RERANK_MODEL_ALIAS:-disabled}
@@ -55,6 +51,7 @@ services:
       - app-parsed-data:/workspace/data/parsed
       - app-report-data:/workspace/data/reports
       - app-upload-data:/workspace/data/uploads
+      - app-wiki-data:/workspace/data/wiki
     healthcheck:
       test:
         [
@@ -85,3 +82,4 @@ volumes:
   app-parsed-data:
   app-report-data:
   app-upload-data:
+  app-wiki-data:

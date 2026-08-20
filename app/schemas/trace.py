@@ -37,7 +37,6 @@ class TraceRecord(BaseModel):
     supporting_claims: list[dict] = Field(default_factory=list)
     answer: str | None = None
     model_alias: str | None = None
-    embedding_model_alias: str | None = None
     rerank_model_alias: str | None = None
     prompt_version: str | None = None
     prompt_messages: list[dict] = Field(default_factory=list)
