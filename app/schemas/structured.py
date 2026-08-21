@@ -5,6 +5,12 @@ from typing import Iterable
 
 from pydantic import BaseModel, Field
 
+# Prefix that marks an entity id (vs. a bare node id). The graph extractor
+# mints entity ids with this prefix; the graph store relies on it to split
+# expansion targets into "resolve to a node" (backfill) vs. "already a node".
+# Both sides MUST agree on this string, so it lives here in one place.
+ENTITY_ID_PREFIX = "entity:"
+
 
 class NodeType(str, Enum):
     ROOT = "root"

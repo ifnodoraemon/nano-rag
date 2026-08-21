@@ -4,9 +4,12 @@ import json
 import os
 from typing import Protocol
 
-from neo4j import GraphDatabase
+from psycopg.rows import dict_row
+from psycopg_pool import ConnectionPool
 
-from app.schemas.structured import StructuredDocument
+from app.schemas.structured import ENTITY_ID_PREFIX, StructuredDocument
+
+_DEFAULT_PG_URI = "postgresql://nanorag:nano-rag@postgres:5432/nanorag"
 
 
 class GraphStore(Protocol):
@@ -27,29 +30,140 @@ class GraphStore(Protocol):
     def close(self) -> None: ...
 
 
-class Neo4jGraphStore:
-    def __init__(self, uri: str, username: str, password: str) -> None:
+_SCHEMA_STATEMENTS = (
+    """
+    CREATE TABLE IF NOT EXISTS graph_document (
+        kb_id text NOT NULL,
+        doc_id text NOT NULL,
+        title text NOT NULL DEFAULT '',
+        source_path text NOT NULL DEFAULT '',
+        PRIMARY KEY (kb_id, doc_id)
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS graph_node (
+        node_id text PRIMARY KEY,
+        kb_id text NOT NULL,
+        doc_id text NOT NULL,
+        node_type text NOT NULL DEFAULT '',
+        title text NOT NULL DEFAULT '',
+        text_preview text NOT NULL DEFAULT '',
+        page_number int,
+        hierarchy_path text NOT NULL DEFAULT '[]'
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS graph_node_doc_idx ON graph_node (doc_id)",
+    """
+    CREATE TABLE IF NOT EXISTS graph_entity (
+        entity_id text PRIMARY KEY,
+        kb_id text NOT NULL,
+        name text NOT NULL DEFAULT '',
+        entity_type text NOT NULL DEFAULT ''
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS graph_node_entity (
+        node_id text NOT NULL REFERENCES graph_node (node_id) ON DELETE CASCADE,
+        entity_id text NOT NULL REFERENCES graph_entity (entity_id) ON DELETE CASCADE,
+        PRIMARY KEY (node_id, entity_id)
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS graph_node_entity_entity_idx ON graph_node_entity (entity_id)",
+    """
+    CREATE TABLE IF NOT EXISTS graph_relation (
+        relation_id text PRIMARY KEY,
+        source_id text NOT NULL,
+        target_id text NOT NULL,
+        kb_id text NOT NULL,
+        doc_id text NOT NULL DEFAULT '',
+        relation_type text NOT NULL DEFAULT '',
+        confidence double precision
+    )
+    """,
+    # Idempotent upgrade for volumes created before graph_relation carried a
+    # doc_id: scopes relation deletion to the owning document (fresh installs
+    # get the column from the CREATE above, so this is a no-op there).
+    "ALTER TABLE graph_relation ADD COLUMN IF NOT EXISTS doc_id text NOT NULL DEFAULT ''",
+    "CREATE INDEX IF NOT EXISTS graph_relation_source_idx ON graph_relation (source_id)",
+    "CREATE INDEX IF NOT EXISTS graph_relation_target_idx ON graph_relation (target_id)",
+    "CREATE INDEX IF NOT EXISTS graph_relation_doc_idx ON graph_relation (doc_id, kb_id)",
+)
+
+# Seed expansion: which other nodes share an entity with the seeds, plus the
+# relation edges directly touching a seed (in or out). Entity-prefixed targets
+# are resolved to concrete nodes by a follow-up backfill in Python.
+_EXPAND_QUERY = """
+WITH seeds AS (SELECT UNNEST(%(node_ids)s) AS node_id)
+SELECT n.node_id AS target_id, 'SHARES_ENTITY' AS relation_type
+FROM graph_node n
+JOIN graph_node_entity ne ON ne.node_id = n.node_id
+JOIN graph_node_entity se ON se.entity_id = ne.entity_id
+JOIN seeds s ON se.node_id = s.node_id
+WHERE n.kb_id = %(kb_id)s AND n.node_id <> s.node_id
+UNION
+SELECT r.target_id, r.relation_type
+FROM graph_relation r
+JOIN seeds s ON r.source_id = s.node_id
+WHERE r.kb_id = %(kb_id)s
+UNION
+SELECT r.source_id, r.relation_type
+FROM graph_relation r
+JOIN seeds s ON r.target_id = s.node_id
+WHERE r.kb_id = %(kb_id)s
+"""
+
+_BACKFILL_QUERY = """
+SELECT ne.entity_id, ne.node_id
+FROM graph_node_entity ne
+JOIN graph_node n ON n.node_id = ne.node_id
+WHERE ne.entity_id = ANY(%(entity_ids)s)
+  AND n.kb_id = %(kb_id)s
+  AND ne.node_id <> ALL(%(seed_node_ids)s)
+"""
+
+
+class PostgresGraphStore:
+    """Native-SQL graph store backing document-structure expansion.
+
+    Node/entity/relation rows are materialized from the LLM-extracted
+    structured graph at ingest. Expansion answers "which other nodes are
+    related to these seeds" via shares-entity joins and RELATED edges.
+
+    The per-statement SQL and the Python-side expansion logic are extracted
+    into static helpers so they can be exercised without a live database.
+    """
+
+    def __init__(self, uri: str) -> None:
         self.uri = uri
-        self.driver = GraphDatabase.driver(uri, auth=(username, password))
-        self.driver.verify_connectivity()
-        self._ensure_schema()
+        self._pool = ConnectionPool(
+            conninfo=uri,
+            min_size=1,
+            max_size=4,
+            kwargs={"row_factory": dict_row},
+            open=True,
+        )
+        with self._pool.connection() as conn:
+            conn.execute("SELECT 1")
+            for statement in _SCHEMA_STATEMENTS:
+                conn.execute(statement)
 
     @classmethod
-    def from_env(cls) -> "Neo4jGraphStore":
-        return cls(
-            uri=os.getenv("NEO4J_URI", "bolt://neo4j:7687"),
-            username=os.getenv("NEO4J_USER", "neo4j"),
-            password=os.getenv("NEO4J_PASSWORD", "nano-rag-graph"),
-        )
+    def from_env(cls) -> "PostgresGraphStore":
+        return cls(os.getenv("PG_URI", _DEFAULT_PG_URI))
 
     def upsert_document(self, document: StructuredDocument) -> None:
-        with self.driver.session() as session:
-            session.execute_write(self._delete_document_tx, document.doc_id, document.kb_id)
-            session.execute_write(self._upsert_document_tx, document)
+        statements = self._upsert_statements(document)
+        with self._pool.connection() as conn:
+            with conn.transaction():
+                for sql, params in statements:
+                    conn.execute(sql, params)
 
     def delete_document(self, *, doc_id: str, kb_id: str) -> None:
-        with self.driver.session() as session:
-            session.execute_write(self._delete_document_tx, doc_id, kb_id)
+        statements = self._delete_statements(doc_id, kb_id)
+        with self._pool.connection() as conn:
+            with conn.transaction():
+                for sql, params in statements:
+                    conn.execute(sql, params)
 
     def expand_node_ids(
         self,
@@ -60,91 +174,34 @@ class Neo4jGraphStore:
     ) -> list[tuple[str, str]]:
         if not node_ids:
             return []
-        neighbors: list[tuple[str, str]] = []
-        entity_neighbors: list[tuple[str, str]] = []
-        with self.driver.session() as session:
-            result = session.run(
-                """
-                MATCH (seed:DocNode)
-                WHERE seed.node_id IN $node_ids AND seed.kb_id = $kb_id
-                OPTIONAL MATCH (seed)-[:MENTIONS]->(:Entity)<-[:MENTIONS]-(shared:DocNode)
-                WHERE shared.kb_id = $kb_id AND shared.node_id <> seed.node_id
-                WITH seed, collect(DISTINCT shared.node_id) AS shared_ids
-                OPTIONAL MATCH (seed)-[out:RELATED]->(out_target)
-                WITH seed, shared_ids,
-                     collect(DISTINCT {
-                       id: coalesce(out_target.node_id, out_target.entity_id),
-                       relation: out.relation_type
-                     }) AS out_targets
-                OPTIONAL MATCH (in_source)-[incoming:RELATED]->(seed)
-                WITH shared_ids, out_targets,
-                     collect(DISTINCT {
-                       id: coalesce(in_source.node_id, in_source.entity_id),
-                       relation: incoming.relation_type
-                     }) AS in_sources
-                RETURN shared_ids, out_targets, in_sources
-                """,
-                node_ids=list(node_ids),
-                kb_id=kb_id,
-            )
-            for row in result:
-                neighbors.extend(
-                    (node_id, "SHARES_ENTITY")
-                    for node_id in row.get("shared_ids", [])
-                    if node_id
-                )
-                for item in [*row.get("out_targets", []), *row.get("in_sources", [])]:
-                    if not isinstance(item, dict):
-                        continue
-                    target_id = item.get("id")
-                    relation = item.get("relation")
-                    if target_id and relation:
-                        target = str(target_id)
-                        if target.startswith("entity:"):
-                            entity_neighbors.append((target, str(relation)))
-                        else:
-                            neighbors.append((target, str(relation)))
-            if entity_neighbors:
-                entity_ids = [entity_id for entity_id, _ in entity_neighbors]
-                relation_by_entity = {
-                    entity_id: relation for entity_id, relation in entity_neighbors
-                }
-                entity_result = session.run(
-                    """
-                    MATCH (e:Entity)<-[:MENTIONS]-(n:DocNode)
-                    WHERE e.entity_id IN $entity_ids
-                      AND n.kb_id = $kb_id
-                      AND NOT n.node_id IN $seed_node_ids
-                    RETURN e.entity_id AS entity_id, collect(DISTINCT n.node_id) AS node_ids
-                    """,
-                    entity_ids=entity_ids,
-                    kb_id=kb_id,
-                    seed_node_ids=list(node_ids),
-                )
-                for row in entity_result:
-                    relation = relation_by_entity.get(str(row.get("entity_id")), "RELATED")
-                    neighbors.extend(
-                        (node_id, relation)
-                        for node_id in row.get("node_ids", [])
-                        if node_id
-                    )
-        return self._dedupe_neighbors(neighbors, limit=max_neighbors)
+        with self._pool.connection() as conn:
+            rows = conn.execute(
+                _EXPAND_QUERY,
+                {"node_ids": sorted(node_ids), "kb_id": kb_id},
+            ).fetchall()
+        entity_neighbors, neighbors = self._partition_neighbors(rows)
+        if not entity_neighbors:
+            return self._dedupe_neighbors(neighbors, limit=max_neighbors)
+        backfill = self._backfill_entity_neighbors(
+            entity_neighbors, kb_id=kb_id, seed_node_ids=node_ids
+        )
+        return self._dedupe_neighbors(neighbors + backfill, limit=max_neighbors)
 
     def stats(self) -> dict[str, object]:
-        with self.driver.session() as session:
-            result = session.run(
+        with self._pool.connection() as conn:
+            row = conn.execute(
                 """
-                MATCH (d:Document) WITH count(d) AS documents
-                MATCH (n:DocNode) WITH documents, count(n) AS nodes
-                MATCH (e:Entity) WITH documents, nodes, count(e) AS entities
-                MATCH ()-[r:RELATED]->()
-                RETURN documents, nodes, entities, count(r) AS relations
+                SELECT
+                    (SELECT count(*) FROM graph_document) AS documents,
+                    (SELECT count(*) FROM graph_node) AS nodes,
+                    (SELECT count(*) FROM graph_entity) AS entities,
+                    (SELECT count(*) FROM graph_relation) AS relations
                 """
-            )
-            row = result.single() or {}
+            ).fetchone()
+        row = row or {}
         return {
-            "backend": "neo4j",
-            "uri": self.uri,
+            "backend": "postgresql",
+            "uri": self.uri.split("@")[-1],
             "documents": int(row.get("documents", 0)),
             "nodes": int(row.get("nodes", 0)),
             "entities": int(row.get("entities", 0)),
@@ -152,121 +209,213 @@ class Neo4jGraphStore:
         }
 
     def close(self) -> None:
-        self.driver.close()
-
-    def _ensure_schema(self) -> None:
-        statements = [
-            "CREATE CONSTRAINT rag_document_id IF NOT EXISTS FOR (d:Document) REQUIRE (d.kb_id, d.doc_id) IS UNIQUE",
-            "CREATE CONSTRAINT rag_doc_node_id IF NOT EXISTS FOR (n:DocNode) REQUIRE n.node_id IS UNIQUE",
-            "CREATE CONSTRAINT rag_entity_id IF NOT EXISTS FOR (e:Entity) REQUIRE e.entity_id IS UNIQUE",
-        ]
-        with self.driver.session() as session:
-            for statement in statements:
-                session.run(statement)
+        self._pool.close()
 
     @staticmethod
-    def _delete_document_tx(tx, doc_id: str, kb_id: str) -> None:  # noqa: ANN001
-        tx.run(
-            """
-            MATCH (d:Document {doc_id: $doc_id, kb_id: $kb_id})
-            OPTIONAL MATCH (d)-[:HAS_NODE]->(n:DocNode)
-            WITH d, collect(n) AS nodes
-            FOREACH (node IN nodes | DETACH DELETE node)
-            DETACH DELETE d
-            WITH 1 AS _
-            MATCH (e:Entity {kb_id: $kb_id})
-            WHERE NOT (:DocNode {kb_id: $kb_id})-[:MENTIONS]->(e)
-            DETACH DELETE e
-            """,
-            doc_id=doc_id,
-            kb_id=kb_id,
-        )
+    def _node_text(node: "object") -> str:
+        table = getattr(node, "table", None)
+        narrative = getattr(table, "narrative", None) if table else None
+        return narrative if narrative else str(getattr(node, "text", "") or "")
 
-    @staticmethod
-    def _upsert_document_tx(tx, document: StructuredDocument) -> None:  # noqa: ANN001
-        tx.run(
-            """
-            MERGE (d:Document {doc_id: $doc_id, kb_id: $kb_id})
-            SET d.title = $title,
-                d.source_path = $source_path
-            """,
-            doc_id=document.doc_id,
-            kb_id=document.kb_id,
-            title=document.title,
-            source_path=document.source_path,
-        )
-        for node in document.iter_nodes():
-            text = node.table.narrative if node.table and node.table.narrative else node.text
-            tx.run(
+    @classmethod
+    def _upsert_statements(
+        cls, document: StructuredDocument
+    ) -> list[tuple[str, tuple[object, ...]]]:
+        statements: list[tuple[str, tuple[object, ...]]] = [
+            (
+                "DELETE FROM graph_node WHERE doc_id = %s AND kb_id = %s",
+                (document.doc_id, document.kb_id),
+            ),
+            (
                 """
-                MATCH (d:Document {doc_id: $doc_id, kb_id: $kb_id})
-                MERGE (n:DocNode {node_id: $node_id})
-                SET n.doc_id = $doc_id,
-                    n.kb_id = $kb_id,
-                    n.node_type = $node_type,
-                    n.title = $title,
-                    n.text_preview = $text_preview,
-                    n.page_number = $page_number,
-                    n.hierarchy_path_json = $hierarchy_path_json
-                MERGE (d)-[:HAS_NODE]->(n)
+                INSERT INTO graph_document (kb_id, doc_id, title, source_path)
+                VALUES (%s, %s, %s, %s)
+                ON CONFLICT (kb_id, doc_id)
+                DO UPDATE SET title = EXCLUDED.title,
+                              source_path = EXCLUDED.source_path
                 """,
-                doc_id=document.doc_id,
-                kb_id=document.kb_id,
-                node_id=node.node_id,
-                node_type=node.node_type.value,
-                title=node.title,
-                text_preview=(text or "")[:500],
-                page_number=node.provenance.page_number,
-                hierarchy_path_json=json.dumps(
-                    node.provenance.hierarchy_path,
-                    ensure_ascii=False,
+                (
+                    document.kb_id,
+                    document.doc_id,
+                    document.title,
+                    document.source_path,
                 ),
+            ),
+        ]
+        # Node ids are `{doc_id}:node:{sha256}` and doc ids are
+        # sha256(source_path, kb_id), so a node_id is globally unique per
+        # document+kb. The ON CONFLICT (node_id) DO UPDATE below therefore
+        # can only ever reassign a row back to its own document — it is not a
+        # cross-KB collision hazard despite node_id being a global PK.
+        for node in document.iter_nodes():
+            statements.append(
+                (
+                    """
+                    INSERT INTO graph_node
+                        (node_id, kb_id, doc_id, node_type, title,
+                         text_preview, page_number, hierarchy_path)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                    ON CONFLICT (node_id)
+                    DO UPDATE SET kb_id = EXCLUDED.kb_id,
+                                  doc_id = EXCLUDED.doc_id,
+                                  node_type = EXCLUDED.node_type,
+                                  title = EXCLUDED.title,
+                                  text_preview = EXCLUDED.text_preview,
+                                  page_number = EXCLUDED.page_number,
+                                  hierarchy_path = EXCLUDED.hierarchy_path
+                    """,
+                    (
+                        node.node_id,
+                        document.kb_id,
+                        document.doc_id,
+                        node.node_type.value,
+                        node.title or "",
+                        cls._node_text(node)[:500],
+                        node.provenance.page_number,
+                        json.dumps(node.provenance.hierarchy_path, ensure_ascii=False),
+                    ),
+                )
             )
         for entity in document.graph.entities:
-            tx.run(
-                """
-                MERGE (e:Entity {entity_id: $entity_id})
-                SET e.kb_id = $kb_id,
-                    e.name = $name,
-                    e.entity_type = $entity_type
-                """,
-                entity_id=entity.entity_id,
-                kb_id=document.kb_id,
-                name=entity.name,
-                entity_type=entity.entity_type,
+            statements.append(
+                (
+                    """
+                    INSERT INTO graph_entity (entity_id, kb_id, name, entity_type)
+                    VALUES (%s, %s, %s, %s)
+                    ON CONFLICT (entity_id)
+                    DO UPDATE SET kb_id = EXCLUDED.kb_id,
+                                  name = EXCLUDED.name,
+                                  entity_type = EXCLUDED.entity_type
+                    """,
+                    (
+                        entity.entity_id,
+                        document.kb_id,
+                        entity.name,
+                        entity.entity_type,
+                    ),
+                )
             )
             for node_id in entity.source_node_ids:
-                tx.run(
-                    """
-                    MATCH (n:DocNode {node_id: $node_id})
-                    MATCH (e:Entity {entity_id: $entity_id})
-                    MERGE (n)-[:MENTIONS]->(e)
-                    """,
-                    node_id=node_id,
-                    entity_id=entity.entity_id,
+                statements.append(
+                    (
+                        "INSERT INTO graph_node_entity (node_id, entity_id) "
+                        "VALUES (%s, %s) ON CONFLICT DO NOTHING",
+                        (node_id, entity.entity_id),
+                    )
                 )
         for relation in document.graph.relations:
-            tx.run(
-                """
-                MATCH (source)
-                WHERE source.node_id = $source_id OR source.entity_id = $source_id
-                MATCH (target)
-                WHERE target.node_id = $target_id OR target.entity_id = $target_id
-                MERGE (source)-[r:RELATED {relation_id: $relation_id}]->(target)
-                SET r.relation_type = $relation_type,
-                    r.source_node_id = $source_node_id,
-                    r.confidence = $confidence
-                """,
-                source_id=relation.source_id,
-                target_id=relation.target_id,
-                relation_id=relation.relation_id,
-                relation_type=relation.relation_type,
-                source_node_id=relation.source_node_id,
-                confidence=relation.confidence,
+            statements.append(
+                (
+                    """
+                    INSERT INTO graph_relation
+                        (relation_id, source_id, target_id, kb_id, doc_id,
+                         relation_type, confidence)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s)
+                    ON CONFLICT (relation_id)
+                    DO UPDATE SET kb_id = EXCLUDED.kb_id,
+                                  doc_id = EXCLUDED.doc_id,
+                                  relation_type = EXCLUDED.relation_type,
+                                  confidence = EXCLUDED.confidence
+                    """,
+                    (
+                        relation.relation_id,
+                        relation.source_id,
+                        relation.target_id,
+                        document.kb_id,
+                        document.doc_id,
+                        relation.relation_type,
+                        relation.confidence,
+                    ),
+                )
             )
+        return statements
 
-    def _dedupe_neighbors(
+    @staticmethod
+    def _delete_statements(doc_id: str, kb_id: str) -> list[tuple[str, tuple[object, ...]]]:
+        # Relation rows carry no FK to graph_node, so deleting the doc's nodes
+        # would leave dangling relation rows behind (queryable by
+        # expand_node_ids and unreclaimable). Relations are minted per
+        # document at extraction, so (doc_id, kb_id) is the owning scope.
+        #
+        # Entity GC is deliberately global, not kb-scoped: entity ids are
+        # sha1(kb_id:name) (see GraphExtractor._entity_id), so an entity can
+        # only be referenced by node links in its own KB. "Unreferenced
+        # anywhere" is therefore exactly "unreferenced in this KB plus
+        # nothing else" — a kb-scoped subquery would wrongly delete entities
+        # still owned by other KBs.
+        return [
+            (
+                "DELETE FROM graph_node WHERE doc_id = %s AND kb_id = %s",
+                (doc_id, kb_id),
+            ),
+            (
+                "DELETE FROM graph_relation WHERE doc_id = %s AND kb_id = %s",
+                (doc_id, kb_id),
+            ),
+            (
+                "DELETE FROM graph_document WHERE doc_id = %s AND kb_id = %s",
+                (doc_id, kb_id),
+            ),
+            (
+                """
+                DELETE FROM graph_entity
+                WHERE entity_id NOT IN (
+                    SELECT DISTINCT entity_id FROM graph_node_entity
+                )
+                """,
+                (),
+            ),
+        ]
+
+    @staticmethod
+    def _partition_neighbors(
+        rows: list[dict[str, object]],
+    ) -> tuple[list[tuple[str, str]], list[tuple[str, str]]]:
+        entity_neighbors: list[tuple[str, str]] = []
+        neighbors: list[tuple[str, str]] = []
+        for row in rows:
+            target_id = row.get("target_id")
+            relation = row.get("relation_type")
+            if not target_id or not relation:
+                continue
+            target = str(target_id)
+            if target.startswith(ENTITY_ID_PREFIX):
+                entity_neighbors.append((target, str(relation)))
+            else:
+                neighbors.append((target, str(relation)))
+        return entity_neighbors, neighbors
+
+    def _backfill_entity_neighbors(
         self,
+        entity_neighbors: list[tuple[str, str]],
+        *,
+        kb_id: str,
+        seed_node_ids: set[str],
+    ) -> list[tuple[str, str]]:
+        entity_ids = [entity_id for entity_id, _ in entity_neighbors]
+        relation_by_entity = {
+            entity_id: relation for entity_id, relation in entity_neighbors
+        }
+        with self._pool.connection() as conn:
+            backfill = conn.execute(
+                _BACKFILL_QUERY,
+                {
+                    "entity_ids": entity_ids,
+                    "kb_id": kb_id,
+                    "seed_node_ids": sorted(seed_node_ids),
+                },
+            ).fetchall()
+        return [
+            (
+                str(row.get("node_id")),
+                relation_by_entity.get(str(row.get("entity_id")), "RELATED"),
+            )
+            for row in backfill
+            if row.get("node_id")
+        ]
+
+    @staticmethod
+    def _dedupe_neighbors(
         neighbors: list[tuple[str, str]],
         *,
         limit: int,

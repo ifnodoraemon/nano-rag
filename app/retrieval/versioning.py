@@ -26,7 +26,7 @@ def version_sort_key(metadata: dict[str, object], *, score: object = 0.0) -> tup
 
     A version with an effective date outranks one without; then the later date
     wins; then the higher version tuple; then the caller-supplied tiebreak
-    (retrieval score in the dense path, ISO updated_at string in the wiki
+    (BM25 discovery score in the wiki path, ISO updated_at string in the wiki
     ledger). This is the evidence-backed primary sort for multi-version
     selection — it is metadata driven, never an LLM judgment.
     """

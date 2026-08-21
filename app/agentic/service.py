@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -146,7 +147,7 @@ class AgenticReasoningService:
     async def _initial_recall_node(self, state: AgentState) -> AgentState:
         payload = state["payload"]
         contexts, trace = await self._retrieve(payload, payload.query)
-        graph_contexts = self._expand_graph_contexts(payload, contexts, trace)
+        graph_contexts = await self._expand_graph_contexts(payload, contexts, trace)
         return {
             "trace_id": str(trace["trace_id"]),
             "retrieval_queries": [payload.query],
@@ -373,7 +374,7 @@ class AgenticReasoningService:
                 return plan
         return None
 
-    def _expand_graph_contexts(
+    async def _expand_graph_contexts(
         self,
         payload: ChatRequest,
         contexts: list[dict[str, object]],
@@ -394,7 +395,11 @@ class AgenticReasoningService:
                 and (route.get("requires_graph") is True or route.get("route") == "graph")
             ):
                 return []
-        return self.graph_expander.expand(
+        # The graph store (PostgresGraphStore) is synchronous psycopg; run it
+        # off the event loop so a slow query or pool wait can't stall every
+        # concurrent API request. Mirrors the ingest upsert's to_thread usage.
+        return await asyncio.to_thread(
+            self.graph_expander.expand,
             contexts,
             kb_id=payload.kb_id or "default",
         )

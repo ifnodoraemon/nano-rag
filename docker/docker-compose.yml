@@ -11,10 +11,10 @@ services:
       RAG_ENV: ${RAG_ENV:-local}
       HTTP_PROXY: ${HTTP_PROXY:-}
       HTTPS_PROXY: ${HTTPS_PROXY:-}
-      NO_PROXY: ${NO_PROXY:-localhost,127.0.0.1,::1},app,redis,neo4j
+      NO_PROXY: ${NO_PROXY:-localhost,127.0.0.1,::1},app,redis,postgres
       http_proxy: ${http_proxy:-}
       https_proxy: ${https_proxy:-}
-      no_proxy: ${no_proxy:-localhost,127.0.0.1,::1},app,redis,neo4j
+      no_proxy: ${no_proxy:-localhost,127.0.0.1,::1},app,redis,postgres
       ALL_PROXY: ""
       all_proxy: ""
       PARSED_OUTPUT_DIR: /workspace/data/parsed
@@ -22,10 +22,8 @@ services:
       RAG_INGEST_EXECUTOR: ${RAG_INGEST_EXECUTOR:-celery}
       RAG_BROKER_URL: ${RAG_BROKER_URL:-redis://redis:6379/0}
       RAG_RESULT_BACKEND: ${RAG_RESULT_BACKEND:-redis://redis:6379/1}
-      RAG_GRAPH_BACKEND: ${RAG_GRAPH_BACKEND:-neo4j}
-      NEO4J_URI: ${NEO4J_URI:-bolt://neo4j:7687}
-      NEO4J_USER: ${NEO4J_USER:-neo4j}
-      NEO4J_PASSWORD: ${NEO4J_PASSWORD:-nano-rag-graph}
+      RAG_GRAPH_BACKEND: ${RAG_GRAPH_BACKEND:-postgres}
+      PG_URI: ${PG_URI:-postgresql://nanorag:nano-rag@postgres:5432/nanorag}
       EVAL_REPORT_DIR: /workspace/data/reports/eval
       RAG_INGEST_ALLOWED_DIRS: /workspace/data/raw
       EVAL_DATASET_DIR: /workspace/data/eval
@@ -69,7 +67,7 @@ services:
     depends_on:
       redis:
         condition: service_healthy
-      neo4j:
+      postgres:
         condition: service_healthy
     restart: unless-stopped
     healthcheck:
@@ -116,7 +114,7 @@ services:
     depends_on:
       redis:
         condition: service_healthy
-      neo4j:
+      postgres:
         condition: service_healthy
     restart: unless-stopped
 
@@ -132,31 +130,28 @@ services:
       retries: 10
       start_period: 5s
 
-  neo4j:
-    image: neo4j:5.26-community
-    container_name: nanorag-neo4j
+  postgres:
+    image: postgres:16-alpine
+    container_name: nanorag-postgres
     environment:
-      NEO4J_AUTH: neo4j/${NEO4J_PASSWORD:-nano-rag-graph}
-      NEO4J_server_memory_heap_initial__size: ${NEO4J_HEAP_INITIAL_SIZE:-1G}
-      NEO4J_server_memory_heap_max__size: ${NEO4J_HEAP_MAX_SIZE:-4G}
-      NEO4J_server_memory_pagecache_size: ${NEO4J_PAGECACHE_SIZE:-4G}
+      POSTGRES_USER: nanorag
+      POSTGRES_PASSWORD: ${PG_PASSWORD:-nano-rag}
+      POSTGRES_DB: nanorag
     expose:
-      - "7474"
-      - "7687"
+      - "5432"
     volumes:
-      - neo4j-data:/data
-      - neo4j-logs:/logs
+      - postgres-data:/var/lib/postgresql/data
     restart: unless-stopped
     healthcheck:
       test:
         [
           "CMD-SHELL",
-          "cypher-shell -u neo4j -p ${NEO4J_PASSWORD:-nano-rag-graph} 'RETURN 1'",
+          "pg_isready -U nanorag -d nanorag",
         ]
       interval: 10s
       timeout: 5s
       retries: 18
-      start_period: 25s
+      start_period: 15s
 
   frontend:
     build:
@@ -178,5 +173,4 @@ volumes:
   app-upload-data:
   app-wiki-data:
   redis-data:
-  neo4j-data:
-  neo4j-logs:
+  postgres-data:

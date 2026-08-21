@@ -5,8 +5,9 @@ Enterprise RAG system with a real-data runtime: no frontend hardcoded business d
 ## Principles
 
 - Real backend data is the source of truth for workspaces, ingest sources, documents, traces, eval reports, and diagnosis targets.
-- Runtime failures should be visible. Missing provider keys, invalid model credentials, parser errors, and Milvus errors must not be hidden behind mock or fallback behavior.
+- Runtime failures should be visible. Missing provider keys, invalid model credentials, parser errors, and PostgreSQL/graph-store errors must not be hidden behind mock or fallback behavior.
 - Semantic RAG behavior must not depend on hardcoded keyword lists for business meaning, discourse roles, conflict detection, routing, or answer policy. Use model-produced structure, parser metadata, typed configuration, or trace-visible degraded behavior instead.
+- Retrieval is document-level discovery, not dense-vector similarity: a document-scoped BM25 wiki is the retrieval engine's first hop, followed by deterministic version filtering and an LLM read plan. There is no dense-vector fallback.
 - The frontend does not store or submit business API keys. Browser requests go through the account system or the Docker nginx proxy, which injects the local backend key.
 - Every RAG answer should be traceable to retrieved context, citations, source documents, and trace IDs.
 
@@ -14,39 +15,43 @@ Enterprise RAG system with a real-data runtime: no frontend hardcoded business d
 
 - **Backend**: Python 3.12 + FastAPI + Uvicorn
 - **Frontend**: React 19 + TypeScript + Vite, served by nginx in Docker
-- **Vector DB**: Milvus 2.6 standalone with etcd + MinIO
-- **Model Providers**: direct Gemini or Qwen provider configuration; no Bifrost/LiteLLM runtime layer
+- **Discovery index**: document-level BM25 over the compiled wiki (no vector DB, no embedding model)
+- **Graph store**: native PostgreSQL (document structure for optional graph expansion)
+- **Model Providers**: direct Gemini or Qwen provider configuration (generation + document parser + optional rerank); no Bifrost/LiteLLM runtime layer, no embedding endpoint
 - **Tracing**: OpenTelemetry HTTP export to Langfuse
 - **Testing**: pytest + pytest-asyncio, TypeScript build/lint
-- **Evaluation**: deterministic eval plus optional RAGAS library metrics
+- **Evaluation**: deterministic eval plus optional deepeval metrics
 
 ## Project Structure
 
 ```text
 app/
+  agentic/      # LangGraph agentic pipeline: discovery -> read plan -> deep read -> synthesis
   api/          # FastAPI routes (business + debug)
   core/         # Config, exceptions, logging, tracing
-  generation/   # Prompt builder, answer formatter, LLM service
+  generation/   # Prompt builder, answer formatter
   ingestion/    # Document parsing, chunking, metadata extraction
-  model_client/ # Embedding, generation, rerank, document parser clients
-  retrieval/    # Hybrid retrieval, reranking, context builder, freshness
+  model_client/ # Generation, rerank, and document parser clients
+  retrieval/    # BM25 index, graph store/index/expander, context builder, versioning
   schemas/      # Pydantic models
-  vectorstore/  # Milvus plus in-memory test repository
+  wiki/         # Document-level wiki compiler (pages) + BM25 searcher (discovery layer)
 configs/        # settings.yaml, models.yaml, prompts.yaml
 frontend/       # React SPA source
 docker/         # docker-compose.yml + Dockerfiles + nginx config
-scripts/        # run_eval.py, run_benchmark.py
+scripts/        # run_eval.py, run_benchmark.py, live_smoke.py
 ```
 
 ## Runtime Architecture
 
 ### Ingestion Pipeline
 
-Document -> configured parser -> normalizer -> chunker -> metadata -> multimodal embedding -> Milvus
+Document -> configured parser -> normalizer -> chunker -> metadata -> committed parsed artifact + PostgreSQL graph rows + wiki discovery page
 
-### Retrieval Pipeline
+### Retrieval (Agentic Discovery) Pipeline
 
-Query -> optional query rewrite -> hybrid retrieval -> reranking -> freshness filter -> context builder
+Query -> wiki BM25 discovery (document-level) -> deterministic version filter (latest wins per source_key) -> LLM read plan (structured json_schema) -> deep-read selected parsed artifacts -> context builder (+ optional PostgreSQL graph expansion)
+
+There is no embedding call and no dense/hybrid retrieval path. Discovery and the read plan each run on the configured generation gateway and are visible in the trace.
 
 ### Generation Pipeline
 
@@ -74,13 +79,12 @@ Do not use non-Docker commands to start the app for runtime validation.
 - `GENERATION_API_BASE_URL` - generation provider endpoint
 - `GENERATION_API_KEY` - generation provider key
 - `GENERATION_MODEL_ALIAS` - generation model alias; default examples are Gemini or Qwen
-- `EMBEDDING_API_BASE_URL` - direct embedding provider endpoint
-- `EMBEDDING_API_KEY` - direct embedding provider key
-- `EMBEDDING_PROVIDER` - `gemini`, `dashscope`, or `vllm`
 - `DOCUMENT_PARSER_API_BASE_URL` - document parser endpoint
 - `DOCUMENT_PARSER_API_KEY` - document parser key
 - `DOCUMENT_PARSER_PROVIDER` - `gemini` or `qwen`; `qwen` covers DashScope and OpenAI-compatible vLLM
-- `VECTORSTORE_BACKEND` - defaults to `milvus`; `memory` is only for explicit tests/experiments
+- `RAG_GRAPH_BACKEND` - `postgres` (standard Docker runtime) or `artifact` (bare local scripts, no database); also `none`/`disabled`
+- `PG_URI` - PostgreSQL connection string for the graph store (defaults to the in-network `postgres` service)
+- `RAG_WIKI_ENABLED` - the BM25 discovery layer; must be `true` (it is the retrieval engine, with no dense fallback)
 - `RAG_API_KEYS` - backend business API keys
 
 ## Code Conventions
@@ -97,9 +101,8 @@ Do not use non-Docker commands to start the app for runtime validation.
 
 | Service | Port | Purpose |
 |---------|------|---------|
-| app | 8000 | FastAPI backend |
-| frontend | 3000 | nginx + React SPA |
-| langfuse | 3001 | Trace, eval, and prompt observability |
-| milvus | 19530 | Vector database |
-| etcd | 2379 | Milvus coordinator |
-| minio | 9000 | Object storage |
+| app | 8000 (internal) | FastAPI backend |
+| frontend | 3001 | nginx + React SPA (public entry) |
+| postgres | 5432 (internal) | Graph store |
+| redis | 6379 (internal) | Celery broker + result backend |
+| worker | - | Celery ingest worker |

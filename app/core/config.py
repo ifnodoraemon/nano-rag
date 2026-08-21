@@ -20,7 +20,7 @@ from app.ingestion.jobs import IngestJobStore
 from app.model_client.document_parser import DocumentParserClient
 from app.model_client.generation import GenerationClient
 from app.model_client.rerank import RerankClient
-from app.retrieval.graph_store import GraphStore, Neo4jGraphStore
+from app.retrieval.graph_store import GraphStore, PostgresGraphStore
 from app.utils.text import parse_bool_env
 from app.knowledge_bases.catalog import KnowledgeBaseCatalog
 from app.wiki.compiler import WikiCompiler
@@ -275,6 +275,9 @@ class AppConfig:
 
     @property
     def graph_backend(self) -> str:
+        # The standard Docker runtime sets RAG_GRAPH_BACKEND=postgres (see
+        # docker-compose.yml). Bare local scripts (live_smoke, pressure runs)
+        # default to the artifact store so no database is required.
         return os.getenv("RAG_GRAPH_BACKEND", "artifact").strip().lower()
 
     @property
@@ -306,10 +309,10 @@ def build_graph_store(config: AppConfig) -> GraphStore | None:
     backend = config.graph_backend
     if backend in {"", "artifact", "none", "disabled"}:
         return None
-    if backend == "neo4j":
-        return Neo4jGraphStore.from_env()
+    if backend in {"postgres", "postgresql", "pg"}:
+        return PostgresGraphStore.from_env()
     raise ConfigurationError(
-        f"Unsupported RAG_GRAPH_BACKEND={backend!r}; expected 'artifact' or 'neo4j'."
+        f"Unsupported RAG_GRAPH_BACKEND={backend!r}; expected 'artifact' or 'postgres'."
     )
 
 

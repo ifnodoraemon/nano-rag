@@ -137,7 +137,7 @@ def parse_args() -> argparse.Namespace:
         help="Only ingest corpus records whose file name contains this substring. Can be repeated.",
     )
     parser.add_argument("--skip-queries", action="store_true")
-    parser.add_argument("--graph-backend", choices=["neo4j", "artifact", "none"], default="neo4j")
+    parser.add_argument("--graph-backend", choices=["postgres", "artifact", "none"], default="artifact")
     return parser.parse_args()
 
 
@@ -163,10 +163,8 @@ def configure_runtime(args: argparse.Namespace, corpus_dir: Path) -> None:
     os.environ["RAG_INGEST_ALLOWED_DIRS"] = str(corpus_dir.resolve())
     os.environ.setdefault("RAG_AUTH_DISABLED", "true")
     os.environ.setdefault("DISABLE_RERANK", "true")
-    if args.graph_backend == "neo4j":
-        os.environ.setdefault("NEO4J_URI", "bolt://127.0.0.1:7687")
-        os.environ.setdefault("NEO4J_USER", "neo4j")
-        os.environ.setdefault("NEO4J_PASSWORD", "nano-rag-graph")
+    if args.graph_backend == "postgres":
+        os.environ.setdefault("PG_URI", "postgresql://nanorag:nano-rag@127.0.0.1:5432/nanorag")
 
 
 def prepare_corpus(corpus_dir: Path, *, download: bool, force: bool, skip_pdf: bool) -> list[dict[str, Any]]:

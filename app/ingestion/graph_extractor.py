@@ -6,6 +6,7 @@ from typing import Any
 
 from app.model_client.generation import GenerationClient
 from app.schemas.structured import (
+    ENTITY_ID_PREFIX,
     GraphEntity,
     GraphRelation,
     KnowledgeGraph,
@@ -217,7 +218,7 @@ class GraphExtractor:
 
     def _entity_id(self, kb_id: str, name: str) -> str:
         digest = hashlib.sha1(f"{kb_id}:{name.casefold()}".encode("utf-8")).hexdigest()
-        return f"entity:{digest[:20]}"
+        return f"{ENTITY_ID_PREFIX}{digest[:20]}"
 
     def _dedupe(self, items: list[str]) -> list[str]:
         deduped: list[str] = []

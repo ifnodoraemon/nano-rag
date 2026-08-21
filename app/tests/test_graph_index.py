@@ -101,7 +101,7 @@ def test_graph_expander_prefers_configured_graph_store(tmp_path) -> None:
         def expand_node_ids(self, node_ids, *, kb_id, max_neighbors=8):  # noqa: ANN001
             assert node_ids == {"doc-a:node:1"}
             assert kb_id == "default"
-            return [("doc-b:node:1", "NEO4J_PATH")]
+            return [("doc-b:node:1", "STORE_EDGE")]
 
     _write_artifact(tmp_path, _document("doc-a", "a.md", "Evidence from A."))
     _write_artifact(tmp_path, _document("doc-b", "b.md", "Evidence from B."))
@@ -112,4 +112,4 @@ def test_graph_expander_prefers_configured_graph_store(tmp_path) -> None:
     )
 
     assert expanded[0]["node_id"] == "doc-b:node:1"
-    assert expanded[0]["graph_relation"] == "NEO4J_PATH"
+    assert expanded[0]["graph_relation"] == "STORE_EDGE"
