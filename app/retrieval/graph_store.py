@@ -127,6 +127,10 @@ WHERE ne.entity_id = ANY(%(entity_ids)s)
 # entity can only be referenced by node links in its own KB — "unreferenced
 # anywhere" is exactly "unreferenced in this KB plus nothing else", and a
 # kb-scoped subquery would wrongly delete entities still owned by other KBs.
+# The KB-scoping this relies on is pinned by app/tests/test_graph_id_scoping.py
+# (test_entity_id_is_scoped_by_kb_and_casefolded) — that test fails if a
+# refactor ever makes entity ids non-KB-scoped, which is exactly when this
+# global GC would become unsafe.
 _GC_ORPHAN_ENTITIES_QUERY = """
 DELETE FROM graph_entity
 WHERE entity_id NOT IN (
@@ -268,7 +272,11 @@ class PostgresGraphStore:
         # sha256(source_path, kb_id), so a node_id is globally unique per
         # document+kb. The ON CONFLICT (node_id) DO UPDATE below therefore
         # can only ever reassign a row back to its own document — it is not a
-        # cross-KB collision hazard despite node_id being a global PK.
+        # cross-KB collision hazard despite node_id being a global PK. The
+        # KB-scoping of doc_id and node_id this relies on is pinned by
+        # app/tests/test_graph_id_scoping.py (test_node_id_embeds_doc_id,
+        # test_cross_kb_ids_do_not_collide) — a refactor that dropped KB scope
+        # from either id would fail that test before this PK could be abused.
         for node in document.iter_nodes():
             statements.append(
                 (
