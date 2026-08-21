@@ -57,11 +57,16 @@ def test_upsert_statements_write_nodes_entities_and_relations() -> None:
     params = [call[1] for call in statements]
     # First statement rewrites the document's node rows from scratch.
     assert statements[0][0].startswith("DELETE FROM graph_node")
-    assert params[1][1] == "doc-a"  # graph_document upsert doc_id
+    # Stale relations from the previous (non-deterministic) extraction are
+    # dropped by owning (doc_id, kb_id) before the fresh ones are written.
+    assert statements[1][0].startswith("DELETE FROM graph_relation")
+    assert statements[1][1] == ("doc-a", "default")
+    assert params[2][1] == "doc-a"  # graph_document upsert doc_id
     assert any(item[0] == "doc-a:node:1" for item in params)  # node insert
     assert any(item[0] == "entity:shared" for item in params)  # entity insert
-    # Relation rows must record their owning doc_id so delete_document can
-    # scope the relation cleanup (no dangling edges after a doc delete).
+    # The last statement reclaims orphan entities (links from this doc were
+    # just rewritten, so any orphan is stale from a prior extraction).
+    assert "DELETE FROM graph_entity" in statements[-1][0]
     relation_row = next(
         item for item in params if item[0] == "rel:doc-a"
     )

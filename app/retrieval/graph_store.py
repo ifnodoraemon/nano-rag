@@ -121,6 +121,19 @@ WHERE ne.entity_id = ANY(%(entity_ids)s)
   AND ne.node_id <> ALL(%(seed_node_ids)s)
 """
 
+# Reclaim entity rows no node links to any more. Shared by upsert (run after
+# the fresh node_entity links are inserted) and delete. Deliberately global,
+# not kb-scoped: entity ids are sha1(kb_id:name) (see GraphExtractor), so an
+# entity can only be referenced by node links in its own KB — "unreferenced
+# anywhere" is exactly "unreferenced in this KB plus nothing else", and a
+# kb-scoped subquery would wrongly delete entities still owned by other KBs.
+_GC_ORPHAN_ENTITIES_QUERY = """
+DELETE FROM graph_entity
+WHERE entity_id NOT IN (
+    SELECT DISTINCT entity_id FROM graph_node_entity
+)
+"""
+
 
 class PostgresGraphStore:
     """Native-SQL graph store backing document-structure expansion.
@@ -226,6 +239,15 @@ class PostgresGraphStore:
                 "DELETE FROM graph_node WHERE doc_id = %s AND kb_id = %s",
                 (document.doc_id, document.kb_id),
             ),
+            # Re-ingest re-runs LLM extraction, so relation ids from the
+            # previous pass no longer match the fresh ones; drop this doc's
+            # stale relations before re-materializing (delete_document does
+            # the same). Without this, each re-ingest leaves orphaned edges
+            # that expand_node_ids can still return.
+            (
+                "DELETE FROM graph_relation WHERE doc_id = %s AND kb_id = %s",
+                (document.doc_id, document.kb_id),
+            ),
             (
                 """
                 INSERT INTO graph_document (kb_id, doc_id, title, source_path)
@@ -328,6 +350,12 @@ class PostgresGraphStore:
                     ),
                 )
             )
+        # Last: reclaim entities no node links to any more. The doc's node
+        # rows were deleted up front (cascading their node_entity links) and
+        # its fresh links were just inserted, so by here any orphan is either
+        # an entity the previous extraction minted and this one dropped, or
+        # one whose only referencing node belongs to a fully-deleted doc.
+        statements.append((_GC_ORPHAN_ENTITIES_QUERY, ()))
         return statements
 
     @staticmethod
@@ -336,13 +364,7 @@ class PostgresGraphStore:
         # would leave dangling relation rows behind (queryable by
         # expand_node_ids and unreclaimable). Relations are minted per
         # document at extraction, so (doc_id, kb_id) is the owning scope.
-        #
-        # Entity GC is deliberately global, not kb-scoped: entity ids are
-        # sha1(kb_id:name) (see GraphExtractor._entity_id), so an entity can
-        # only be referenced by node links in its own KB. "Unreferenced
-        # anywhere" is therefore exactly "unreferenced in this KB plus
-        # nothing else" — a kb-scoped subquery would wrongly delete entities
-        # still owned by other KBs.
+        # Entity GC (last) is the shared global query — see its definition.
         return [
             (
                 "DELETE FROM graph_node WHERE doc_id = %s AND kb_id = %s",
@@ -356,15 +378,7 @@ class PostgresGraphStore:
                 "DELETE FROM graph_document WHERE doc_id = %s AND kb_id = %s",
                 (doc_id, kb_id),
             ),
-            (
-                """
-                DELETE FROM graph_entity
-                WHERE entity_id NOT IN (
-                    SELECT DISTINCT entity_id FROM graph_node_entity
-                )
-                """,
-                (),
-            ),
+            (_GC_ORPHAN_ENTITIES_QUERY, ()),
         ]
 
     @staticmethod
