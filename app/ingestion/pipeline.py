@@ -17,17 +17,18 @@ from uuid import uuid4
 from app.ingestion.loader import discover_files
 from app.ingestion.metadata import extract_document_metadata
 from app.ingestion.graph_extractor import GraphExtractor
+from app.ingestion.parser_registry import model_parser_available
 from app.wiki.compiler import WikiCompiler
 from app.wiki.search import WikiSearcher
 from app.ingestion.structured_parser import StructuredDocumentParser
-from app.core.exceptions import ParsingError
+from app.core.exceptions import ConfigurationError, ParsingError
 from app.model_client.document_parser import DocumentParserClient
 from app.model_client.generation import GenerationClient
 
 from app.retrieval.graph_store import GraphStore
 from app.schemas.chunk import Chunk
 from app.schemas.document import Document, IngestResponse
-from app.schemas.structured import KnowledgeGraph, NodeType, StructuredDocument
+from app.schemas.structured import NodeType, StructuredDocument
 
 IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp"}
 AUDIO_SUFFIXES = {".mp3", ".wav", ".m4a", ".aac", ".ogg", ".flac"}
@@ -143,62 +144,62 @@ class IngestionPipeline:
             files = discover_files(path)
             chunk_count = 0
             doc_count = 0
-            wiki_updated = False
             prepared_documents: list[PreparedDocument] = []
 
-            try:
-                for file_path in files:
-                    with self.tracing_manager.span(
-                        "ingestion.file", {"ingestion.file_path": str(file_path)}
-                    ):
-                        prepared = await self._prepare_document(
-                            file_path,
-                            kb_id=kb_id,
-                            source_path_overrides=source_path_overrides,
-                        )
-                        prepared_documents.append(prepared)
-                        doc_count += 1
-                        chunk_count += len(prepared.chunks)
-            except Exception:
-
-                raise
+            for file_path in files:
+                with self.tracing_manager.span(
+                    "ingestion.file", {"ingestion.file_path": str(file_path)}
+                ):
+                    prepared = await self._prepare_document(
+                        file_path,
+                        kb_id=kb_id,
+                        source_path_overrides=source_path_overrides,
+                    )
+                    prepared_documents.append(prepared)
+                    doc_count += 1
+                    chunk_count += len(prepared.chunks)
 
             self.config.parsed_dir.mkdir(parents=True, exist_ok=True)
             for prepared in prepared_documents:
-                artifact_tmp = self._stage_parsed_artifact(
+                artifact_tmp = await asyncio.to_thread(
+                    self._stage_parsed_artifact,
                     prepared.document,
                     prepared.chunks,
                     prepared.structured_document,
                 )
                 try:
-                    self._commit_parsed_artifact(artifact_tmp, prepared.document.doc_id)
+                    await asyncio.to_thread(
+                        self._commit_parsed_artifact,
+                        artifact_tmp,
+                        prepared.document.doc_id,
+                    )
                     if self.graph_store and prepared.structured_document:
-                        try:
-                            await asyncio.to_thread(
-                                self.graph_store.upsert_document,
-                                prepared.structured_document,
-                            )
-                        except Exception as exc:
-                            logger.warning(
-                                "graph store update failed for %s; parsed artifact remains committed: %s",
-                                prepared.source_path,
-                                exc,
-                            )
-                    if self.wiki_compiler:
-                        try:
-                            self.wiki_compiler.upsert_document(prepared.document, prepared.chunks)
-                            wiki_updated = True
-                        except Exception as exc:
-                            logger.warning(
-                                "wiki compiler update failed for %s; parsed artifact remains committed: %s",
-                                prepared.source_path,
-                                exc,
-                            )
+                        await asyncio.to_thread(
+                            self.graph_store.upsert_document,
+                            prepared.structured_document,
+                        )
                 except Exception:
                     artifact_tmp.unlink(missing_ok=True)
                     raise
 
-            if wiki_updated and self.wiki_searcher:
+            # One lock acquisition + one version-ledger/index write for the
+            # whole batch instead of per-file full rewrites.
+            if self.wiki_compiler and prepared_documents:
+                await asyncio.to_thread(
+                    self.wiki_compiler.upsert_documents,
+                    [
+                        (prepared.document, prepared.chunks)
+                        for prepared in prepared_documents
+                    ],
+                )
+            if self.graph_store and any(
+                prepared.structured_document for prepared in prepared_documents
+            ):
+                # Once-per-job maintenance: reclaim entity rows whose node
+                # links were rewritten by this batch (kept out of the
+                # per-document hot path).
+                await asyncio.to_thread(self.graph_store.collect_orphan_entities)
+            if self.wiki_compiler and self.wiki_searcher:
                 self.wiki_searcher.refresh()
             return IngestResponse(documents=doc_count, chunks=chunk_count)
 
@@ -224,16 +225,8 @@ class IngestionPipeline:
             kb_id=kb_id,
             source_path=source_path,
         )
-        try:
-            structured_document.graph = await self.graph_extractor.extract(structured_document)
-            structured_document.metadata["graph_extraction"] = {"status": "ok"}
-        except Exception as exc:
-            structured_document.graph = KnowledgeGraph()
-            structured_document.metadata["graph_extraction"] = {
-                "status": "failed",
-                "error_type": exc.__class__.__name__,
-                "error": str(exc)[:500],
-            }
+        structured_document.graph = await self.graph_extractor.extract(structured_document)
+        structured_document.metadata["graph_extraction"] = {"status": "ok"}
         text = self._structured_document_text(structured_document)
         if not text:
             raise ParsingError(
@@ -247,7 +240,8 @@ class IngestionPipeline:
             kb_id=kb_id,
         )
         document_metadata.update(
-            self._source_version_metadata(
+            await asyncio.to_thread(
+                self._source_version_metadata,
                 file_path,
                 structured_document=structured_document,
                 content=text,
@@ -267,7 +261,8 @@ class IngestionPipeline:
             content=text,
             metadata=document_metadata,
         )
-        chunks = self._structured_document_to_chunks(
+        chunks = await asyncio.to_thread(
+            self._structured_document_to_chunks,
             structured_document,
             source_path=source_path,
             title=document.title,
@@ -290,7 +285,8 @@ class IngestionPipeline:
             for chunk in chunks
         ]
         chunks.extend(
-            self._document_attachment_chunks(
+            await asyncio.to_thread(
+                self._document_attachment_chunks,
                 file_path=file_path,
                 source_path=source_path,
                 doc_id=doc_id,
@@ -318,17 +314,16 @@ class IngestionPipeline:
             stat = file_path.stat()
             size_bytes = stat.st_size
             modified_at = stat.st_mtime
-        except OSError:
-            size_bytes = len(content.encode("utf-8"))
-            modified_at = None
-        source_bytes_hash = _file_sha256(file_path)
+        except OSError as exc:
+            raise ParsingError(
+                f"cannot stat source file {file_path} during ingest: {exc}"
+            ) from exc
         return {
             "source_file_name": file_path.name,
             "source_suffix": file_path.suffix.lower(),
             "source_size_bytes": size_bytes,
             "source_modified_at": modified_at,
-            "source_content_hash": source_bytes_hash
-            or hashlib.sha256(content.encode("utf-8")).hexdigest(),
+            "source_content_hash": _file_sha256(file_path),
             "parser": structured_document.metadata.get("parser"),
             "index_schema_version": "2026-05-rag-v1",
         }
@@ -586,14 +581,16 @@ class IngestionPipeline:
     ) -> list[Chunk]:
         try:
             from pypdf import PdfReader, PdfWriter
-        except ImportError:
-            logger.warning("pypdf unavailable; skipping PDF page attachment chunks")
-            return []
+        except ImportError as exc:  # pragma: no cover - pypdf is in requirements
+            raise ParsingError(
+                "pypdf is required for PDF page attachments but is not installed"
+            ) from exc
         try:
             reader = PdfReader(str(file_path))
         except Exception as exc:
-            logger.warning("failed to inspect PDF pages for %s: %s", source_path, exc)
-            return []
+            raise ParsingError(
+                f"cannot open PDF {source_path} for page attachments: {exc}"
+            ) from exc
         page_count = len(reader.pages)
         if page_count <= 0:
             return []
@@ -610,13 +607,10 @@ class IngestionPipeline:
                 with page_path.open("wb") as handle:
                     writer.write(handle)
             except Exception as exc:
-                logger.warning(
-                    "failed to write PDF page attachment for %s page %d: %s",
-                    source_path,
-                    page_index,
-                    exc,
-                )
-                continue
+                raise ParsingError(
+                    f"failed to write PDF page attachment for {source_path} "
+                    f"page {page_index}: {exc}"
+                ) from exc
             chunks.append(
                 Chunk(
                     chunk_id=f"{doc_id}:page:{page_index}",
@@ -743,7 +737,9 @@ class IngestionPipeline:
                         )
                     )
         except (OSError, zipfile.BadZipFile, KeyError) as exc:
-            logger.warning("failed to extract embedded images from %s: %s", source_path, exc)
+            raise ParsingError(
+                f"failed to extract embedded images from {source_path}: {exc}"
+            ) from exc
         return chunks
 
     async def _prepare_media_document(
@@ -761,9 +757,10 @@ class IngestionPipeline:
             stat = file_path.stat()
             source_size_bytes = stat.st_size
             source_modified_at = stat.st_mtime
-        except OSError:
-            source_size_bytes = 0
-            source_modified_at = None
+        except OSError as exc:
+            raise ParsingError(
+                f"cannot stat media file {file_path} during ingest: {exc}"
+            ) from exc
         document_metadata = {
             "kb_id": kb_id,
             "doc_type": modality,
@@ -775,7 +772,7 @@ class IngestionPipeline:
             "source_suffix": suffix,
             "source_size_bytes": source_size_bytes,
             "source_modified_at": source_modified_at,
-            "source_content_hash": _file_sha256(file_path),
+            "source_content_hash": await asyncio.to_thread(_file_sha256, file_path),
             "index_schema_version": "2026-05-rag-v1",
             "media_text_extraction": "not_applicable" if modality != "image" else "not_configured",
             "headings": [],
@@ -804,9 +801,12 @@ class IngestionPipeline:
         chunks = [media_chunk]
         structured_document: StructuredDocument | None = None
         text = ""
-        if modality == "image":
-            structured_document = await self._try_parse_image_text(
-                file_path=file_path,
+        if modality == "image" and model_parser_available(self.document_parser, file_path):
+            # A configured image parser must succeed — falling back to a
+            # media-only chunk on parse failure would silently drop the
+            # image's text content from retrieval.
+            structured_document = await self.structured_parser.parse(
+                file_path,
                 doc_id=doc_id,
                 kb_id=kb_id,
                 source_path=source_path,
@@ -822,7 +822,8 @@ class IngestionPipeline:
                             "source_size_bytes": document_metadata["source_size_bytes"],
                         }
                     )
-                    text_chunks = self._structured_document_to_chunks(
+                    text_chunks = await asyncio.to_thread(
+                        self._structured_document_to_chunks,
                         structured_document,
                         source_path=source_path,
                         title=title,
@@ -870,29 +871,6 @@ class IngestionPipeline:
         )
 
 
-
-    async def _try_parse_image_text(
-        self,
-        *,
-        file_path: Path,
-        doc_id: str,
-        kb_id: str,
-        source_path: str,
-    ) -> StructuredDocument | None:
-        try:
-            return await self.structured_parser.parse(
-                file_path,
-                doc_id=doc_id,
-                kb_id=kb_id,
-                source_path=source_path,
-            )
-        except Exception as exc:
-            logger.warning(
-                "image text extraction skipped for %s; keeping visual media chunk only: %s",
-                source_path,
-                exc,
-            )
-            return None
 
     def _resolve_source_path(
         self, file_path: Path, source_path_overrides: dict[str, str] | None = None
@@ -955,8 +933,8 @@ def _text_chunk_max_chars(strategy: str = "structural_leaf") -> int:
     raw = os.getenv(env_name, str(default))
     try:
         return max(1000, int(raw))
-    except ValueError:
-        return default
+    except ValueError as exc:
+        raise ConfigurationError(f"{env_name} must be an integer, got {raw!r}") from exc
 
 
 def _text_chunk_overlap_chars(strategy: str = "structural_leaf") -> int:
@@ -964,8 +942,8 @@ def _text_chunk_overlap_chars(strategy: str = "structural_leaf") -> int:
     raw = os.getenv(env_name, str(default))
     try:
         return max(0, int(raw))
-    except ValueError:
-        return default
+    except ValueError as exc:
+        raise ConfigurationError(f"{env_name} must be an integer, got {raw!r}") from exc
 
 
 def _chunk_size_setting(strategy: str, kind: str) -> tuple[str, int]:
@@ -1008,8 +986,10 @@ def _pdf_attachment_max_pages() -> int:
     raw = os.getenv("RAG_PDF_ATTACHMENT_MAX_PAGES", "50")
     try:
         return max(1, int(raw))
-    except ValueError:
-        return 50
+    except ValueError as exc:
+        raise ConfigurationError(
+            f"RAG_PDF_ATTACHMENT_MAX_PAGES must be an integer, got {raw!r}"
+        ) from exc
 
 
 def _rendered_pdf_image_index_enabled() -> bool:
@@ -1026,8 +1006,10 @@ def _embedded_image_max_count() -> int:
     raw = os.getenv("RAG_EMBEDDED_IMAGE_MAX_COUNT", "100")
     try:
         return max(1, int(raw))
-    except ValueError:
-        return 100
+    except ValueError as exc:
+        raise ConfigurationError(
+            f"RAG_EMBEDDED_IMAGE_MAX_COUNT must be an integer, got {raw!r}"
+        ) from exc
 
 
 def _render_pdf_page_images(pdf_path: Path, output_dir: Path) -> list[tuple[int, Path]]:
@@ -1035,8 +1017,10 @@ def _render_pdf_page_images(pdf_path: Path, output_dir: Path) -> list[tuple[int,
         return []
     renderer = shutil.which("pdftoppm")
     if not renderer:
-        logger.info("pdftoppm not available; skipping rendered PDF page image chunks")
-        return []
+        raise ConfigurationError(
+            "RAG_RENDERED_PAGE_IMAGE_INDEX_ENABLED is true but pdftoppm is not "
+            "installed; install poppler-utils or disable rendered page image indexing"
+        )
     output_dir.mkdir(parents=True, exist_ok=True)
     max_pages = _pdf_attachment_max_pages()
     prefix = output_dir / "page"
@@ -1044,7 +1028,7 @@ def _render_pdf_page_images(pdf_path: Path, output_dir: Path) -> list[tuple[int,
         renderer,
         "-png",
         "-r",
-        os.getenv("RAG_RENDERED_PAGE_IMAGE_DPI", "144"),
+        _rendered_pdf_image_dpi(),
         "-f",
         "1",
         "-l",
@@ -1061,8 +1045,10 @@ def _render_pdf_page_images(pdf_path: Path, output_dir: Path) -> list[tuple[int,
             text=True,
         )
     except (OSError, subprocess.CalledProcessError) as exc:
-        logger.warning("failed to render PDF pages for %s: %s", pdf_path, exc)
-        return []
+        raise ParsingError(
+            f"failed to render PDF pages for {pdf_path}: "
+            f"{exc.stderr.strip() if isinstance(exc, subprocess.CalledProcessError) else exc}"
+        ) from exc
     rendered: list[tuple[int, Path]] = []
     for path in sorted(output_dir.glob("page-*.png"), key=lambda item: _natural_key(item.name)):
         stem_number = path.stem.rsplit("-", 1)[-1]
@@ -1071,7 +1057,21 @@ def _render_pdf_page_images(pdf_path: Path, output_dir: Path) -> list[tuple[int,
         except ValueError:
             continue
         rendered.append((page_number, path))
+    if not rendered:
+        raise ParsingError(
+            f"pdftoppm produced no page images for {pdf_path}"
+        )
     return rendered
+
+
+def _rendered_pdf_image_dpi() -> str:
+    raw = os.getenv("RAG_RENDERED_PAGE_IMAGE_DPI", "144")
+    try:
+        return str(max(36, int(raw)))
+    except ValueError as exc:
+        raise ConfigurationError(
+            f"RAG_RENDERED_PAGE_IMAGE_DPI must be an integer, got {raw!r}"
+        ) from exc
 
 
 def _natural_key(value: object) -> list[object]:
@@ -1141,7 +1141,7 @@ def _discourse_units(text: str, role: str) -> list[dict[str, str]]:
     return [{"role": role, "text": normalized[:240]}]
 
 
-def _file_sha256(path: Path) -> str | None:
+def _file_sha256(path: Path) -> str:
     digest = hashlib.sha256()
     try:
         with path.open("rb") as handle:
@@ -1150,8 +1150,8 @@ def _file_sha256(path: Path) -> str | None:
                 if not chunk:
                     break
                 digest.update(chunk)
-    except OSError:
-        return None
+    except OSError as exc:
+        raise ParsingError(f"cannot read source file {path} for hashing: {exc}") from exc
     return digest.hexdigest()
 
 

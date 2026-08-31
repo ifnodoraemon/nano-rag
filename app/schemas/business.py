@@ -26,6 +26,7 @@ class BusinessChatResponse(BaseModel):
     trace_id: str | None = None
     kb_id: str = "default"
     session_id: str | None = None
+    usage: dict[str, object] | None = None
 
 
 class BusinessRetrieveRequest(BaseModel):

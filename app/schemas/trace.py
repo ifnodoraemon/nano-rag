@@ -20,6 +20,7 @@ class TraceRecord(BaseModel):
     trace_id: str
     latency_seconds: float | None = None
     query: str | None = None
+    original_query: str | None = None
     rewritten_query: str | None = None
     expanded_queries: list[str] = Field(default_factory=list)
     hyde_query: str | None = None

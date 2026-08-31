@@ -24,8 +24,11 @@ logger = logging.getLogger(__name__)
 
 T = TypeVar("T", bound=BaseModel)
 
-TRACE_MAX_RECORDS = int(os.getenv("RAG_TRACE_MAX_RECORDS", "200"))
-FEEDBACK_MAX_RECORDS = int(os.getenv("RAG_FEEDBACK_MAX_RECORDS", "500"))
+# Retention is a configurable ring buffer; the durable audit sink is the
+# Langfuse OTEL export. Defaults are sized so an incident review window keeps
+# a meaningful sample without the store growing unbounded.
+TRACE_MAX_RECORDS = int(os.getenv("RAG_TRACE_MAX_RECORDS", "5000"))
+FEEDBACK_MAX_RECORDS = int(os.getenv("RAG_FEEDBACK_MAX_RECORDS", "5000"))
 OTLP_TLS_ENABLED = os.getenv("OTLP_TLS_ENABLED", "false").lower() in (
     "true",
     "1",

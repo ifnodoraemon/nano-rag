@@ -70,18 +70,23 @@ async def test_parse_document_uses_model_parser_for_pdf(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_parse_document_respects_string_false_parser_enabled(tmp_path) -> None:
+async def test_parse_document_disabled_parser_fails_loudly_on_unreadable_pdf(tmp_path) -> None:
+    """Disabled model parser + a PDF the local reader cannot open must raise
+    (previously this fell through with a generic 'configure a parser' error or
+    silently returned empty text)."""
     pdf_path = tmp_path / "notice.pdf"
     pdf_path.write_bytes(b"%PDF-1.4 fake")
 
     with pytest.raises(ParsingError) as exc_info:
         await parse_document(pdf_path, DisabledStringDocumentParser())
 
-    assert "configured document parser model" in str(exc_info.value)
+    assert "cannot extract text from PDF" in str(exc_info.value)
 
 
 @pytest.mark.asyncio
-async def test_structured_parser_respects_string_false_parser_enabled(tmp_path) -> None:
+async def test_structured_parser_disabled_parser_fails_loudly_on_unreadable_pdf(
+    tmp_path,
+) -> None:
     pdf_path = tmp_path / "notice.pdf"
     pdf_path.write_bytes(b"%PDF-1.4 fake")
     parser = StructuredDocumentParser(DisabledStringDocumentParser())
@@ -94,7 +99,7 @@ async def test_structured_parser_respects_string_false_parser_enabled(tmp_path) 
             source_path="/tmp/notice.pdf",
         )
 
-    assert "requires a configured multimodal document parser" in str(exc_info.value)
+    assert "cannot extract text from PDF" in str(exc_info.value)
 
 
 @pytest.mark.asyncio
@@ -126,9 +131,12 @@ async def test_ingestion_pipeline_rejects_empty_parsed_content(monkeypatch, tmp_
 
 
 @pytest.mark.asyncio
-async def test_ingestion_pipeline_keeps_document_when_graph_extraction_fails(
+async def test_ingestion_pipeline_fails_when_graph_extraction_fails(
     monkeypatch, tmp_path
 ) -> None:
+    """No-degradation contract: a failing graph-extraction LLM call must fail
+    the ingest (the previous behavior committed the document with an empty
+    graph and a metadata marker, silently dropping graph expansion for it)."""
     monkeypatch.setenv("RAG_INGEST_ALLOWED_DIRS", str(tmp_path))
     monkeypatch.setenv("PARSED_OUTPUT_DIR", str(tmp_path / "parsed"))
     monkeypatch.setattr("app.ingestion.loader._cached_allowed_dirs", None)
@@ -147,17 +155,20 @@ async def test_ingestion_pipeline_keeps_document_when_graph_extraction_fails(
         tracing_manager=TracingManager("test-service", ""),
     )
 
-    response = await pipeline.run(str(doc_path), kb_id="default")
+    with pytest.raises(ModelGatewayError):
+        await pipeline.run(str(doc_path), kb_id="default")
 
-    assert response.documents == 1
-    assert response.chunks == 2
-    assert len(_parsed_chunks(tmp_path / "parsed")) == 2
+    # Nothing is committed when the pipeline fails.
+    assert not list((tmp_path / "parsed").glob("*.json"))
 
 
 @pytest.mark.asyncio
 async def test_pdf_ingestion_adds_page_attachment_chunks(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("RAG_INGEST_ALLOWED_DIRS", str(tmp_path))
     monkeypatch.setenv("PARSED_OUTPUT_DIR", str(tmp_path / "parsed"))
+    # The rendered-page-image pass needs poppler; this test covers the page
+    # attachment pass only.
+    monkeypatch.setenv("RAG_RENDERED_PAGE_IMAGE_INDEX_ENABLED", "false")
     monkeypatch.setattr("app.ingestion.loader._cached_allowed_dirs", None)
     pdf_path = tmp_path / "notice.pdf"
     writer = PdfWriter()
@@ -488,9 +499,12 @@ async def test_document_parser_batches_large_pdf_pages(monkeypatch, tmp_path) ->
 
 
 @pytest.mark.asyncio
-async def test_document_parser_keeps_successful_pdf_batches(
+async def test_document_parser_batch_failure_fails_whole_document(
     monkeypatch, tmp_path
 ) -> None:
+    """No-degradation contract: a failed page batch means missing pages in the
+    parsed output, so the whole document must fail instead of keeping the
+    surviving batches with an in-band '# Parser warnings' header."""
     monkeypatch.setenv("MODEL_GATEWAY_MODE", "live")
     monkeypatch.setenv("DOCUMENT_PARSER_PDF_PAGE_BATCH_SIZE", "1")
     pdf_path = tmp_path / "standard.pdf"
@@ -501,15 +515,12 @@ async def test_document_parser_keeps_successful_pdf_batches(
         writer.write(handle)
 
     class FakeResponse:
-        def __init__(self, payload: dict, fail: bool = False, headers: dict | None = None) -> None:
+        def __init__(self, payload: dict, headers: dict | None = None) -> None:
             self._payload = payload
-            self.fail = fail
             self.headers = headers or {}
-            self.text = "upstream timeout"
 
         def raise_for_status(self) -> None:
-            if self.fail:
-                raise httpx.TimeoutException("timeout")
+            return None
 
         def json(self) -> dict:
             return self._payload
@@ -565,11 +576,10 @@ async def test_document_parser_keeps_successful_pdf_batches(
     client = DocumentParserClient(config)
     client._client = FakeAsyncClient()  # noqa: SLF001
 
-    text = await client.parse_file(pdf_path)
+    with pytest.raises(ModelGatewayError) as exc_info:
+        await client.parse_file(pdf_path)
 
-    assert "first page markdown" in text
-    assert "# Parser warnings" in text
-    assert "Pages 2-2" in text
+    assert "batch pages 2-2 failed" in str(exc_info.value)
 
 
 @pytest.mark.asyncio

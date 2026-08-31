@@ -4,6 +4,7 @@ import hashlib
 import json
 from typing import Any
 
+from app.core.exceptions import ModelOutputError
 from app.model_client.generation import GenerationClient
 from app.schemas.structured import (
     ENTITY_ID_PREFIX,
@@ -12,6 +13,7 @@ from app.schemas.structured import (
     KnowledgeGraph,
     StructuredDocument,
 )
+from app.utils.json_utils import parse_json_object
 
 
 MAX_GRAPH_NODES_FOR_PROMPT = 80
@@ -57,7 +59,7 @@ class GraphExtractor:
                 },
             ]
         )
-        return self._json_object(str(result.get("content") or ""))
+        return parse_json_object(str(result.get("content") or ""))
 
     def _nodes_for_prompt(self, document: StructuredDocument) -> list[dict[str, object]]:
         nodes: list[dict[str, object]] = []
@@ -81,8 +83,12 @@ class GraphExtractor:
         self, document: StructuredDocument, raw_entities: object
     ) -> dict[str, GraphEntity]:
         entities = self._node_entities(document)
+        valid_node_ids = {node.node_id for node in document.iter_nodes()}
         if not isinstance(raw_entities, list):
-            return entities
+            raise ModelOutputError(
+                "graph extraction payload must be a JSON object with an "
+                "'entities' list"
+            )
         for raw in raw_entities:
             if not isinstance(raw, dict):
                 continue
@@ -93,7 +99,7 @@ class GraphExtractor:
             source_node_ids = [
                 str(item)
                 for item in raw.get("source_node_ids", [])
-                if str(item).strip()
+                if str(item).strip() and str(item).strip() in valid_node_ids
             ]
             entities[entity_id] = GraphEntity(
                 entity_id=entity_id,
@@ -139,7 +145,10 @@ class GraphExtractor:
                     confidence=1.0,
                 )
         if not isinstance(raw_relations, list):
-            return list(relations.values())
+            raise ModelOutputError(
+                "graph extraction payload must be a JSON object with a "
+                "'relations' list"
+            )
         name_to_id = {entity.name.casefold(): entity_id for entity_id, entity in entities.items()}
         for raw in raw_relations:
             if not isinstance(raw, dict):
@@ -193,21 +202,11 @@ class GraphExtractor:
             confidence=confidence,
         )
 
-    def _json_object(self, content: str) -> dict[str, Any]:
-        text = content.strip()
-        if text.startswith("```"):
-            text = text.strip("`")
-            if text.lower().startswith("json"):
-                text = text[4:].strip()
-        start = text.find("{")
-        end = text.rfind("}")
-        if start >= 0 and end >= start:
-            text = text[start : end + 1]
-        try:
-            loaded = json.loads(text)
-        except json.JSONDecodeError:
-            return {}
-        return loaded if isinstance(loaded, dict) else {}
+    def _json_object(self, content: str) -> dict[str, Any]:  # noqa: ARG002 - retained for API compat
+        raise NotImplementedError(
+            "use app.utils.json_utils.parse_json_object (strict; raises "
+            "ModelOutputError on invalid model output)"
+        )
 
     def _confidence(self, value: object) -> float:
         try:

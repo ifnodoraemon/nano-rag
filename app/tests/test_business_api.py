@@ -424,11 +424,11 @@ async def test_rag_chat_stream_surfaces_safe_error_frame() -> None:
     class _Boom(Exception):
         pass
 
-    async def fake_ainvoke(state):  # noqa: ANN001
+    async def fake_run(payload):  # noqa: ANN001, ARG001
         raise _Boom("provider said: secret body and /abs/path/leak")
 
     container = SimpleNamespace(
-        chat_pipeline=SimpleNamespace(workflow=SimpleNamespace(ainvoke=fake_ainvoke)),
+        chat_pipeline=SimpleNamespace(run=fake_run),
         knowledge_base_catalog=SimpleNamespace(exists=lambda kb: True),
     )
 
@@ -450,16 +450,22 @@ async def test_rag_chat_stream_surfaces_safe_error_frame() -> None:
 
 
 @pytest.mark.asyncio
-async def test_rag_chat_stream_fails_loud_on_unknown_queue_payload() -> None:
-    # An unexpected queue item must end the stream explicitly instead of
-    # leaving the consumer loop spinning on a dead stream.
-    class _Workflow:
-        async def ainvoke(self, state):  # noqa: ANN001
-            state["stream_queue"].put_nowait(object())
-            return {"response": None}
+async def test_rag_chat_stream_runs_the_unified_pipeline() -> None:
+    # The stream endpoint must go through the same chat_pipeline.run() code
+    # path as the non-stream endpoint (structured synthesis, citations,
+    # trace_id) — no separate lower-quality streaming branch.
+    from app.schemas.chat import ChatResponse, Citation
+
+    async def fake_run(payload):  # noqa: ANN001, ARG001
+        return ChatResponse(
+            answer="the answer",
+            citations=[Citation(chunk_id="c1", source="doc.md")],
+            contexts=[],
+            trace_id="trace-1",
+        )
 
     container = SimpleNamespace(
-        chat_pipeline=SimpleNamespace(workflow=_Workflow()),
+        chat_pipeline=SimpleNamespace(run=fake_run),
         knowledge_base_catalog=SimpleNamespace(exists=lambda kb: True),
     )
 
@@ -476,4 +482,9 @@ async def test_rag_chat_stream_fails_loud_on_unknown_queue_payload() -> None:
             if line.startswith("data: "):
                 frames.append(json.loads(line[6:]))
 
-    assert {"status": "error", "message": "internal stream error"} in frames
+    statuses = [frame.get("status") for frame in frames]
+    assert statuses == ["thinking", "generating", "success"]
+    success = frames[-1]
+    assert success["answer"] == "the answer"
+    assert success["trace_id"] == "trace-1"
+    assert success["citations"][0]["chunk_id"] == "c1"

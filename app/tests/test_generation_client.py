@@ -3,6 +3,7 @@ from typing import Any
 import pytest
 
 from app.core.config import AppConfig
+from app.core.exceptions import ModelGatewayError
 from app.model_client.generation import GenerationClient
 
 
@@ -22,14 +23,9 @@ def _client() -> GenerationClient:
     return GenerationClient(config)
 
 
-def test_generate_and_stream_generate_are_class_methods() -> None:
-    # Regression: 1c10bef inserted stream_generate at column 0, which demoted
-    # `generate` into a nested dead function and pushed `stream_generate` to
-    # module scope, leaving the class with no public methods.
+def test_generate_is_a_class_method() -> None:
     assert "generate" in GenerationClient.__dict__, "generate must be defined on the class"
-    assert "stream_generate" in GenerationClient.__dict__, "stream_generate must be defined on the class"
     assert callable(GenerationClient.__dict__["generate"])
-    assert callable(GenerationClient.__dict__["stream_generate"])
 
 
 @pytest.mark.asyncio
@@ -71,37 +67,53 @@ async def test_generate_passes_through_kwargs_and_returns_shape() -> None:
 
 
 @pytest.mark.asyncio
-async def test_stream_generate_yields_chunks() -> None:
+async def test_generate_raises_when_provider_returns_no_choices() -> None:
+    client = _client()
+
+    async def fake_chat_completions(messages, model_alias, **kwargs):  # noqa: ANN001, ARG001
+        return {"choices": [], "usage": {}}
+
+    client.provider_client.chat_completions = fake_chat_completions  # type: ignore[method-assign]
+
+    with pytest.raises(ModelGatewayError, match="no choices"):
+        await client.generate([{"role": "user", "content": "hi"}])
+
+
+@pytest.mark.asyncio
+async def test_generate_raises_on_truncated_output() -> None:
+    # finish_reason=length means the structured JSON was cut off mid-object;
+    # parsing it would produce garbage. No silent pass-through of truncated
+    # content — fail visibly.
+    client = _client()
+
+    async def fake_chat_completions(messages, model_alias, **kwargs):  # noqa: ANN001, ARG001
+        return {
+            "choices": [
+                {"message": {"content": '{"is_answerable": tru'}, "finish_reason": "length"}
+            ],
+            "usage": {},
+        }
+
+    client.provider_client.chat_completions = fake_chat_completions  # type: ignore[method-assign]
+
+    with pytest.raises(ModelGatewayError, match="truncated"):
+        await client.generate([{"role": "user", "content": "hi"}])
+
+
+@pytest.mark.asyncio
+async def test_generate_applies_configured_max_tokens() -> None:
     client = _client()
     captured: dict[str, Any] = {}
 
-    async def fake_stream_chat_completions(messages, model_alias, **kwargs):
-        captured["model_alias"] = model_alias
+    async def fake_chat_completions(messages, model_alias, **kwargs):
         captured.update(kwargs)
-        for content in ("Hel", "lo", ""):
-            yield {
-                "choices": [
-                    {"delta": {"content": content}, "finish_reason": None}
-                ]
-            }
-        yield {"choices": [{"delta": {}, "finish_reason": "stop"}]}
+        return {
+            "choices": [{"message": {"content": "answer"}, "finish_reason": "stop"}],
+            "usage": {},
+        }
 
-    client.provider_client.stream_chat_completions = fake_stream_chat_completions  # type: ignore[method-assign]
+    client.provider_client.chat_completions = fake_chat_completions  # type: ignore[method-assign]
+    client.max_tokens = 4096
 
-    collected = [
-        chunk
-        async for chunk in client.stream_generate(
-            [{"role": "user", "content": "hi"}], stream=True
-        )
-    ]
-
-    assert captured["model_alias"] == "gemini-flash-lite-latest"
-    assert captured["stream"] is True
-    assert [c["content"] for c in collected] == ["Hel", "lo", "", ""]
-    assert collected[:3] == [
-        {"content": "Hel", "finish_reason": None},
-        {"content": "lo", "finish_reason": None},
-        {"content": "", "finish_reason": None},
-    ]
-    # The final chunk carries the finish reason with no new content.
-    assert collected[-1] == {"content": "", "finish_reason": "stop"}
+    await client.generate([{"role": "user", "content": "hi"}])
+    assert captured["max_tokens"] == 4096

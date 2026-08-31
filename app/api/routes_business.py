@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -15,6 +16,7 @@ logger = logging.getLogger(__name__)
 
 from app.api.auth import RequestContext, require_admin_key, require_api_key
 from app.core.config import AppContainer
+from app.core.exceptions import StoreError
 from app.diagnostics.service import DiagnosisService
 from app.eval.deepeval_runner import DeepevalRunner
 from app.ingestion.executor import submit_ingest_paths
@@ -141,6 +143,45 @@ def _ensure_trace_scope(
         )
 
 
+# Per-file payload cache for the document list endpoints: path -> (marker,
+# document dict | None, chunk count, mtime). The list endpoints previously
+# re-read and re-parsed every artifact in the corpus on every request.
+_DOC_LIST_FILE_CACHE: dict[str, tuple[tuple[int, int], dict | None, int, float]] = {}
+
+
+def _document_summary_from_artifact(
+    artifact: Path,
+) -> tuple[dict | None, int, float]:
+    """Parse one artifact (cached by mtime+size); returns (document, chunk
+    count, mtime). Raises StoreError on a corrupt artifact: a torn parsed
+    artifact is a data-integrity failure and must surface, not vanish from
+    the document list."""
+    try:
+        stat = artifact.stat()
+    except OSError as exc:
+        raise StoreError(f"cannot stat parsed artifact {artifact}: {exc}") from exc
+    marker = (stat.st_mtime_ns, stat.st_size)
+    cached = _DOC_LIST_FILE_CACHE.get(str(artifact))
+    if cached is not None and cached[0] == marker:
+        return cached[1], cached[2], cached[3]
+    try:
+        payload = json.loads(artifact.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise StoreError(
+            f"parsed artifact {artifact.name} is corrupt: {exc}"
+        ) from exc
+    document = payload.get("document") if isinstance(payload, dict) else None
+    chunks = payload.get("chunks") if isinstance(payload, dict) else None
+    entry = (
+        marker,
+        document if isinstance(document, dict) else None,
+        len(chunks) if isinstance(chunks, list) else 0,
+        stat.st_mtime,
+    )
+    _DOC_LIST_FILE_CACHE[str(artifact)] = entry
+    return entry[1], entry[2], entry[3]
+
+
 def _list_scope_documents(
     parsed_dir: Path, kb_id: str
 ) -> list[BusinessDocumentSummary]:
@@ -148,13 +189,8 @@ def _list_scope_documents(
         return []
     documents: list[BusinessDocumentSummary] = []
     for artifact in sorted(parsed_dir.glob("*.json")):
-        try:
-            payload = json.loads(artifact.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            continue
-        document = payload.get("document") if isinstance(payload, dict) else None
-        chunks = payload.get("chunks") if isinstance(payload, dict) else None
-        if not isinstance(document, dict):
+        document, chunk_count, mtime = _document_summary_from_artifact(artifact)
+        if document is None:
             continue
         metadata = document.get("metadata", {})
         if not isinstance(metadata, dict):
@@ -172,8 +208,8 @@ def _list_scope_documents(
                 title=title,
                 source_path=source_path,
                 kb_id=kb_id,
-                chunk_count=len(chunks) if isinstance(chunks, list) else 0,
-                updated_at=artifact.stat().st_mtime,
+                chunk_count=chunk_count,
+                updated_at=mtime,
                 doc_type=(
                     str(metadata.get("doc_type")).strip()
                     if metadata.get("doc_type") is not None
@@ -205,13 +241,8 @@ def _list_knowledge_bases(
     parsed_dir = container.config.parsed_dir
     if parsed_dir.exists():
         for artifact in sorted(parsed_dir.glob("*.json")):
-            try:
-                payload = json.loads(artifact.read_text(encoding="utf-8"))
-            except (OSError, json.JSONDecodeError):
-                continue
-            document = payload.get("document") if isinstance(payload, dict) else None
-            chunks = payload.get("chunks") if isinstance(payload, dict) else None
-            if not isinstance(document, dict):
+            document, chunk_count, updated_at = _document_summary_from_artifact(artifact)
+            if document is None:
                 continue
             metadata = document.get("metadata", {})
             if not isinstance(metadata, dict):
@@ -221,8 +252,7 @@ def _list_knowledge_bases(
                 continue
             summary = summaries[kb_id]
             summary.document_count += 1
-            summary.chunk_count += len(chunks) if isinstance(chunks, list) else 0
-            updated_at = artifact.stat().st_mtime
+            summary.chunk_count += chunk_count
             if summary.last_activity_at is None or updated_at > summary.last_activity_at:
                 summary.last_activity_at = updated_at
 
@@ -286,6 +316,7 @@ async def rag_chat(
         trace_id=response.trace_id,
         kb_id=payload.kb_id,
         session_id=payload.session_id,
+        usage=response.usage,
     )
 
 
@@ -297,72 +328,48 @@ async def rag_chat_stream(
 ) -> StreamingResponse:
     """
     流式响应接口 (SSE)。
-    支持通过 LangGraph stream_queue 进行打字机式流式输出。
+
+    The pipeline is a single code path: the same structured synthesis
+    (json_schema-enforced answer, citations, verification) as the non-stream
+    endpoint, delivered over SSE once complete. There is no lower-quality
+    streaming shortcut that bypasses the structured answer gate.
     """
     container = request.app.state.container
     _ensure_kb_access(container, payload.kb_id, context)
-    
-    async def event_generator():
-        import asyncio
-        from time import perf_counter
-        from app.schemas.chat import ChatResponse
 
+    async def event_generator():
         def _frame(payload: dict[str, object]) -> str:
             return "data: " + json.dumps(payload, ensure_ascii=False) + "\n\n"
 
         yield _frame({"status": "thinking", "message": "Retrieving and synthesizing..."})
 
-        queue: "asyncio.Queue[object]" = asyncio.Queue()
-        payload_copy = ChatRequest(
-            query=payload.query,
-            top_k=payload.top_k,
-            kb_id=payload.kb_id,
-            session_id=payload.session_id,
-            metadata_filters=payload.metadata_filters,
-        )
-
-        state_input = {"payload": payload_copy, "started_at": perf_counter(), "stream_queue": queue}
-
-        async def run_workflow():
-            try:
-                state = await container.chat_pipeline.workflow.ainvoke(state_input)
-                await queue.put(state["response"])
-            except asyncio.CancelledError:
-                raise
-            except Exception as e:  # noqa: BLE001 - surfaced as a generic SSE error frame
-                # Full detail stays server-side; only a safe message crosses the wire.
-                logger.exception("chat stream workflow failed: %s", e)
-                await queue.put(e)
-
-        task = asyncio.create_task(run_workflow())
-
         try:
-            while True:
-                chunk = await queue.get()
-                if isinstance(chunk, BaseException):
-                    yield _frame({"status": "error", "message": "upstream generation error"})
-                    break
-                if isinstance(chunk, ChatResponse):
-                    yield _frame(
-                        {
-                            "status": "success",
-                            "answer": chunk.answer,
-                            "trace_id": chunk.trace_id,
-                            "citations": [c.model_dump() for c in chunk.citations],
-                        }
-                    )
-                    break
-                if isinstance(chunk, str):
-                    yield _frame({"status": "generating", "chunk": chunk})
-                    continue
-                # Fail loud on unexpected queue payloads instead of spinning
-                # the consumer loop forever with a dead stream.
-                logger.error("unexpected chat stream queue payload: %r", type(chunk))
-                yield _frame({"status": "error", "message": "internal stream error"})
-                break
+            response = await container.chat_pipeline.run(
+                ChatRequest(
+                    query=payload.query,
+                    top_k=payload.top_k,
+                    kb_id=payload.kb_id,
+                    session_id=payload.session_id,
+                    metadata_filters=payload.metadata_filters,
+                )
+            )
         except asyncio.CancelledError:
-            task.cancel()
             raise
+        except Exception:  # noqa: BLE001 - surfaced as a generic SSE error frame
+            # Full detail stays server-side; only a safe message crosses the wire.
+            logger.exception("chat stream workflow failed")
+            yield _frame({"status": "error", "message": "upstream generation error"})
+            return
+
+        yield _frame({"status": "generating", "chunk": response.answer})
+        yield _frame(
+            {
+                "status": "success",
+                "answer": response.answer,
+                "trace_id": response.trace_id,
+                "citations": [c.model_dump() for c in response.citations],
+            }
+        )
 
     return StreamingResponse(event_generator(), media_type="text/event-stream")
 
@@ -441,7 +448,12 @@ async def rag_ingest_job(
     request: Request,
     context: RequestContext = Depends(require_api_key),
 ) -> BusinessIngestJobResponse:
-    record = request.app.state.container.ingest_job_store.get(job_id)
+    try:
+        record = request.app.state.container.ingest_job_store.get(job_id)
+    except StoreError as exc:
+        # Corrupt job record: surface the store-integrity failure as an
+        # explicit 500 instead of pretending the job never existed.
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
     if record is None:
         raise HTTPException(status_code=404, detail=f"ingest job not found: {job_id}")
     _ensure_kb_access(request.app.state.container, record.kb_id, context)

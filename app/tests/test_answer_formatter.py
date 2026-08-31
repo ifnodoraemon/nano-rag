@@ -10,11 +10,10 @@ def test_answer_formatter_does_not_insert_citation_marker_if_missing() -> None:
     )
 
     assert response.answer == "Test answer"
-    assert len(response.citations) == 1
-    assert response.citations[0].citation_label == "C1"
-    assert response.citations[0].span_text == "ctx"
-    assert response.citations[0].span_start == 0
-    assert response.citations[0].span_end == 3
+    # Nothing was cited, so no citations are fabricated. The full context set
+    # remains available on response.contexts.
+    assert response.citations == []
+    assert [context["chunk_id"] for context in response.contexts] == ["c1"]
 
 
 def test_answer_formatter_preserves_multimodal_citation_fields() -> None:
@@ -44,7 +43,7 @@ def test_answer_formatter_preserves_multimodal_citation_fields() -> None:
 def test_answer_formatter_prioritizes_primary_citations_and_reorders_contexts() -> None:
     formatter = AnswerFormatter()
     response = formatter.format(
-        answer="Test answer",
+        answer="Test answer [C3, C1, C2]",
         contexts=[
             {
                 "chunk_id": "c-conflict",
@@ -75,16 +74,21 @@ def test_answer_formatter_prioritizes_primary_citations_and_reorders_contexts() 
         trace_id="t1",
     )
 
-    assert response.citations[0].chunk_id == "c-primary"
-    assert len(response.citations) == 1
+    # Citations follow the order the model cited them in.
+    assert [c.chunk_id for c in response.citations] == [
+        "c-conflict",
+        "c-primary",
+        "c-support",
+    ]
+    # Contexts are reordered by evidence priority (primary > supporting >
+    # conflicting), score descending within a tier.
     assert [context["chunk_id"] for context in response.contexts] == [
         "c-primary",
         "c-support",
         "c-conflict",
     ]
-    assert "[C1]" not in response.answer
-    assert response.citations[0].evidence_role == "primary"
-    assert response.citations[0].span_text == "primary"
+    assert response.citations[1].evidence_role == "primary"
+    assert response.citations[1].span_text == "primary"
 
 
 def test_answer_formatter_adds_conflict_notice_when_conflicting_evidence_exists() -> None:
@@ -193,7 +197,7 @@ def test_answer_formatter_does_not_duplicate_evidence_summary() -> None:
 def test_answer_formatter_extracts_best_matching_span_from_context() -> None:
     formatter = AnswerFormatter()
     response = formatter.format(
-        answer="Carryover is allowed up to 5 days.",
+        answer="Carryover is allowed up to 5 days. [C1]",
         contexts=[
             {
                 "chunk_id": "c-primary",
@@ -276,7 +280,11 @@ def test_answer_formatter_only_returns_explicitly_cited_labels() -> None:
     assert "[C2]" not in response.answer
 
 
-def test_answer_formatter_drops_numeric_citations_without_answer_value() -> None:
+def test_answer_formatter_keeps_all_structurally_valid_citations() -> None:
+    # Citation filtering is structural only: every label the model used that
+    # maps to a provided context is kept. The old numeric-support heuristic
+    # silently dropped correct citations when numbers were formatted
+    # differently (e.g. "31,800" vs "31800").
     formatter = AnswerFormatter()
     response = formatter.format(
         answer="中宁县徐套乡的价格为 31,800 元/亩 [C1, C2, C3]。",
@@ -309,8 +317,12 @@ def test_answer_formatter_drops_numeric_citations_without_answer_value() -> None
         trace_id="t1",
     )
 
-    assert response.answer == "中宁县徐套乡的价格为 31,800 元/亩 [C3]。"
-    assert [citation.citation_label for citation in response.citations] == ["C3"]
+    assert response.answer == "中宁县徐套乡的价格为 31,800 元/亩 [C1, C2, C3]。"
+    assert [citation.citation_label for citation in response.citations] == [
+        "C1",
+        "C2",
+        "C3",
+    ]
 
 
 def test_answer_formatter_prefers_matching_table_row_for_citation_span() -> None:

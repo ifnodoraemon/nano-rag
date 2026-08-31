@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from pathlib import Path
 from time import perf_counter
 from typing import TYPE_CHECKING
 
+from app.core.exceptions import ModelOutputError, RetrievalError
 from app.core.tracing import TraceSession
 from app.retrieval.context_builder import build_contexts
 from app.retrieval.filters import (
@@ -17,6 +19,7 @@ from app.retrieval.versioning import version_sort_key
 from app.schemas.chat import ChatRequest
 from app.schemas.chunk import Chunk
 from app.retrieval.hits import SearchHit
+from app.utils.json_utils import parse_json_object
 from pydantic import ValidationError
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
@@ -31,6 +34,12 @@ DEFAULT_DISCOVERY_TOP_K = 12
 DEFAULT_MAX_READ_DOCS = 4
 DEFAULT_MAX_READ_CHUNKS_PER_DOC = 24
 DEFAULT_MAX_CONTEXT_TEXT_CHARS = 6000
+# Topic/index pages consume ranking slots before the source-only filter, and
+# stale versions of the same source_key can crowd their latest version out of
+# a narrow top-K. Version selection therefore runs over an over-fetched
+# candidate set so "latest wins per source_key" holds globally, not just
+# within the first top-K hits.
+DISCOVERY_OVERFETCH_MULTIPLIER = 4
 
 READING_PLAN_SYSTEM_PROMPT = (
     "You are a RAG document reader planner. Given a question and a set of candidate "
@@ -45,16 +54,18 @@ READING_PLAN_SYSTEM_PROMPT = (
 class AgenticDiscovery:
     """Wiki-first retrieval for the agentic engine.
 
-    A deterministic, metadata-driven pipeline the user accepted the latency cost of:
+    A deterministic, metadata-driven pipeline:
 
       1. discovery  — BM25 over the document-level wiki manifest (first hop);
-      2. version    — deterministic per-``source_key`` latest-version selection;
+      2. version    — deterministic per-``source_key`` latest-version selection
+      over an over-fetched candidate set (global latest-wins, not top-K-local);
       3. read plan  — an LLM structured decision on which docs/sections to read;
       4. deep read  — read the chosen sections from the durable parsed artifacts.
 
     Discovery and version selection are deterministic (testable, reproducible).
-    Only the read plan is an LLM call, and it degrades to a bounded, trace-marked
-    "read all candidate docs" rather than silently rerouting to dense retrieval.
+    The read plan is a single LLM call with a strict JSON contract: gateway
+    failures and contract violations raise and fail the request visibly —
+    there is no degraded read-all path.
     """
 
     def __init__(
@@ -103,12 +114,13 @@ class AgenticDiscovery:
             )
             public_filters = sanitize_metadata_filters(filters)
 
-            discovered = self._discover(query, kb_id, filters)
+            discovered = await self._discover(query, kb_id, filters)
             candidates, version_filter = self._select_versions(discovered)
             plan = await self._plan_reads(query, candidates)
             contexts, read_doc_ids, read_chunk_ids = self._read_documents(plan, candidates)
 
             trace.record("query", query)
+            trace.record("original_query", payload.query)
             trace.record("kb_id", kb_id)
             trace.record("session_id", payload.session_id)
             trace.record("sample_id", payload.sample_id)
@@ -150,11 +162,18 @@ class AgenticDiscovery:
             self.trace_store.save_raw(final_trace)
             return contexts, final_trace
 
-    def _discover(
+    async def _discover(
         self, query: str, kb_id: str, filters: dict[str, object] | None
     ) -> list[SearchHit]:
-        hits = self.wiki_searcher.search(
-            query, top_k=self.discovery_top_k, kb_id=kb_id, metadata_filters=filters
+        fetch_k = self.discovery_top_k * DISCOVERY_OVERFETCH_MULTIPLIER
+        # BM25 scoring (and a possible incremental sync) is CPU-bound; keep it
+        # off the event loop so concurrent requests stay responsive.
+        hits = await asyncio.to_thread(
+            self.wiki_searcher.search,
+            query,
+            top_k=fetch_k,
+            kb_id=kb_id,
+            metadata_filters=filters,
         )
         # Only source pages map to a deep-readable parsed artifact; topic/index
         # pages are aggregates with no artifact of their own.
@@ -170,8 +189,9 @@ class AgenticDiscovery:
         """Deterministically keep the latest version per source_key.
 
         Ranking uses the shared ``version_sort_key`` (effective_date, then version
-        tuple, then discovery score) — the same rule the wiki version ledger and
-        the dense freshness ranker use. Never an LLM judgment.
+        tuple, then discovery score) — the same rule the wiki version ledger
+        uses. Never an LLM judgment. Runs over the whole over-fetched candidate
+        set, so a stale version ranking above its latest sibling cannot hide it.
         """
         grouped: dict[tuple[str, str], list[SearchHit]] = {}
         ungrouped: list[SearchHit] = []
@@ -214,10 +234,9 @@ class AgenticDiscovery:
                 }
             )
         # Order the surviving candidates by discovery score so the LLM sees the
-        # best evidence first and the degraded read-all reads the genuinely top
-        # docs. Stable: score ties keep BM25 discovery order.
+        # best evidence first. Stable: score ties keep BM25 discovery order.
         selected = sorted(selected, key=lambda hit: hit.score, reverse=True)
-        return selected, filter_report
+        return selected[: self.discovery_top_k], filter_report
 
     async def _plan_reads(
         self, query: str, candidates: list[SearchHit]
@@ -285,56 +304,49 @@ class AgenticDiscovery:
                 ),
             },
         ]
-        try:
+        with self.tracing_manager.span(
+            "agentic.reading_plan", {"agentic.query": query}
+        ):
             result = await self.generation_client.generate(messages, response_format=schema)
-        except Exception as exc:
-            logger.warning("agentic reading plan failed; degrading to bounded read-all: %s", exc)
-            return {
-                "degraded": "llm_unavailable",
-                "error": exc.__class__.__name__,
-                "selected_docs": [],
-            }
-        parsed = self._json_object(str(result.get("content") or ""))
-        plan = self._parse_plan(parsed, candidates)
-        if not plan["selected_docs"]:
-            # The LLM answered but nothing usable survived: unparseable JSON,
-            # a non-object payload, or every returned doc_id rejected as
-            # hallucinated. The downstream read-all must be just as visible in
-            # the trace as the exception path — a silent, unmarked fallback is
-            # what we are explicitly avoiding.
-            return {
-                "degraded": "empty_plan",
-                "raw_present": bool(parsed),
-                "selected_docs": [],
-            }
-        return plan
+        parsed = parse_json_object(str(result.get("content") or ""))
+        return self._parse_plan(parsed, candidates)
 
     def _parse_plan(
         self, parsed: dict[str, object], candidates: list[SearchHit]
     ) -> dict[str, object]:
         known = {hit.chunk.doc_id for hit in candidates}
         raw_docs = parsed.get("selected_docs")
+        if not isinstance(raw_docs, list):
+            raise ModelOutputError("reading_plan.selected_docs must be an array")
         entries: list[dict[str, object]] = []
-        if isinstance(raw_docs, list):
-            for raw in raw_docs:
-                if not isinstance(raw, dict):
-                    continue
-                doc_id = str(raw.get("doc_id") or "")
-                if doc_id not in known:
-                    continue
-                focus = raw.get("focus_sections")
-                focus_sections = [
-                    str(item).strip()
-                    for item in (focus if isinstance(focus, list) else [])
-                    if str(item).strip()
-                ]
-                entries.append(
-                    {
-                        "doc_id": doc_id,
-                        "focus_sections": focus_sections,
-                        "reason": str(raw.get("reason") or ""),
-                    }
+        for raw in raw_docs:
+            if not isinstance(raw, dict):
+                raise ModelOutputError(
+                    "reading_plan.selected_docs entries must be objects"
                 )
+            doc_id = str(raw.get("doc_id") or "")
+            if doc_id not in known:
+                raise ModelOutputError(
+                    f"reading_plan referenced unknown doc_id {doc_id!r}; "
+                    f"known candidates: {sorted(known)}"
+                )
+            focus = raw.get("focus_sections")
+            if not isinstance(focus, list):
+                raise ModelOutputError(
+                    "reading_plan.focus_sections must be an array"
+                )
+            focus_sections = [
+                str(item).strip()
+                for item in focus
+                if str(item).strip()
+            ]
+            entries.append(
+                {
+                    "doc_id": doc_id,
+                    "focus_sections": focus_sections,
+                    "reason": str(raw.get("reason") or ""),
+                }
+            )
         deduped: list[dict[str, object]] = []
         seen: set[str] = set()
         for entry in entries:
@@ -342,6 +354,8 @@ class AgenticDiscovery:
                 continue
             seen.add(entry["doc_id"])
             deduped.append(entry)
+        # An empty selection is a legitimate structured decision: none of the
+        # candidates plausibly contains the answer, so nothing is read.
         return {"selected_docs": deduped[: self.max_read_docs]}
 
     def _read_documents(
@@ -355,11 +369,6 @@ class AgenticDiscovery:
                     for item in (entry.get("focus_sections") or [])
                     if str(item).strip()
                 }
-        # Degraded read-all: the LLM was unavailable or returned nothing usable,
-        # so read the top candidate docs (bounded) instead of rerouting to dense.
-        if not focus_by_doc:
-            for hit in candidates[: self.max_read_docs]:
-                focus_by_doc.setdefault(hit.chunk.doc_id, set())
 
         metadata_by_doc = {
             hit.chunk.doc_id: dict(hit.chunk.metadata or {}) for hit in candidates
@@ -383,27 +392,27 @@ class AgenticDiscovery:
         self, doc_id: str, focus: set[str], metadata: dict[str, object]
     ) -> list[dict[str, object]]:
         artifact = self._load_artifact(doc_id)
-        if artifact is None:
-            logger.warning("agentic deep read: parsed artifact missing for %s", doc_id)
-            return []
         raw_chunks = artifact.get("chunks", [])
         selected = self._select_chunks(
-            raw_chunks if isinstance(raw_chunks, list) else [], focus
+            raw_chunks if isinstance(raw_chunks, list) else [], focus, doc_id
         )
         hits: list[SearchHit] = []
         for index, raw_chunk in enumerate(selected):
             try:
                 chunk = Chunk.model_validate(raw_chunk)
-            except (ValidationError, TypeError):
-                continue
+            except (ValidationError, TypeError) as exc:
+                raise RetrievalError(
+                    f"parsed artifact {doc_id}.json contains a malformed chunk "
+                    f"at index {index}: {exc}"
+                ) from exc
             hits.append(SearchHit(chunk=chunk, score=0.0))
         if not hits:
             return []
         # query=None is deliberate: the read plan already scoped these chunks
-        # to the question, so the dense path's query-term coverage promotion
-        # would only reorder (not add) sections we deliberately chose — and it
-        # would let low-relevance chunks with query-term overlap climb above
-        # the planned focus.
+        # to the question, so a query-term coverage promotion would only
+        # reorder (not add) sections we deliberately chose — and it would let
+        # low-relevance chunks with query-term overlap climb above the planned
+        # focus.
         base_contexts = build_contexts(
             hits,
             limit=len(hits),
@@ -438,49 +447,49 @@ class AgenticDiscovery:
         return merged
 
     def _select_chunks(
-        self, raw_chunks: list[object], focus: set[str]
+        self, raw_chunks: list[object], focus: set[str], doc_id: str
     ) -> list[object]:
         chunks = [chunk for chunk in raw_chunks if isinstance(chunk, dict)]
         if not focus:
             return chunks[: self.max_read_chunks_per_doc]
         matched: list[object] = []
+        matched_terms: set[str] = set()
         for chunk in chunks:
             metadata = chunk.get("metadata") or {}
             hierarchy = metadata.get("hierarchy_path") or []
             haystack = [str(item) for item in hierarchy] + [str(chunk.get("title") or "")]
-            if any(_section_matches(term, haystack) for term in focus):
-                matched.append(chunk)
-        # Lenient: never read nothing when the plan named sections that do not
-        # resolve (heading wording drift). Fall back to the whole document.
+            for term in focus:
+                if term in matched_terms:
+                    continue
+                if _section_matches(term, haystack):
+                    matched.append(chunk)
+                    matched_terms.add(term)
+                    break
         if not matched:
-            return chunks[: self.max_read_chunks_per_doc]
+            # No fallback to a whole-document read: the plan named sections
+            # that do not resolve, which is a contract violation between the
+            # planner LLM and the artifact's heading structure. Fail visibly.
+            raise ModelOutputError(
+                f"reading plan focus sections {sorted(focus)} do not match any "
+                f"section of document {doc_id}"
+            )
         return matched[: self.max_read_chunks_per_doc]
 
-    def _load_artifact(self, doc_id: str) -> dict[str, object] | None:
+    def _load_artifact(self, doc_id: str) -> dict[str, object]:
         path = self.parsed_dir / f"{doc_id}.json"
         try:
             payload = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as exc:
-            logger.warning("agentic deep read: cannot read %s: %s", path, exc)
-            return None
-        return payload if isinstance(payload, dict) else None
-
-    @staticmethod
-    def _json_object(content: str) -> dict[str, object]:
-        text = content.strip()
-        if text.startswith("```"):
-            text = text.strip("`")
-            if text.lower().startswith("json"):
-                text = text[4:].strip()
-        start = text.find("{")
-        end = text.rfind("}")
-        if start >= 0 and end >= start:
-            text = text[start : end + 1]
-        try:
-            loaded = json.loads(text)
-        except json.JSONDecodeError:
-            return {}
-        return loaded if isinstance(loaded, dict) else {}
+            raise RetrievalError(
+                f"parsed artifact for discovered document {doc_id} is missing "
+                f"or corrupt ({path}): {exc}"
+            ) from exc
+        if not isinstance(payload, dict):
+            raise RetrievalError(
+                f"parsed artifact for discovered document {doc_id} is not a "
+                f"JSON object ({path})"
+            )
+        return payload
 
 
 def _section_matches(focus_term: str, haystack: list[str]) -> bool:

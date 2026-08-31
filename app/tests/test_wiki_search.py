@@ -243,7 +243,13 @@ def test_wiki_searcher_reindexes_pages_written_by_another_process(tmp_path) -> N
     assert source_hits_after == set()
 
 
-def test_wiki_bootstrap_skips_malformed_artifacts(tmp_path) -> None:
+def test_wiki_bootstrap_fails_loud_on_malformed_artifacts(tmp_path) -> None:
+    # No silent skipping: corrupt parsed artifacts are a data-integrity
+    # failure and must raise at bootstrap instead of being quietly dropped.
+    import pytest
+
+    from app.core.exceptions import ParsingError
+
     parsed_dir = tmp_path / "parsed"
     parsed_dir.mkdir()
     (parsed_dir / "good.json").write_text(
@@ -261,8 +267,62 @@ def test_wiki_bootstrap_skips_malformed_artifacts(tmp_path) -> None:
 
     wiki_dir = tmp_path / "wiki"
     compiler = WikiCompiler(wiki_dir)
-    count = compiler.bootstrap_from_parsed_dir(parsed_dir)
+    with pytest.raises(ParsingError, match="corrupt parsed artifacts"):
+        compiler.bootstrap_from_parsed_dir(parsed_dir)
 
-    assert count == 1
-    assert (wiki_dir / "sources" / "doc-a.md").exists()
-    assert not list((wiki_dir / "sources").glob("broken*"))
+    # The failure was raised before any page was written.
+    assert not (wiki_dir / "sources" / "doc-a.md").exists()
+
+
+def test_wiki_searcher_per_kb_quota_raises(monkeypatch, tmp_path) -> None:
+    # A per-KB page ceiling must fail visibly instead of silently dropping
+    # pages from the index.
+    import pytest as _pytest
+
+    from app.core.exceptions import RetrievalError
+
+    monkeypatch.setenv("RAG_WIKI_MAX_PAGES_PER_KB", "2")
+    compiler = WikiCompiler(tmp_path / "wiki")
+    for doc_id in ("doc-a", "doc-b"):
+        compiler.upsert_document(_wiki_doc(doc_id, f"policy {doc_id}", "v1", None), [_wiki_chunk(doc_id)])
+
+    from app.wiki.search import WikiSearcher as _Searcher
+
+    searcher = _Searcher(tmp_path / "wiki")
+    assert searcher.stats()["source_pages"] == 2
+
+    compiler.upsert_document(_wiki_doc("doc-c", "policy c", "v1", None), [_wiki_chunk("doc-c")])
+    with _pytest.raises(RetrievalError, match="quota"):
+        searcher.search("policy", top_k=10, kb_id="default")
+
+
+def test_wiki_searcher_incremental_sync_avoids_full_reindex(monkeypatch, tmp_path) -> None:
+    # Only changed/new pages may be re-indexed on sync; unchanged pages must
+    # not be re-read (the old any-change-means-full-rebuild behavior caused a
+    # query-side re-index storm during ingest).
+    wiki_dir = tmp_path / "wiki"
+    compiler = WikiCompiler(wiki_dir)
+    compiler.upsert_document(_wiki_doc("doc-a", "policy a", "v1", None), [_wiki_chunk("doc-a")])
+    searcher = WikiSearcher(wiki_dir)
+    assert searcher.search("policy", top_k=10, kb_id="default")
+
+    calls: list[str] = []
+    original = searcher._index_page
+
+    def counting_index_page(path):
+        calls.append(path.name)
+        return original(path)
+
+    monkeypatch.setattr(searcher, "_index_page", counting_index_page)
+    # No changes on disk: sync must not re-index anything.
+    assert searcher.search("policy", top_k=10, kb_id="default")
+    assert calls == []
+
+    # One new page: exactly that page is indexed.
+    compiler.upsert_document(_wiki_doc("doc-b", "policy b", "v1", None), [_wiki_chunk("doc-b")])
+    hits = searcher.search("policy b", top_k=10, kb_id="default")
+    assert "doc-b" in {
+        hit.chunk.doc_id for hit in hits if hit.chunk.metadata.get("wiki_kind") == "source"
+    }
+    assert "doc-b.md" in calls
+    assert "doc-a.md" not in calls

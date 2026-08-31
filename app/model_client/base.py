@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
+from email.utils import parsedate_to_datetime
 import os
 import random
 from typing import TYPE_CHECKING, Any
@@ -12,6 +13,10 @@ from app.core.exceptions import ModelGatewayError
 
 if TYPE_CHECKING:
     from app.core.config import AppConfig
+
+# Upper bound for honoring a server-provided Retry-After header. A hostile or
+# misconfigured upstream must not be able to stall a request for minutes.
+RETRY_AFTER_CEILING_SECONDS = 30.0
 
 
 @dataclass(frozen=True)
@@ -73,10 +78,18 @@ class AsyncJsonProviderClient:
                 )
                 status_code = int(getattr(response, "status_code", 200))
                 if self._should_retry_status(status_code) and attempt < attempts:
-                    await asyncio.sleep(self._retry_sleep(attempt))
+                    await asyncio.sleep(
+                        self._retry_sleep(attempt, response=response)
+                    )
                     continue
                 response.raise_for_status()
-                return response.json()
+                try:
+                    return response.json()
+                except ValueError as exc:
+                    raise ModelGatewayError(
+                        f"{self.provider.capability} provider returned a non-JSON body "
+                        f"on {path} (status {status_code})."
+                    ) from exc
             except httpx.TimeoutException as exc:
                 last_error = exc
                 if attempt < attempts:
@@ -91,7 +104,9 @@ class AsyncJsonProviderClient:
                     self._should_retry_status(exc.response.status_code)
                     and attempt < attempts
                 ):
-                    await asyncio.sleep(self._retry_sleep(attempt))
+                    await asyncio.sleep(
+                        self._retry_sleep(attempt, response=exc.response)
+                    )
                     continue
                 detail = exc.response.text.strip()
                 raise ModelGatewayError(
@@ -120,7 +135,18 @@ class AsyncJsonProviderClient:
         except ValueError:
             return 3
 
-    def _retry_sleep(self, attempt: int) -> float:
+    def _retry_sleep(
+        self, attempt: int, response: httpx.Response | None = None
+    ) -> float:
+        """Backoff before the next attempt.
+
+        Honors the upstream ``Retry-After`` header (seconds or HTTP-date) when
+        present, bounded by RETRY_AFTER_CEILING_SECONDS; otherwise exponential
+        backoff with jitter.
+        """
+        retry_after = self._retry_after_seconds(response)
+        if retry_after is not None:
+            return min(retry_after, RETRY_AFTER_CEILING_SECONDS)
         base_raw = os.getenv("MODEL_PROVIDER_RETRY_BASE_SECONDS", "0.5")
         max_raw = os.getenv("MODEL_PROVIDER_RETRY_MAX_SECONDS", "8")
         try:
@@ -135,82 +161,33 @@ class AsyncJsonProviderClient:
         return delay + random.uniform(0, delay * 0.25 if delay else 0)
 
     @staticmethod
+    def _retry_after_seconds(response: httpx.Response | None) -> float | None:
+        if response is None:
+            return None
+        value = response.headers.get("Retry-After")
+        if not value:
+            return None
+        value = value.strip()
+        try:
+            return max(0.0, float(value))
+        except ValueError:
+            pass
+        try:
+            when = parsedate_to_datetime(value)
+        except (TypeError, ValueError):
+            return None
+        if when is None:
+            return None
+        from datetime import datetime, timezone
+
+        now = datetime.now(timezone.utc)
+        if when.tzinfo is None:
+            when = when.replace(tzinfo=timezone.utc)
+        return max(0.0, (when - now).total_seconds())
+
+    @staticmethod
     def _should_retry_status(status_code: int) -> bool:
         return status_code in {408, 409, 425, 429} or status_code >= 500
-
-    async def stream_chat_completions(
-        self, messages: list[dict[str, Any]], model_alias: str | None = None, **extra: Any
-    ):
-        payload = {
-            "model": model_alias or self.provider.model,
-            "messages": messages,
-            "stream": True,
-            **extra,
-        }
-        self.provider.require_ready(require_model=False)
-        client = self._get_client()
-        import json
-        import asyncio
-        from app.core.exceptions import ModelGatewayError
-        
-        attempts = self._max_attempts()
-        last_error: Exception | None = None
-        
-        for attempt in range(1, attempts + 1):
-            try:
-                async with client.stream(
-                    "POST",
-                    f"{self.provider.base_url}/chat/completions",
-                    headers=self.headers,
-                    json=payload,
-                ) as response:
-                    status_code = int(getattr(response, "status_code", 200))
-                    if self._should_retry_status(status_code) and attempt < attempts:
-                        await asyncio.sleep(self._retry_sleep(attempt))
-                        continue
-                    response.raise_for_status()
-                    
-                    async for line in response.aiter_lines():
-                        if line.startswith("data: "):
-                            data = line[6:]
-                            if data.strip() == "[DONE]":
-                                break
-                            try:
-                                yield json.loads(data)
-                            except json.JSONDecodeError:
-                                continue
-                return
-            except httpx.TimeoutException as exc:
-                last_error = exc
-                if attempt < attempts:
-                    await asyncio.sleep(self._retry_sleep(attempt))
-                    continue
-                raise ModelGatewayError(
-                    f"{self.provider.capability} provider timeout on stream. Check upstream provider settings."
-                ) from exc
-            except httpx.HTTPStatusError as exc:
-                last_error = exc
-                if (
-                    self._should_retry_status(exc.response.status_code)
-                    and attempt < attempts
-                ):
-                    await asyncio.sleep(self._retry_sleep(attempt))
-                    continue
-                detail = exc.response.text.strip()
-                raise ModelGatewayError(
-                    f"{self.provider.capability} provider request failed on stream: "
-                    f"{exc.response.status_code} {detail}"
-                ) from exc
-            except httpx.HTTPError as exc:
-                last_error = exc
-                if attempt < attempts:
-                    await asyncio.sleep(self._retry_sleep(attempt))
-                    continue
-                raise ModelGatewayError(
-                    f"{self.provider.capability} provider connection failed on stream: {exc}"
-                ) from exc
-        
-        raise ModelGatewayError(f"{self.provider.capability} provider stream failed: {last_error}")
 
     async def chat_completions(
         self, messages: list[dict[str, Any]], model_alias: str | None = None, **extra: Any

@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING
 import httpx
 from pypdf import PdfReader, PdfWriter
 
-from app.core.exceptions import ModelGatewayError, ParsingError
+from app.core.exceptions import ConfigurationError, ModelGatewayError, ParsingError
 from app.model_client.base import AsyncJsonProviderClient, ProviderConfig
 from app.utils.text import parse_bool_env
 
@@ -162,11 +162,15 @@ class DocumentParserClient:
             reader = PdfReader(str(path))
             page_count = len(reader.pages)
         except Exception:
+            # pypdf is only the local page-splitting helper here, not the
+            # configured parser; if it cannot split the file we parse the
+            # whole file with the model parser instead (same parser, same
+            # completeness guarantees — its empty-sentinel contract still
+            # fails unreadable documents loudly).
             return None
         if page_count <= batch_size:
             return None
         parts: list[str] = []
-        failures: list[str] = []
         with tempfile.TemporaryDirectory(prefix="nano-rag-pdf-") as tmp_dir:
             batches: list[tuple[int, int, Path]] = []
             for start in range(0, page_count, batch_size):
@@ -180,48 +184,46 @@ class DocumentParserClient:
                 batches.append((start + 1, end, batch_path))
             semaphore = asyncio.Semaphore(self._pdf_page_batch_concurrency())
 
-            async def parse_batch(batch: tuple[int, int, Path]) -> tuple[int, int, str | None, str | None]:
+            async def parse_batch(batch: tuple[int, int, Path]) -> tuple[int, int, str]:
                 start_page, end_page, batch_path = batch
                 async with semaphore:
+                    # No per-batch swallowing: a failed batch means pages are
+                    # missing from the parsed output, so keeping the surviving
+                    # batches with an in-band warning header is silent partial
+                    # data. Each call has already been retried by the base
+                    # client; a failure here is terminal for the document.
                     try:
                         text = await self._parse_file_gemini_once(batch_path)
-                        return start_page, end_page, text.strip(), None
                     except Exception as exc:
-                        return start_page, end_page, None, f"{exc.__class__.__name__}: {str(exc)[:300]}"
+                        raise ModelGatewayError(
+                            f"document parser batch pages {start_page}-{end_page} "
+                            f"failed for {path.name}: {exc}"
+                        ) from exc
+                    return start_page, end_page, text.strip()
 
-            for start_page, end_page, text, error in await asyncio.gather(
+            for start_page, end_page, text in await asyncio.gather(
                 *(parse_batch(batch) for batch in batches)
             ):
-                if text:
-                    parts.append(f"# Pages {start_page}-{end_page}\n\n{text}")
-                elif error:
-                    failures.append(f"- Pages {start_page}-{end_page}: {error}")
-        combined = "\n\n".join(parts).strip()
-        if not combined:
-            detail = "; ".join(failures[:3])
-            raise ModelGatewayError(
-                f"document parser failed for all page batches in {path.name}: {detail}"
-            )
-        if failures:
-            combined = (
-                f"{combined}\n\n# Parser warnings\n\n"
-                + "\n".join(failures)
-            )
-        return combined
+                parts.append(f"# Pages {start_page}-{end_page}\n\n{text}")
+        return "\n\n".join(parts).strip()
 
     def _pdf_page_batch_size(self) -> int:
         raw = os.getenv("DOCUMENT_PARSER_PDF_PAGE_BATCH_SIZE", "3")
         try:
             return max(1, int(raw))
-        except ValueError:
-            return 3
+        except ValueError as exc:
+            raise ConfigurationError(
+                f"DOCUMENT_PARSER_PDF_PAGE_BATCH_SIZE must be an integer, got {raw!r}"
+            ) from exc
 
     def _pdf_page_batch_concurrency(self) -> int:
         raw = os.getenv("DOCUMENT_PARSER_PDF_PAGE_BATCH_CONCURRENCY", "2")
         try:
             return max(1, int(raw))
-        except ValueError:
-            return 2
+        except ValueError as exc:
+            raise ConfigurationError(
+                f"DOCUMENT_PARSER_PDF_PAGE_BATCH_CONCURRENCY must be an integer, got {raw!r}"
+            ) from exc
 
     async def _parse_file_gemini_once(self, path: Path) -> str:
         mime_type = self._guess_content_type(path)

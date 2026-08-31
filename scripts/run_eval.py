@@ -36,13 +36,21 @@ def main() -> int:
         "--min-context-recall",
         type=float,
         default=None,
-        help="Fail with exit code 2 if aggregate reference_context_recall is below this value.",
+        help=(
+            "Fail with exit code 2 if the aggregate context recall is below "
+            "this value. Checks reference_context_recall (deterministic, "
+            "always computed) and falls back to the LLM context_recall."
+        ),
     )
     parser.add_argument(
         "--min-answer-relevancy",
         type=float,
         default=None,
-        help="Fail with exit code 2 if aggregate answer_relevancy is below this value.",
+        help=(
+            "Fail with exit code 2 if the aggregate answer_relevancy is below "
+            "this value. LLM-metric only: requires the ragas/deepeval mode "
+            "(do not combine with --no-ragas-lib)."
+        ),
     )
     parser.add_argument(
         "--max-conflicting-hit-rate",
@@ -51,6 +59,11 @@ def main() -> int:
         help="Fail with exit code 2 if aggregate conflicting_hit_rate is above this value.",
     )
     args = parser.parse_args()
+    if args.no_ragas_lib and args.min_answer_relevancy is not None:
+        parser.error(
+            "--min-answer-relevancy requires LLM metrics and cannot be combined "
+            "with --no-ragas-lib"
+        )
 
     dataset_path = resolve_project_path(args.dataset)
     if args.output:
@@ -86,7 +99,7 @@ def main() -> int:
 
 def _failed_thresholds(aggregate: dict, args: argparse.Namespace) -> list[str]:
     checks = [
-        ("context_recall", args.min_context_recall, "min"),
+        ("reference_context_recall", args.min_context_recall, "min"),
         ("answer_relevancy", args.min_answer_relevancy, "min"),
         ("conflicting_hit_rate", args.max_conflicting_hit_rate, "max"),
     ]
@@ -94,7 +107,18 @@ def _failed_thresholds(aggregate: dict, args: argparse.Namespace) -> list[str]:
     for metric, threshold, mode in checks:
         if threshold is None:
             continue
-        value = float(aggregate.get(metric, 0.0) or 0.0)
+        value = aggregate.get(metric)
+        if value is None and metric == "reference_context_recall":
+            # LLM-mode reports may carry the deepeval naming instead.
+            value = aggregate.get("context_recall")
+        if value is None:
+            # A gate on a metric the report does not contain must fail, not
+            # silently pass with a default 0.0.
+            failures.append(
+                f"{metric} is missing from the report; gate cannot be evaluated"
+            )
+            continue
+        value = float(value)
         if mode == "min" and value < threshold:
             failures.append(f"{metric}={value:.4f} is below threshold {threshold:.4f}")
         if mode == "max" and value > threshold:

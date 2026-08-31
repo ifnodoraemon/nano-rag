@@ -61,3 +61,4 @@ class ChatResponse(BaseModel):
     contexts: list[dict]
     supporting_claims: list[SupportingClaim] = []
     trace_id: str | None = None
+    usage: dict[str, object] | None = None

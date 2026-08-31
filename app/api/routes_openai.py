@@ -1,19 +1,17 @@
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
 import time
-from uuid import uuid4
 from typing import Any
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from app.api.auth import RequestContext, require_api_key
 from app.api.routes_business import _ensure_kb_access
-from app.schemas.chat import ChatRequest, ChatResponse
+from app.schemas.chat import ChatRequest
 
 router = APIRouter(tags=["openai"])
 logger = logging.getLogger(__name__)
@@ -30,7 +28,7 @@ class OpenAIChatRequest(BaseModel):
     stream: bool = False
     temperature: float | None = 0.0
     top_p: float | None = 1.0
-    
+
     # Extra parameters for RAG
     kb_id: str = "default"
     session_id: str | None = None
@@ -47,6 +45,10 @@ async def openai_chat_completions(
     """
     OpenAI 兼容接口。
     根据请求中的 `stream` 参数决定是返回 JSON (非流式) 还是 SSE (流式)。
+
+    Both modes run the identical structured pipeline (json_schema-enforced
+    synthesis with citations); the stream variant only changes the transport,
+    so there is no lower-quality streaming shortcut.
     """
     container = request.app.state.container
     _ensure_kb_access(container, payload.kb_id, context)
@@ -57,7 +59,10 @@ async def openai_chat_completions(
             query = msg.content
             break
     if not query and payload.messages:
-        query = payload.messages[-1].content
+        raise HTTPException(
+            status_code=422,
+            detail="messages must contain at least one user message",
+        )
 
     chat_req = ChatRequest(
         query=query,
@@ -66,6 +71,14 @@ async def openai_chat_completions(
         session_id=payload.session_id,
         metadata_filters=payload.metadata_filters,
     )
+
+    def _usage_of(response) -> dict[str, int]:
+        usage = response.usage or {}
+        return {
+            "prompt_tokens": int(usage.get("prompt_tokens", 0) or 0),
+            "completion_tokens": int(usage.get("completion_tokens", 0) or 0),
+            "total_tokens": int(usage.get("total_tokens", 0) or 0),
+        }
 
     if not payload.stream:
         response = await container.chat_pipeline.run(chat_req)
@@ -84,80 +97,64 @@ async def openai_chat_completions(
                     "finish_reason": "stop"
                 }
             ],
-            "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+            "usage": _usage_of(response),
         }
-    else:
-        async def event_generator():
-            from time import perf_counter
-            
-            queue = asyncio.Queue()
-            state_input = {"payload": chat_req, "started_at": perf_counter(), "stream_queue": queue}
-            
-            async def run_workflow():
-                try:
-                    state = await container.chat_pipeline.workflow.ainvoke(state_input)
-                    await queue.put(state["response"])
-                except Exception as e:
-                    logger.error(f"Stream error: {e}")
-                    await queue.put(e)
-                    
-            task = asyncio.create_task(run_workflow())
-            
-            chunk_id = f"chatcmpl-{uuid4().hex}"
-            created = int(time.time())
-            
-            def make_chunk(delta_content: str | None, finish_reason: str | None = None) -> str:
-                return "data: " + json.dumps({
-                    "id": chunk_id,
-                    "object": "chat.completion.chunk",
-                    "created": created,
-                    "model": payload.model,
-                    "choices": [
-                        {
-                            "index": 0,
-                            "delta": {"content": delta_content} if delta_content is not None else {},
-                            "finish_reason": finish_reason
-                        }
-                    ]
-                }) + "\n\n"
-            
-            try:
-                # First chunk with role
-                yield "data: " + json.dumps({
-                    "id": chunk_id,
-                    "object": "chat.completion.chunk",
-                    "created": created,
-                    "model": payload.model,
-                    "choices": [
-                        {
-                            "index": 0,
-                            "delta": {"role": "assistant"},
-                            "finish_reason": None
-                        }
-                    ]
-                }) + "\n\n"
 
-                while True:
-                    chunk = await queue.get()
-                    if isinstance(chunk, BaseException):
-                        # Full detail stays server-side (logged in run_workflow);
-                        # only a safe marker crosses the wire.
-                        yield make_chunk("\n[upstream generation error]", "error")
-                        break
-                    if isinstance(chunk, ChatResponse):
-                        yield make_chunk(None, "stop")
-                        break
-                    if isinstance(chunk, str):
-                        yield make_chunk(chunk, None)
-                    # Fail loud on unexpected queue payloads instead of
-                    # spinning the consumer loop forever.
-                    logger.error("unexpected stream queue payload: %r", type(chunk))
-                    yield make_chunk(None, "error")
-                    break
-            except asyncio.CancelledError:
-                task.cancel()
-                raise
-            finally:
-                yield "data: [DONE]\n\n"
+    async def event_generator():
+        response = None
+        try:
+            response = await container.chat_pipeline.run(chat_req)
+        except Exception:  # noqa: BLE001 - surfaced as a safe SSE error marker
+            logger.exception("openai-compatible stream pipeline failed")
 
-        return StreamingResponse(event_generator(), media_type="text/event-stream")
+        created = int(time.time())
+
+        def make_chunk(
+            chunk_id: str,
+            delta: dict[str, Any],
+            finish_reason: str | None = None,
+            usage: dict[str, int] | None = None,
+        ) -> str:
+            body: dict[str, Any] = {
+                "id": chunk_id,
+                "object": "chat.completion.chunk",
+                "created": created,
+                "model": payload.model,
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": delta,
+                        "finish_reason": finish_reason,
+                    }
+                ],
+            }
+            if usage is not None:
+                body["usage"] = usage
+            return "data: " + json.dumps(body, ensure_ascii=False) + "\n\n"
+
+        if response is None:
+            chunk_id = "chatcmpl-error"
+            yield make_chunk(chunk_id, {"role": "assistant"})
+            yield make_chunk(
+                chunk_id,
+                {"content": "\n[upstream generation error]"},
+                finish_reason="error",
+            )
+            yield "data: [DONE]\n\n"
+            return
+
+        chunk_id = f"chatcmpl-{response.trace_id}"
+        # First chunk with role
+        yield make_chunk(chunk_id, {"role": "assistant"})
+        # The complete structured answer, delivered in transport chunks.
+        answer = response.answer
+        step = 512
+        for start in range(0, len(answer), step):
+            yield make_chunk(chunk_id, {"content": answer[start : start + step]})
+        # Final chunk carries finish_reason and the real token usage.
+        yield make_chunk(
+            chunk_id, {}, finish_reason="stop", usage=_usage_of(response)
+        )
+        yield "data: [DONE]\n\n"
+
+    return StreamingResponse(event_generator(), media_type="text/event-stream")

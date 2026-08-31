@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import re
 from dataclasses import dataclass
@@ -48,16 +49,9 @@ class StructuredDocumentParser:
         kb_id: str,
         source_path: str,
     ) -> StructuredDocument:
-        try:
-            parsed = await parse_content(path, self.document_parser)
-        except ParsingError as exc:
-            if "configured document parser model" in str(exc):
-                raise ParsingError(
-                    f"{path.suffix or 'file'} parsing requires a configured multimodal document parser."
-                ) from exc
-            raise
+        parsed = await parse_content(path, self.document_parser)
         text = parsed.text
-        blocks = self._parse_markdown_blocks(text)
+        blocks = await asyncio.to_thread(self._parse_markdown_blocks, text)
         parser_name = parsed.parser_name
 
         if not blocks:
@@ -136,9 +130,11 @@ class StructuredDocumentParser:
             text=text,
             title=block.title,
             parent_id=parent.node_id,
+            # page_number stays None: the markdown-tree parser has no page
+            # information, and a fabricated "page 1" would be fake provenance
+            # surfaced downstream in citations.
             provenance=NodeProvenance(
                 source_document_id=doc_id,
-                page_number=1,
                 hierarchy_path=[item for item in hierarchy_path if item],
                 source_ref=source_ref,
             ),
@@ -146,7 +142,6 @@ class StructuredDocumentParser:
             metadata={
                 **(block.metadata or {}),
                 "content_hash": hashlib.sha256(text.encode("utf-8")).hexdigest(),
-                "parser_confidence": 1.0,
             },
         )
 

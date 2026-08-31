@@ -112,12 +112,14 @@ class AnswerFormatter:
                 f"{normalized_answer}\n\nNote: at least one cited source includes applicability conditions; avoid treating the conclusion as universal."
             ).strip()
         cited_labels = self._extract_cited_labels(normalized_answer)
-        cited_labels = self._filter_cited_labels(
-            normalized_answer,
-            cited_labels,
-            citations_by_label,
-            context_text_by_label,
-        )
+        # Structural validity only: a label is kept iff it maps to one of the
+        # contexts actually provided to the model. There is deliberately no
+        # numeric-support heuristic — it silently dropped correct citations
+        # whenever the answer's numbers were formatted differently from the
+        # evidence text (e.g. "50%" vs "50 percent").
+        cited_labels = [
+            label for label in cited_labels if label in citations_by_label
+        ]
         normalized_answer = self._rewrite_citation_markers(normalized_answer, cited_labels)
         cited_labels = self._extract_cited_labels(normalized_answer)
         ordered_citations = self._ordered_citations(
@@ -257,33 +259,6 @@ class AnswerFormatter:
                 seen.add(match)
         return ordered
 
-    def _filter_cited_labels(
-        self,
-        answer: str,
-        cited_labels: list[str],
-        citations_by_label: dict[str, Citation],
-        context_text_by_label: dict[str, str],
-    ) -> list[str]:
-        labels = [label for label in cited_labels if label in citations_by_label]
-        if len(labels) <= 1:
-            return labels
-
-        answer_numbers = {
-            self._normalize_number(number) for number in NUMBER_RE.findall(answer)
-        }
-        if not answer_numbers:
-            return labels
-
-        number_supported_labels = [
-            label
-            for label in labels
-            if any(
-                number in self._normalize_number_text(context_text_by_label.get(label, ""))
-                for number in answer_numbers
-            )
-        ]
-        return number_supported_labels or labels
-
     def _normalize_number(self, value: str) -> str:
         return value.replace(",", "")
 
@@ -327,8 +302,9 @@ class AnswerFormatter:
                 ordered.append(citation)
                 used_chunks.add(citation.chunk_id)
             return ordered
-        citations = list(citations_by_chunk.values())
-        return citations[:1]
+        # The model cited nothing: report exactly that instead of fabricating
+        # a single citation. The full context set remains in response.contexts.
+        return []
 
     def _extract_answer_plan(
         self,

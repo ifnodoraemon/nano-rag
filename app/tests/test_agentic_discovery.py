@@ -17,6 +17,7 @@ import pytest
 
 from app.agentic import AgenticReasoningService
 from app.agentic.discovery import AgenticDiscovery
+from app.core.exceptions import ModelOutputError, RetrievalError
 from app.core.tracing import TraceStore
 from app.generation.answer_formatter import AnswerFormatter
 from app.generation.prompt_builder import PromptBuilder
@@ -191,7 +192,17 @@ class ReadingPlanClient:
                 "content": '{"sufficient":true,"coverage_ratio":0.9,"missing_terms":[],"follow_up_queries":[],"reason":"closed"}'
             }
         return {
-            "content": "Final Answer:\nFile expense claims within 15 days. [C1]\n\nSupporting Claims:\n- [factual] The current travel policy sets a 15-day deadline. [C1]",
+            "content": json.dumps(
+                {
+                    "is_answerable": True,
+                    "missing_entities": [],
+                    "extracted_answer": "File expense claims within 15 days. [C1]",
+                    "supporting_claims": [
+                        "[factual] The current travel policy sets a 15-day deadline. [C1]"
+                    ],
+                },
+                ensure_ascii=False,
+            ),
             "finish_reason": "stop",
         }
 
@@ -205,8 +216,8 @@ class BrokenPlanClient:
 
 class HallucinatingPlanClient:
     """Answers the read plan, but every doc_id it returns is unknown to the
-    candidate set. The plan must be rejected wholesale and the resulting
-    read-all must still be trace-marked (degraded), not silent."""
+    candidate set. This is a contract violation: it must fail the request
+    visibly — there is no degraded read-all fallback."""
 
     alias = "hallucinating"
 
@@ -234,7 +245,44 @@ class HallucinatingPlanClient:
                 "content": '{"sufficient":true,"coverage_ratio":0.9,"missing_terms":[],"follow_up_queries":[],"reason":"closed"}'
             }
         return {
-            "content": "Final Answer:\nFile expense claims within 15 days. [C1]",
+            "content": json.dumps(
+                {
+                    "is_answerable": True,
+                    "missing_entities": [],
+                    "extracted_answer": "File expense claims within 15 days. [C1]",
+                    "supporting_claims": [],
+                },
+                ensure_ascii=False,
+            ),
+            "finish_reason": "stop",
+        }
+
+
+class EmptyPlanClient:
+    """Legitimately selects no documents: nothing is read, no fallback."""
+
+    alias = "empty-plan"
+
+    async def generate(self, messages, **kwargs):  # noqa: ANN001
+        rendered = json.dumps(messages, ensure_ascii=False)
+        if "Decide which candidate documents" in rendered:
+            return {"content": '{"selected_docs": []}', "finish_reason": "stop"}
+        if "Break the user question" in rendered:
+            return {"content": '{"subqueries":["travel reimbursement"]}', "finish_reason": "stop"}
+        if "evidence auditor" in rendered:
+            return {
+                "content": '{"sufficient":false,"coverage_ratio":0.0,"missing_terms":["deadline"],"follow_up_queries":[],"reason":"no_docs_read"}'
+            }
+        return {
+            "content": json.dumps(
+                {
+                    "is_answerable": False,
+                    "missing_entities": ["travel reimbursement"],
+                    "extracted_answer": "",
+                    "supporting_claims": [],
+                },
+                ensure_ascii=False,
+            ),
             "finish_reason": "stop",
         }
 
@@ -319,7 +367,9 @@ async def test_discovery_focus_sections_narrow_the_read(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_discovery_degrades_to_bounded_read_all(tmp_path: Path) -> None:
+async def test_discovery_fails_loud_when_plan_llm_unavailable(tmp_path: Path) -> None:
+    # No degraded read-all: a gateway failure during the reading plan raises
+    # and fails the request visibly.
     searcher, parsed_dir = _build_corpus(tmp_path)
     config = _config(tmp_path)
     config.parsed_dir = parsed_dir
@@ -331,16 +381,34 @@ async def test_discovery_degrades_to_bounded_read_all(tmp_path: Path) -> None:
         tracing_manager=FakeTracingManager(),
     )
 
+    with pytest.raises(RuntimeError, match="generation unavailable"):
+        await discovery.retrieve(ChatRequest(query="travel reimbursement"), "travel reimbursement")
+
+
+@pytest.mark.asyncio
+async def test_discovery_empty_plan_reads_nothing(tmp_path: Path) -> None:
+    # An empty selection is a legitimate structured decision — no docs are
+    # read and there is no fallback to reading the top candidates.
+    searcher, parsed_dir = _build_corpus(tmp_path)
+    config = _config(tmp_path)
+    config.parsed_dir = parsed_dir
+    discovery = AgenticDiscovery(
+        config=config,
+        wiki_searcher=searcher,
+        generation_client=EmptyPlanClient(),
+        trace_store=TraceStore(),
+        tracing_manager=FakeTracingManager(),
+    )
+
     contexts, trace = await discovery.retrieve(ChatRequest(query="travel reimbursement"), "travel reimbursement")
 
-    plan = trace["retrieval_params"]["reading_plan"]
-    assert plan.get("degraded") == "llm_unavailable"
-    # Degraded path still reads the latest version's artifact (bounded), not dense.
-    assert trace["retrieval_params"]["read_doc_ids"] == ["travel-v2"]
-    assert contexts
+    assert contexts == []
+    assert trace["retrieval_params"]["read_doc_ids"] == []
+    assert trace["retrieval_params"]["reading_plan"] == {"selected_docs": []}
 
 
-def test_discovery_select_versions_is_deterministic(tmp_path: Path) -> None:
+@pytest.mark.asyncio
+async def test_discovery_select_versions_is_deterministic(tmp_path: Path) -> None:
     searcher, parsed_dir = _build_corpus(tmp_path)
     config = _config(tmp_path)
     config.parsed_dir = parsed_dir
@@ -351,7 +419,7 @@ def test_discovery_select_versions_is_deterministic(tmp_path: Path) -> None:
         trace_store=TraceStore(),
         tracing_manager=FakeTracingManager(),
     )
-    discovered = discovery._discover("travel reimbursement", "default", None)
+    discovered = await discovery._discover("travel reimbursement", "default", None)
     candidates, report = discovery._select_versions(discovered)
     # Both versions are discovered by BM25; the deterministic filter keeps v2.
     assert {hit.chunk.doc_id for hit in discovered} == {"travel-v1", "travel-v2"}
@@ -386,30 +454,24 @@ def test_select_versions_orders_candidates_by_discovery_score() -> None:
 
 
 @pytest.mark.asyncio
-async def test_hallucinated_plan_is_trace_marked_not_silent(tmp_path: Path) -> None:
-    """M-2: an LLM plan whose doc_ids are all unknown still reads (bounded
-    read-all) but MUST carry a degraded marker — a silent, unmarked fallback
-    is exactly what the project forbids."""
+async def test_hallucinated_plan_fails_loud(tmp_path: Path) -> None:
+    """A plan whose doc_ids are unknown to the candidate set is a contract
+    violation: it must raise, not silently fall back to a bounded read-all."""
     searcher, parsed_dir = _build_corpus(tmp_path)
     config = _config(tmp_path)
     config.parsed_dir = parsed_dir
     discovery = _discovery(config, searcher, HallucinatingPlanClient())
 
-    contexts, trace = await discovery.retrieve(
-        ChatRequest(query="travel reimbursement"), "travel reimbursement"
-    )
-
-    plan = trace["retrieval_params"]["reading_plan"]
-    assert plan.get("degraded") == "empty_plan"
-    # The read-all still read the latest version's artifact (bounded, not dense).
-    assert trace["retrieval_params"]["read_doc_ids"] == ["travel-v2"]
-    assert contexts
+    with pytest.raises(ModelOutputError, match="unknown doc_id"):
+        await discovery.retrieve(
+            ChatRequest(query="travel reimbursement"), "travel reimbursement"
+        )
 
 
-def test_parse_plan_rejects_hallucinations_dedupes_and_caps(tmp_path: Path) -> None:
-    """M-4: pin the _parse_plan invariants — unknown doc_ids rejected,
-    duplicate doc_ids deduped, and the result capped at max_read_docs. The
-    cap is set to 2 so it actually truncates the three valid docs."""
+def test_parse_plan_caps_at_max_read_docs(tmp_path: Path) -> None:
+    """Pin the _parse_plan invariants — duplicate doc_ids deduped and the
+    result capped at max_read_docs. The cap is set to 2 so it actually
+    truncates the three valid docs."""
     discovery = _discovery(_config(tmp_path, max_read_docs=2), None, None)
     candidates = [
         _hit(f"doc-{i}", float(1 - i * 0.05)) for i in range(6)
@@ -420,15 +482,58 @@ def test_parse_plan_rejects_hallucinations_dedupes_and_caps(tmp_path: Path) -> N
             {"doc_id": "doc-1", "focus_sections": [], "reason": "r"},
             {"doc_id": "doc-1", "focus_sections": [], "reason": "dup"},  # duplicate
             {"doc_id": "doc-2", "focus_sections": [], "reason": "r"},
-            {"doc_id": "doc-99", "focus_sections": [], "reason": "hallucination"},
         ]
     }
     plan = discovery._parse_plan(parsed, candidates)
     doc_ids = [entry["doc_id"] for entry in plan["selected_docs"]]
-    assert "doc-99" not in doc_ids  # hallucinated id rejected
     assert doc_ids.count("doc-1") == 1  # deduped
     assert len(doc_ids) == discovery.max_read_docs  # capped at 2
     assert doc_ids == ["doc-0", "doc-1"]  # doc-2 dropped by the cap
+
+
+def test_parse_plan_rejects_hallucinated_doc_id(tmp_path: Path) -> None:
+    discovery = _discovery(_config(tmp_path), None, None)
+    candidates = [_hit(f"doc-{i}", 1.0) for i in range(3)]
+    parsed = {
+        "selected_docs": [
+            {"doc_id": "doc-99", "focus_sections": [], "reason": "hallucination"},
+        ]
+    }
+    with pytest.raises(ModelOutputError, match="unknown doc_id"):
+        discovery._parse_plan(parsed, candidates)
+
+
+@pytest.mark.asyncio
+async def test_unresolvable_focus_sections_fail_loud(tmp_path: Path) -> None:
+    """Focus sections that match no heading must raise instead of silently
+    reading the whole document."""
+    searcher, parsed_dir = _build_corpus(tmp_path)
+    config = _config(tmp_path)
+    config.parsed_dir = parsed_dir
+    discovery = _discovery(
+        config, searcher, ReadingPlanClient(focus_sections=["No Such Section"])
+    )
+
+    with pytest.raises(ModelOutputError, match="do not match any section"):
+        await discovery.retrieve(
+            ChatRequest(query="travel reimbursement"), "travel reimbursement"
+        )
+
+
+@pytest.mark.asyncio
+async def test_missing_parsed_artifact_fails_loud(tmp_path: Path) -> None:
+    """A discovery page whose parsed artifact is gone is a data-integrity
+    failure: raise instead of silently skipping the document."""
+    searcher, parsed_dir = _build_corpus(tmp_path)
+    (parsed_dir / "travel-v2.json").unlink()
+    config = _config(tmp_path)
+    config.parsed_dir = parsed_dir
+    discovery = _discovery(config, searcher, ReadingPlanClient())
+
+    with pytest.raises(RetrievalError, match="missing"):
+        await discovery.retrieve(
+            ChatRequest(query="travel reimbursement"), "travel reimbursement"
+        )
 
 
 @pytest.mark.asyncio

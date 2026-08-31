@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import fcntl
 import json
+import logging
 import os
 from enum import Enum
 from contextlib import contextmanager
@@ -12,6 +13,12 @@ from collections.abc import Generator
 from uuid import uuid4
 
 from pydantic import BaseModel, Field
+
+from app.core.exceptions import StoreError
+
+logger = logging.getLogger(__name__)
+
+_DEFAULT_JOB_TTL_DAYS = 7
 
 
 class IngestJobStatus(str, Enum):
@@ -62,6 +69,7 @@ class IngestJobStore:
         path: str,
         uploaded_files: list[str] | None = None,
     ) -> IngestJobRecord:
+        self._purge_expired_jobs()
         record = IngestJobRecord(
             job_id=f"job-{uuid4().hex[:16]}",
             kb_id=kb_id,
@@ -76,13 +84,17 @@ class IngestJobStore:
         path = self._path(job_id)
         if not path.exists():
             return None
-        try:
-            with self._file_lock():
-                return IngestJobRecord.model_validate(
-                    json.loads(path.read_text(encoding="utf-8"))
-                )
-        except (OSError, json.JSONDecodeError, ValueError):
-            return None
+        with self._file_lock():
+            try:
+                raw = json.loads(path.read_text(encoding="utf-8"))
+                return IngestJobRecord.model_validate(raw)
+            except (OSError, json.JSONDecodeError, ValueError) as exc:
+                # A corrupt job record is a store-integrity failure, not
+                # "job not found": returning None here would tell the API the
+                # job never existed and hide the corruption.
+                raise StoreError(
+                    f"ingest job record {job_id} is corrupt: {exc}"
+                ) from exc
 
     def mark_running(self, job_id: str, stage: str = "running") -> IngestJobRecord:
         record = self._require(job_id)
@@ -134,3 +146,31 @@ class IngestJobStore:
 
     def _path(self, job_id: str) -> Path:
         return self.root_dir / f"{job_id}.json"
+
+    def _purge_expired_jobs(self) -> None:
+        """Once per submit: drop finished job records past the TTL so the
+        store does not grow unbounded (0 = keep forever)."""
+        ttl_days = _job_ttl_days()
+        if ttl_days <= 0:
+            return
+        cutoff = time() - ttl_days * 86400
+        try:
+            entries = list(self.root_dir.glob("job-*.json"))
+        except OSError:
+            return
+        for record_path in entries:
+            try:
+                if record_path.stat().st_mtime < cutoff:
+                    record_path.unlink(missing_ok=True)
+            except OSError:
+                continue
+
+
+def _job_ttl_days() -> int:
+    raw = os.getenv("RAG_INGEST_JOB_TTL_DAYS", str(_DEFAULT_JOB_TTL_DAYS))
+    try:
+        return max(0, int(raw))
+    except ValueError as exc:
+        raise StoreError(
+            f"RAG_INGEST_JOB_TTL_DAYS must be an integer, got {raw!r}"
+        ) from exc

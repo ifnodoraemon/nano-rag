@@ -113,3 +113,58 @@ def test_graph_expander_prefers_configured_graph_store(tmp_path) -> None:
 
     assert expanded[0]["node_id"] == "doc-b:node:1"
     assert expanded[0]["graph_relation"] == "STORE_EDGE"
+
+
+def test_graph_index_load_is_cached_and_reuses_unchanged_documents(tmp_path) -> None:
+    """The graph view must be served from cache when artifacts are unchanged:
+    the previous implementation re-read and re-validated the whole corpus on
+    every load() call — once per query in the expansion path."""
+    import json as _json
+
+    from app.tests.test_graph_index import _document
+
+    parsed_dir = tmp_path / "parsed"
+    parsed_dir.mkdir()
+    doc = _document("doc-a", "a.md", "Evidence from A.")
+    artifact = {
+        "document": {"doc_id": "doc-a"},
+        "chunks": [],
+        "structured_document": doc.model_dump(),
+    }
+    (parsed_dir / "doc-a.json").write_text(
+        _json.dumps(artifact, ensure_ascii=False), encoding="utf-8"
+    )
+
+    index = GraphIndex(parsed_dir)
+    view1 = index.load("default")
+    assert "doc-a:node:1" in view1.nodes
+
+    load_calls: list[object] = []
+    original = index._load_document
+
+    def counting_load(path):
+        load_calls.append(path.name)
+        return original(path)
+
+    index._load_document = counting_load  # type: ignore[method-assign]
+    view2 = index.load("default")
+    assert view2 is view1
+    assert load_calls == []  # nothing re-read from disk
+
+    # A new artifact invalidates the view; unchanged artifacts are not re-parsed.
+    doc_b = _document("doc-b", "b.md", "Evidence from B.")
+    (parsed_dir / "doc-b.json").write_text(
+        _json.dumps(
+            {
+                "document": {"doc_id": "doc-b"},
+                "chunks": [],
+                "structured_document": doc_b.model_dump(),
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    view3 = index.load("default")
+    assert "doc-b:node:1" in view3.nodes
+    # Only doc-b was parsed from disk; doc-a was served from the document cache.
+    assert load_calls == ["doc-b.json"]

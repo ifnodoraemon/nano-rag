@@ -2,11 +2,19 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from app.retrieval.graph_index import GraphIndex
+from app.retrieval.graph_index import GraphIndex, GraphView
 from app.retrieval.graph_store import GraphStore
 
 
 class GraphExpander:
+    """Expands retrieved contexts along the document graph.
+
+    The artifact view is loaded once per expand() call (served from the
+    GraphIndex mtime cache after the first load) and reused for both neighbor
+    lookup and context rendering — the previous implementation loaded it
+    twice in artifact mode, each load re-reading the whole parsed corpus.
+    """
+
     def __init__(self, parsed_dir: Path, graph_store: GraphStore | None = None) -> None:
         self.index = GraphIndex(parsed_dir)
         self.graph_store = graph_store
@@ -29,6 +37,7 @@ class GraphExpander:
         expanded: list[dict[str, object]] = []
         seen = set(seed_node_ids)
         for neighbor_id, relation in self._neighbor_node_ids(
+            view,
             seed_node_ids,
             kb_id=kb_id,
             max_neighbors=max_neighbors,
@@ -46,6 +55,7 @@ class GraphExpander:
 
     def _neighbor_node_ids(
         self,
+        view: GraphView,
         seed_node_ids: set[str],
         *,
         kb_id: str,
@@ -57,8 +67,8 @@ class GraphExpander:
                 kb_id=kb_id,
                 max_neighbors=max_neighbors,
             )
-        return self.index.expand_node_ids(
+        return self.index.expand_node_ids_in_view(
+            view,
             seed_node_ids,
-            kb_id=kb_id,
             max_neighbors=max_neighbors,
         )

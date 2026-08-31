@@ -9,12 +9,13 @@ from time import perf_counter
 from typing import TYPE_CHECKING, TypedDict
 
 from app.agentic.discovery import AgenticDiscovery
-from app.core.exceptions import ConfigurationError
+from app.core.exceptions import ConfigurationError, ModelOutputError
 from app.generation.answer_formatter import AnswerFormatter
 from app.generation.prompt_builder import PromptBuilder
 from app.model_client.generation import GenerationClient
 from app.retrieval.graph_expander import GraphExpander
 from app.schemas.chat import ChatRequest, ChatResponse
+from app.utils.json_utils import parse_json_object
 from langgraph.graph import END, StateGraph
 
 logger = logging.getLogger(__name__)
@@ -24,6 +25,81 @@ if TYPE_CHECKING:
     from app.core.tracing import TraceStore, TracingManager
     from app.retrieval.graph_store import GraphStore
     from app.wiki.search import WikiSearcher
+
+
+ANSWER_SCHEMA = {
+    "type": "json_schema",
+    "json_schema": {
+        "name": "answer_structure",
+        "schema": {
+            "type": "object",
+            "properties": {
+                "is_answerable": {
+                    "type": "boolean",
+                    "description": "如果上下文中完全找不到问题核心实体，请设为 false",
+                },
+                "missing_entities": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "列出找不到的具体专有名词，如果找到了则为空数组",
+                },
+                "extracted_answer": {
+                    "type": "string",
+                    "description": "带引用的极简答案，例如：xxx为xxx [C1]。",
+                },
+                "supporting_claims": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "如: - [factual] <证据支撑点 1> [C#]",
+                },
+            },
+            "required": [
+                "is_answerable",
+                "missing_entities",
+                "extracted_answer",
+                "supporting_claims",
+            ],
+            "additionalProperties": False,
+        },
+        "strict": True,
+    },
+}
+
+VERIFY_SCHEMA = {
+    "type": "json_schema",
+    "json_schema": {
+        "name": "evidence_verification",
+        "schema": {
+            "type": "object",
+            "properties": {
+                "sufficient": {"type": "boolean"},
+                "coverage_ratio": {
+                    "type": "number",
+                    "minimum": 0,
+                    "maximum": 1,
+                },
+                "missing_terms": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                },
+                "follow_up_queries": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                },
+                "reason": {"type": "string"},
+            },
+            "required": [
+                "sufficient",
+                "coverage_ratio",
+                "missing_terms",
+                "follow_up_queries",
+                "reason",
+            ],
+            "additionalProperties": False,
+        },
+        "strict": True,
+    },
+}
 
 
 @dataclass(frozen=True)
@@ -51,13 +127,13 @@ class EvidenceCheck:
 class AgentState(TypedDict, total=False):
     payload: ChatRequest
     started_at: float
-    stream_queue: __import__('asyncio').Queue | None
+    resolved_query: str
     subqueries: list[str]
     contexts: list[dict[str, object]]
     trace_id: str
     retrieval_queries: list[str]
     graph_expanded_node_ids: list[str]
-    evidence_plans: list[dict[str, object]]
+    reading_plans: list[dict[str, object]]
     check: EvidenceCheck
     messages: list[dict[str, object]]
     response: ChatResponse
@@ -135,155 +211,111 @@ class AgenticReasoningService:
         workflow.add_edge("answer_synthesis", END)
         return workflow.compile()
 
+    def _query_of(self, state: AgentState) -> str:
+        """The query actually used for retrieval/synthesis.
+
+        This is the contextualized (self-contained) rewrite when chat history
+        exists, otherwise the user's original wording. The original query is
+        never mutated: it stays in ``payload.query`` so traces keep the exact
+        user input.
+        """
+        resolved = state.get("resolved_query")
+        if isinstance(resolved, str) and resolved.strip():
+            return resolved
+        return state["payload"].query
+
     async def _intent_decomposition_node(self, state: AgentState) -> AgentState:
         payload = state["payload"]
         query = payload.query
         history = self.trace_store.get_history(payload.session_id) if payload.session_id else []
+        resolved = query
         if history:
-            query = await self._contextualize(query, history)
-            payload.query = query
-        return {"subqueries": await self._decompose(query), "payload": payload}
+            with self.tracing_manager.span("agent.contextualize", {"agent.query": query}):
+                resolved = await self._contextualize(query, history)
+        with self.tracing_manager.span("agent.decompose", {"agent.query": resolved}):
+            subqueries = await self._decompose(resolved)
+        return {"resolved_query": resolved, "subqueries": subqueries}
 
     async def _initial_recall_node(self, state: AgentState) -> AgentState:
         payload = state["payload"]
-        contexts, trace = await self._retrieve(payload, payload.query)
+        query = self._query_of(state)
+        contexts, trace = await self._retrieve(payload, query)
         graph_contexts = await self._expand_graph_contexts(payload, contexts, trace)
         return {
             "trace_id": str(trace["trace_id"]),
-            "retrieval_queries": [payload.query],
+            "retrieval_queries": [query],
             "graph_expanded_node_ids": self._node_ids(graph_contexts),
-            "evidence_plans": self._evidence_plans_from_trace(trace),
+            "reading_plans": self._reading_plans_from_trace(trace),
             "contexts": self._merge_contexts(contexts, graph_contexts),
         }
 
     async def _verification_node(self, state: AgentState) -> AgentState:
         payload = state["payload"]
-        return {
-            "check": await self._verify(
-                payload.query,
-                state.get("subqueries", [payload.query]),
+        query = self._query_of(state)
+        with self.tracing_manager.span("agent.verification", {"agent.query": query}):
+            check = await self._verify(
+                query,
+                state.get("subqueries", [query]),
                 state.get("contexts", []),
             )
-        }
+        return {"check": check}
 
     async def _corrective_recall_node(self, state: AgentState) -> AgentState:
         payload = state["payload"]
         query = self._next_query(state)
         if query is None:
             return {}
-        more_contexts, trace = await self._retrieve(payload, query)
-        graph_contexts = self._expand_graph_contexts(payload, more_contexts, trace)
-        return {
-            "retrieval_queries": [*state.get("retrieval_queries", []), query],
-            "evidence_plans": [
-                *state.get("evidence_plans", []),
-                *self._evidence_plans_from_trace(trace),
-            ],
-            "graph_expanded_node_ids": self._dedupe(
-                [
-                    *state.get("graph_expanded_node_ids", []),
-                    *self._node_ids(graph_contexts),
-                ]
-            ),
-            "contexts": self._merge_contexts(
-                state.get("contexts", []),
-                more_contexts,
-                graph_contexts,
-            ),
-        }
+        with self.tracing_manager.span(
+            "agent.corrective_recall", {"agent.query": query}
+        ):
+            more_contexts, trace = await self._retrieve(payload, query)
+            graph_contexts = await self._expand_graph_contexts(
+                payload, more_contexts, trace
+            )
+            return {
+                "retrieval_queries": [*state.get("retrieval_queries", []), query],
+                "reading_plans": [
+                    *state.get("reading_plans", []),
+                    *self._reading_plans_from_trace(trace),
+                ],
+                "graph_expanded_node_ids": self._dedupe(
+                    [
+                        *state.get("graph_expanded_node_ids", []),
+                        *self._node_ids(graph_contexts),
+                    ]
+                ),
+                "contexts": self._merge_contexts(
+                    state.get("contexts", []),
+                    more_contexts,
+                    graph_contexts,
+                ),
+            }
 
     async def _answer_synthesis_node(self, state: AgentState) -> AgentState:
         payload = state["payload"]
+        query = self._query_of(state)
         check = state["check"]
         contexts = state.get("contexts", [])
         agent_state = self._public_agent_state(state, check)
         messages = self.prompt_builder.build_messages(
-            payload.query,
+            query,
             contexts,
             agent_state=agent_state,
         )
         generation_started = perf_counter()
-        stream_queue = state.get("stream_queue")
-        
-        if stream_queue is not None:
-            full_content = ""
-            async for chunk in self.generation_client.stream_generate(messages):
-                text_chunk = chunk.get("content", "")
-                if text_chunk:
-                    full_content += text_chunk
-                    await stream_queue.put(text_chunk)
-            
-            result = {"content": full_content, "finish_reason": "stop", "usage": {}}
-            generation_seconds = round(perf_counter() - generation_started, 4)
-            fake_answer = full_content
-        else:
-            schema = {
-                "type": "json_schema",
-                "json_schema": {
-                    "name": "answer_structure",
-                    "schema": {
-                        "type": "object",
-                        "properties": {
-                            "is_answerable": {
-                                "type": "boolean",
-                                "description": "如果上下文中完全找不到问题核心实体，请设为 false"
-                            },
-                            "missing_entities": {
-                                "type": "array",
-                                "items": {"type": "string"},
-                                "description": "列出找不到的具体专有名词，如果找到了则为空数组"
-                            },
-                            "extracted_answer": {
-                                "type": "string",
-                                "description": "带引用的极简答案，例如：xxx为xxx [C1]。"
-                            },
-                            "supporting_claims": {
-                                "type": "array",
-                                "items": {"type": "string"},
-                                "description": "如: - [factual] <证据支撑点 1> [C#]"
-                            }
-                        },
-                        "required": ["is_answerable", "missing_entities", "extracted_answer", "supporting_claims"],
-                        "additionalProperties": False
-                    },
-                    "strict": True
-                }
-            }
-            
-            result = await self.generation_client.generate(messages, response_format=schema)
-            generation_seconds = round(perf_counter() - generation_started, 4)
-            
-            raw_content = str(result["content"]).strip()
-            if raw_content.startswith("```json"):
-                raw_content = raw_content[7:]
-                if raw_content.endswith("```"):
-                    raw_content = raw_content[:-3]
-                raw_content = raw_content.strip()
-                
-            try:
-                parsed = json.loads(raw_content)
-                is_answerable = parsed.get("is_answerable", True)
-                if not is_answerable:
-                    missing = parsed.get("missing_entities", [])
-                    if missing:
-                        ans = f"文档中未包含关于“{'、'.join(missing)}”的相关信息。"
-                    else:
-                        ans = "文档中未包含相关信息。"
-                    fake_answer = f"Final Answer:\n{ans}\n\nSupporting Claims:\n- None"
-                else:
-                    ans = parsed.get("extracted_answer", "")
-                    claims_list = parsed.get("supporting_claims", [])
-                    claims = "\n".join(claims_list) if claims_list else "- None"
-                    fake_answer = f"Final Answer:\n{ans}\n\nSupporting Claims:\n{claims}"
-            except Exception as e:
-                logger.warning(f"Failed to parse structured JSON: {e}, falling back to raw")
-                fake_answer = f"Final Answer:\n{raw_content}\n\nSupporting Claims:\n- None"
+        with self.tracing_manager.span("agent.answer_synthesis", {"agent.query": query}):
+            result = await self.generation_client.generate(
+                messages, response_format=ANSWER_SCHEMA
+            )
+        generation_seconds = round(perf_counter() - generation_started, 4)
+        answer = self._render_structured_answer(str(result.get("content") or ""))
 
         response = self.answer_formatter.format(
-            answer=fake_answer,
+            answer=answer,
             contexts=contexts,
             trace_id=state.get("trace_id"),
         )
+        response = response.model_copy(update={"usage": result.get("usage") or {}})
         self._update_trace(
             trace_id=state["trace_id"],
             payload=payload,
@@ -302,6 +334,51 @@ class AgenticReasoningService:
             "response": response,
         }
 
+    def _render_structured_answer(self, content: str) -> str:
+        """Convert the structured synthesis JSON into the formatter's text plan.
+
+        No fallback: an unparseable or contract-violating payload raises
+        ModelOutputError and fails the request visibly.
+        """
+        parsed = parse_json_object(content)
+        is_answerable = parsed.get("is_answerable")
+        if not isinstance(is_answerable, bool):
+            raise ModelOutputError(
+                "answer_structure.is_answerable must be a boolean"
+            )
+        if not is_answerable:
+            raw_missing = parsed.get("missing_entities", [])
+            if not isinstance(raw_missing, list):
+                raise ModelOutputError(
+                    "answer_structure.missing_entities must be an array"
+                )
+            missing = [str(item).strip() for item in raw_missing if str(item).strip()]
+            if missing:
+                ans = f"文档中未包含关于“{'、'.join(missing)}”的相关信息。"
+            else:
+                ans = "文档中未包含相关信息。"
+            return (
+                f"Final Answer:\n{ans}\n\n"
+                "Supporting Claims:\n- [insufficiency] 上下文未覆盖问题核心实体。"
+            )
+        extracted = parsed.get("extracted_answer")
+        if not isinstance(extracted, str) or not extracted.strip():
+            raise ModelOutputError(
+                "answer_structure.extracted_answer must be a non-empty string"
+            )
+        claims_raw = parsed.get("supporting_claims")
+        if not isinstance(claims_raw, list):
+            raise ModelOutputError(
+                "answer_structure.supporting_claims must be an array"
+            )
+        claims = "\n".join(
+            str(item) for item in claims_raw if str(item).strip()
+        )
+        return (
+            f"Final Answer:\n{extracted}\n\n"
+            f"Supporting Claims:\n{claims if claims else '- None'}"
+        )
+
     def _route_after_verification(self, state: AgentState) -> str:
         check = state["check"]
         if check.sufficient:
@@ -313,16 +390,16 @@ class AgenticReasoningService:
         return "corrective_recall"
 
     def _next_query(self, state: AgentState) -> str | None:
-        payload = state["payload"]
+        query = self._query_of(state)
         check = state["check"]
         used = set(state.get("retrieval_queries", []))
-        for query in self._next_queries(
-            payload.query,
-            state.get("subqueries", [payload.query]),
+        for candidate in self._next_queries(
+            query,
+            state.get("subqueries", [query]),
             check,
         ):
-            if query not in used:
-                return query
+            if candidate not in used:
+                return candidate
         return None
 
     def _public_agent_state(
@@ -331,6 +408,8 @@ class AgenticReasoningService:
         return {
             "engine": "langgraph",
             "retrieval_engine": "agentic_wiki",
+            "original_query": state["payload"].query,
+            "resolved_query": self._query_of(state),
             "workflow_nodes": [
                 "intent_decomposition",
                 "initial_recall",
@@ -343,7 +422,7 @@ class AgenticReasoningService:
             "graph_expanded_node_ids": self._dedupe(
                 state.get("graph_expanded_node_ids", [])
             ),
-            "evidence_plan": self._latest_evidence_plan(state),
+            "reading_plan": self._latest_reading_plan(state),
             "verification": check.as_dict(),
         }
 
@@ -360,15 +439,19 @@ class AgenticReasoningService:
         """
         return await self.agentic_discovery.retrieve(payload, payload.query)
 
-    def _evidence_plans_from_trace(self, trace: dict[str, object]) -> list[dict[str, object]]:
+    def _reading_plans_from_trace(
+        self, trace: dict[str, object]
+    ) -> list[dict[str, object]]:
         retrieval_params = trace.get("retrieval_params")
         if not isinstance(retrieval_params, dict):
             return []
-        plan = retrieval_params.get("evidence_plan")
+        plan = retrieval_params.get("reading_plan")
         return [plan] if isinstance(plan, dict) else []
 
-    def _latest_evidence_plan(self, state: AgentState) -> dict[str, object] | None:
-        plans = state.get("evidence_plans", [])
+    def _latest_reading_plan(
+        self, state: AgentState
+    ) -> dict[str, object] | None:
+        plans = state.get("reading_plans", [])
         for plan in reversed(plans):
             if isinstance(plan, dict):
                 return plan
@@ -405,38 +488,38 @@ class AgenticReasoningService:
         )
 
     async def _decompose(self, query: str) -> list[str]:
-        try:
-            result = await self.generation_client.generate(
-                [
-                    {
-                        "role": "system",
-                        "content": (
-                            "You are an AI-first RAG query planner. Return only compact JSON. "
-                            "Do not explain."
-                        ),
-                    },
-                    {
-                        "role": "user",
-                        "content": (
-                            "Break the user question from the input JSON into the minimum set "
-                            "of retrieval subqueries. Keep the original wording when useful.\n"
-                            'Return JSON: {"subqueries": ["..."]}\n\n'
-                            "Input JSON: "
-                            f"{json.dumps({'question': query}, ensure_ascii=False)}"
-                        ),
-                    },
-                ]
-            )
-        except Exception as exc:
-            logger.warning("agent intent decomposition failed: %s", exc)
-            return [query]
-        payload = self._json_object(str(result.get("content") or ""))
-        raw_subqueries = payload.get("subqueries") if isinstance(payload, dict) else None
+        result = await self.generation_client.generate(
+            [
+                {
+                    "role": "system",
+                    "content": (
+                        "You are an AI-first RAG query planner. Return only compact JSON. "
+                        "Do not explain."
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": (
+                        "Break the user question from the input JSON into the minimum set "
+                        "of retrieval subqueries. Keep the original wording when useful.\n"
+                        'Return JSON: {"subqueries": ["..."]}\n\n'
+                        "Input JSON: "
+                        f"{json.dumps({'question': query}, ensure_ascii=False)}"
+                    ),
+                },
+            ]
+        )
+        payload = parse_json_object(str(result.get("content") or ""))
+        raw_subqueries = payload.get("subqueries")
+        if not isinstance(raw_subqueries, list):
+            raise ModelOutputError("subqueries must be an array")
         subqueries = [
             str(item).strip()
-            for item in raw_subqueries or []
+            for item in raw_subqueries
             if str(item).strip()
         ]
+        if not subqueries:
+            raise ModelOutputError("subqueries must not be empty")
         if query not in subqueries:
             subqueries.insert(0, query)
         return self._dedupe(subqueries)[: self.max_subqueries]
@@ -444,28 +527,26 @@ class AgenticReasoningService:
     async def _contextualize(self, query: str, history: list) -> str:
         if not history:
             return query
-        try:
-            history_text = "\n".join(
-                f"User: {r.query}\nAssistant: {r.answer[:200]}..."
-                for r in history
-            )
-            result = await self.generation_client.generate(
-                [
-                    {
-                        "role": "system",
-                        "content": "You are a query contextualizer. Rewrite the user's latest query to be fully self-contained, resolving any pronouns based on the chat history. Return ONLY the rewritten query text. Do not explain.",
-                    },
-                    {
-                        "role": "user",
-                        "content": f"Chat History:\n{history_text}\n\nLatest Query: {query}\n\nRewritten fully self-contained query:",
-                    },
-                ]
-            )
-            content = str(result.get("content") or "").strip()
-            return content if content else query
-        except Exception as exc:
-            logger.warning("query contextualization failed: %s", exc)
-            return query
+        history_text = "\n".join(
+            f"User: {r.query}\nAssistant: {r.answer[:200]}..."
+            for r in history
+        )
+        result = await self.generation_client.generate(
+            [
+                {
+                    "role": "system",
+                    "content": "You are a query contextualizer. Rewrite the user's latest query to be fully self-contained, resolving any pronouns based on the chat history. Return ONLY the rewritten query text. Do not explain.",
+                },
+                {
+                    "role": "user",
+                    "content": f"Chat History:\n{history_text}\n\nLatest Query: {query}\n\nRewritten fully self-contained query:",
+                },
+            ]
+        )
+        content = str(result.get("content") or "").strip()
+        if not content:
+            raise ModelOutputError("query contextualizer returned an empty rewrite")
+        return content
 
     async def _verify(
         self,
@@ -489,86 +570,34 @@ class AgenticReasoningService:
             "subqueries": subqueries,
             "evidence": evidence,
         }
-        # Native JSON Schema (same contract as the agentic reading plan) so the
-        # verification decision is as reliably structured as the read plan. The
-        # defensive parse below is kept on purpose: it still handles a model
-        # that returns string-typed booleans / out-of-range numbers, and the
-        # fail-closed path is unchanged.
-        verify_schema = {
-            "type": "json_schema",
-            "json_schema": {
-                "name": "evidence_verification",
-                "schema": {
-                    "type": "object",
-                    "properties": {
-                        "sufficient": {"type": "boolean"},
-                        "coverage_ratio": {
-                            "type": "number",
-                            "minimum": 0,
-                            "maximum": 1,
-                        },
-                        "missing_terms": {
-                            "type": "array",
-                            "items": {"type": "string"},
-                        },
-                        "follow_up_queries": {
-                            "type": "array",
-                            "items": {"type": "string"},
-                        },
-                        "reason": {"type": "string"},
-                    },
-                    "required": [
-                        "sufficient",
-                        "coverage_ratio",
-                        "missing_terms",
-                        "follow_up_queries",
-                        "reason",
-                    ],
-                    "additionalProperties": False,
+        # Native JSON Schema (same contract as the agentic reading plan). The
+        # defensive value coercion below still handles a model that returns
+        # string-typed booleans / out-of-range numbers; anything unparseable
+        # raises and fails the request — there is no degraded pass-through.
+        result = await self.generation_client.generate(
+            [
+                {
+                    "role": "system",
+                    "content": (
+                        "You are an evidence auditor for a RAG agent. Return only JSON. "
+                        "Judge sufficiency using the provided evidence, not outside knowledge."
+                    ),
                 },
-                "strict": True,
-            },
-        }
-        try:
-            result = await self.generation_client.generate(
-                [
-                    {
-                        "role": "system",
-                        "content": (
-                            "You are an evidence auditor for a RAG agent. Return only JSON. "
-                            "Judge sufficiency using the provided evidence, not outside knowledge."
-                        ),
-                    },
-                    {
-                        "role": "user",
-                        "content": (
-                            "Decide whether the evidence can close the user's question. "
-                            "If not, propose targeted follow-up retrieval queries.\n"
-                            "Return JSON with keys: sufficient(boolean), coverage_ratio(number 0..1), "
-                            "missing_terms(array of short strings), follow_up_queries(array), reason(string).\n\n"
-                            "Input JSON: "
-                            f"{json.dumps(auditor_input, ensure_ascii=False)}"
-                        ),
-                    },
-                ],
-                response_format=verify_schema,
-            )
-        except Exception as exc:
-            # Fail closed: an unavailable verifier must not be treated as
-            # "evidence is sufficient" (that is a silent fallback path). We
-            # report insufficiency and request follow-up retrieval; the loop is
-            # bounded by max_retrieval_loops in _route_after_verification.
-            logger.warning("agent evidence verification failed: %s", exc)
-            return EvidenceCheck(
-                sufficient=False,
-                coverage_ratio=0.0,
-                missing_terms=[],
-                follow_up_queries=subqueries[1:] or [query],
-                has_contexts=True,
-                has_conflicts=self._has_conflicts(contexts),
-                reason="verifier_unavailable",
-            )
-        payload = self._json_object(str(result.get("content") or ""))
+                {
+                    "role": "user",
+                    "content": (
+                        "Decide whether the evidence can close the user's question. "
+                        "If not, propose targeted follow-up retrieval queries.\n"
+                        "Return JSON with keys: sufficient(boolean), coverage_ratio(number 0..1), "
+                        "missing_terms(array of short strings), follow_up_queries(array), reason(string).\n\n"
+                        "Input JSON: "
+                        f"{json.dumps(auditor_input, ensure_ascii=False)}"
+                    ),
+                },
+            ],
+            response_format=VERIFY_SCHEMA,
+        )
+        payload = parse_json_object(str(result.get("content") or ""))
         sufficient = self._parse_bool(payload.get("sufficient"))
         coverage_ratio = self._float_in_range(payload.get("coverage_ratio"), 0.0, 1.0)
         missing = [
@@ -623,6 +652,7 @@ class AgenticReasoningService:
         return any(
             context.get("wiki_status") == "conflicting"
             or context.get("evidence_role") == "conflicting"
+            or context.get("claim_role") == "conflict"
             for context in contexts
         )
 
@@ -644,22 +674,6 @@ class AgenticReasoningService:
                 }
             )
         return compacted
-
-    def _json_object(self, content: str) -> dict[str, object]:
-        text = content.strip()
-        if text.startswith("```"):
-            text = text.strip("`")
-            if text.lower().startswith("json"):
-                text = text[4:].strip()
-        start = text.find("{")
-        end = text.rfind("}")
-        if start >= 0 and end >= start:
-            text = text[start : end + 1]
-        try:
-            loaded = json.loads(text)
-        except json.JSONDecodeError:
-            return {}
-        return loaded if isinstance(loaded, dict) else {}
 
     def _float_in_range(self, value: object, minimum: float, maximum: float) -> float:
         try:

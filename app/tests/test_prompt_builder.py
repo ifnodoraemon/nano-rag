@@ -173,7 +173,7 @@ def test_prompt_builder_preserves_text_only_string_content() -> None:
     assert isinstance(messages[1]["content"], str)
 
 
-def test_prompt_builder_includes_evidence_plan_and_discourse_metadata() -> None:
+def test_prompt_builder_includes_reading_plan_and_discourse_metadata() -> None:
     builder = PromptBuilder(prompts={})
 
     messages = builder.build_messages(
@@ -191,17 +191,20 @@ def test_prompt_builder_includes_evidence_plan_and_discourse_metadata() -> None:
         ],
         agent_state={
             "verification": {"sufficient": True, "missing_terms": []},
-            "evidence_plan": {
-                "answer_strategy": "conditional",
-                "primary_evidence": ["C1"],
-                "conditions": ["C1 applies only to low vitamin D adults"],
-                "relations": [],
-                "outline": ["State the scoped answer"],
+            "reading_plan": {
+                "selected_docs": [
+                    {
+                        "doc_id": "doc-1",
+                        "focus_sections": ["Vitamin D trials"],
+                        "reason": "contains the intervention study",
+                    }
+                ]
             },
         },
     )
 
     content = messages[1]["content"]
-    assert "evidence_plan_strategy: conditional" in content
+    assert "reading_plan (documents/sections deliberately selected" in content
+    assert "doc-1: focus=Vitamin D trials; reason=contains the intervention study" in content
     assert "claim_role=condition" in content
     assert "scope=low vitamin D" in content

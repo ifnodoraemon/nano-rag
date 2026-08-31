@@ -48,83 +48,99 @@ def _table_document() -> StructuredDocument:
     )
 
 
-def test_upsert_statements_write_nodes_entities_and_relations() -> None:
+def test_upsert_batches_write_documents_nodes_entities_and_relations() -> None:
     from app.tests.test_graph_index import _document
 
-    statements = PostgresGraphStore._upsert_statements(  # noqa: SLF001
+    batches = PostgresGraphStore._upsert_batches(  # noqa: SLF001
         _document("doc-a", "a.md", "Evidence from A.")
     )
-    params = [call[1] for call in statements]
-    # First statement rewrites the document's node rows from scratch.
-    assert statements[0][0].startswith("DELETE FROM graph_node")
-    # Stale relations from the previous (non-deterministic) extraction are
-    # dropped by owning (doc_id, kb_id) before the fresh ones are written.
-    assert statements[1][0].startswith("DELETE FROM graph_relation")
-    assert statements[1][1] == ("doc-a", "default")
-    assert params[2][1] == "doc-a"  # graph_document upsert doc_id
-    assert any(item[0] == "doc-a:node:1" for item in params)  # node insert
-    assert any(item[0] == "entity:shared" for item in params)  # entity insert
-    # The last statement reclaims orphan entities (links from this doc were
-    # just rewritten, so any orphan is stale from a prior extraction).
-    assert "DELETE FROM graph_entity" in statements[-1][0]
-    relation_row = next(
-        item for item in params if item[0] == "rel:doc-a"
+    sql_shapes = [sql.lstrip() for sql, _rows in batches]
+    # One batched executemany per SQL shape — a single round trip per shape
+    # instead of one round trip per row.
+    assert any(sql.startswith("INSERT INTO graph_document") for sql in sql_shapes)
+    assert any(sql.startswith("INSERT INTO graph_node") for sql in sql_shapes)
+    assert any(sql.startswith("INSERT INTO graph_entity") for sql in sql_shapes)
+    assert any(sql.startswith("INSERT INTO graph_node_entity") for sql in sql_shapes)
+    assert any(sql.startswith("INSERT INTO graph_relation") for sql in sql_shapes)
+
+    node_rows = next(
+        rows for sql, rows in batches if sql.lstrip().startswith("INSERT INTO graph_node")
     )
+    assert any(row[0] == "doc-a:node:1" for row in node_rows)
+    entity_rows = next(
+        rows for sql, rows in batches if sql.lstrip().startswith("INSERT INTO graph_entity")
+    )
+    assert any(row[0] == "entity:shared" for row in entity_rows)
+    relation_rows = next(
+        rows for sql, rows in batches if sql.lstrip().startswith("INSERT INTO graph_relation")
+    )
+    relation_row = next(row for row in relation_rows if row[0] == "rel:doc-a")
     # (relation_id, source_id, target_id, kb_id, doc_id, relation_type, confidence)
     assert relation_row[4] == "doc-a"
 
 
-def test_upsert_statements_use_table_narrative_and_truncate_preview() -> None:
-    statements = PostgresGraphStore._upsert_statements(_table_document())
-    node_row = next(
-        params
-        for sql, params in statements
-        if sql.lstrip().startswith("INSERT INTO graph_node") and params[0] == "doc-t:node:tbl"
+def test_upsert_batches_use_table_narrative_and_truncate_preview() -> None:
+    batches = PostgresGraphStore._upsert_batches(_table_document())  # noqa: SLF001
+    node_rows = next(
+        rows for sql, rows in batches if sql.lstrip().startswith("INSERT INTO graph_node")
     )
+    node_row = next(row for row in node_rows if row[0] == "doc-t:node:tbl")
     # (node_id, kb_id, doc_id, node_type, title, text_preview, page, hierarchy)
     assert node_row[5] == "The narrative preview."
     assert json.loads(node_row[7]) == ["doc-t", "Matrix"]
     # The root node has no narrative; falls back to empty text.
-    root_row = next(
-        params
-        for sql, params in statements
-        if sql.lstrip().startswith("INSERT INTO graph_node") and params[0] == "doc-t:root"
-    )
+    root_row = next(row for row in node_rows if row[0] == "doc-t:root")
     assert root_row[5] == ""
 
 
-def test_delete_statements_drop_nodes_relations_document_and_orphan_entities() -> None:
-    statements = PostgresGraphStore._delete_statements("doc-a", "default")  # noqa: SLF001
-    assert statements[0][0].startswith("DELETE FROM graph_node")
-    assert statements[0][1] == ("doc-a", "default")
-    # Relation rows carry no FK to graph_node; they must be deleted by owning
-    # (doc_id, kb_id) or they leak as dangling edges (HIGH-1 regression).
-    assert statements[1][0].startswith("DELETE FROM graph_relation")
-    assert statements[1][1] == ("doc-a", "default")
-    assert statements[2][0].startswith("DELETE FROM graph_document")
-    assert statements[3][0].lstrip().startswith("DELETE FROM graph_entity")
-    # Entity GC is deliberately global (entity ids are KB-namespaced), so it
-    # must NOT be kb-scoped here.
-    assert "kb_id = %s" not in statements[3][0]
-    assert "graph_node_entity" in statements[3][0]
-
-
-def test_upsert_statements_coerce_null_title_to_empty() -> None:
+def test_upsert_batches_coerce_null_title_to_empty() -> None:
     # Regression: paragraph nodes carry title=None; the graph_node.title column
     # is NOT NULL, so an explicit NULL must be coerced to "" or the upsert fails.
     from app.tests.test_graph_index import _document
 
-    statements = PostgresGraphStore._upsert_statements(  # noqa: SLF001
+    batches = PostgresGraphStore._upsert_batches(  # noqa: SLF001
         _document("doc-a", "a.md", "Evidence from A.")
     )
-    node_row = next(
-        params
-        for sql, params in statements
-        if sql.lstrip().startswith("INSERT INTO graph_node") and params[0] == "doc-a:node:1"
+    node_rows = next(
+        rows for sql, rows in batches if sql.lstrip().startswith("INSERT INTO graph_node")
     )
+    node_row = next(row for row in node_rows if row[0] == "doc-a:node:1")
     # (node_id, kb_id, doc_id, node_type, title, text_preview, page, hierarchy)
     assert node_row[4] == ""  # title was None in the fixture
     assert node_row[5] == "Evidence from A."
+
+
+def test_orphan_entity_gc_is_not_part_of_per_document_upsert() -> None:
+    # The global GC full-scans graph_node_entity and serializes concurrent
+    # ingest transactions; it must be a separate, once-per-job maintenance
+    # call (collect_orphan_entities), never embedded in the per-document
+    # upsert/delete path.
+    from app.retrieval import graph_store as graph_store_module
+
+    batches = PostgresGraphStore._upsert_batches(_table_document())  # noqa: SLF001
+    for sql, rows in batches:
+        assert "DELETE FROM graph_entity" not in sql
+        assert "graph_node_entity" not in sql or sql.lstrip().startswith("INSERT")
+    assert "DELETE FROM graph_entity" in graph_store_module._GC_ORPHAN_ENTITIES_QUERY
+
+
+def test_expand_queries_are_bounded() -> None:
+    from app.retrieval import graph_store as graph_store_module
+
+    assert "LIMIT %(expand_limit)s" in graph_store_module._EXPAND_QUERY
+    assert "LIMIT %(expand_limit)s" in graph_store_module._BACKFILL_QUERY
+
+
+def test_stats_does_not_leak_connection_details() -> None:
+    # The store must be constructible-by-contract and its stats must not leak
+    # host/credentials; pool bounds are reported instead of the URI.
+    import inspect
+
+    signature = inspect.signature(PostgresGraphStore.__init__)
+    assert "pool_min" in signature.parameters
+    assert "pool_max" in signature.parameters
+    source = inspect.getsource(PostgresGraphStore.stats)
+    assert "self.uri" not in source
 
 
 def test_partition_neighbors_splits_entity_ids_from_nodes() -> None:

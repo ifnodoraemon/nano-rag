@@ -85,8 +85,15 @@ def _rate_limit_enabled() -> int:
     raw = os.getenv("RAG_RATE_LIMIT_REQUESTS_PER_MINUTE", "0")
     try:
         return max(0, int(raw))
-    except ValueError:
-        return 0
+    except ValueError as exc:
+        # A malformed limit must never silently disable the limiter.
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                "RAG_RATE_LIMIT_REQUESTS_PER_MINUTE is misconfigured and must "
+                "be an integer; refusing to serve with the limiter disabled"
+            ),
+        ) from exc
 
 
 def _enforce_rate_limit(key: str) -> None:

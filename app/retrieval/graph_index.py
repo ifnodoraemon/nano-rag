@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import json
+import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
+from app.core.exceptions import RetrievalError
 from app.schemas.structured import (
     DocumentNode,
     GraphEntity,
@@ -27,18 +29,87 @@ class GraphView:
 
 
 class GraphIndex:
+    """In-memory graph view over the parsed artifacts, with mtime caching.
+
+    The previous implementation re-read and re-validated every parsed
+    artifact in the corpus on every ``load()`` call — once per query in the
+    expansion path. This version keeps:
+
+    - a per-file cache: an artifact is JSON-parsed and Pydantic-validated
+      once per (mtime, size) version, shared across KBs;
+    - a per-KB view cache: a view is rebuilt only when the artifact
+      signature changed, and the swap is atomic so concurrent readers keep
+      a consistent snapshot.
+
+    Corrupt artifacts raise RetrievalError instead of being silently
+    skipped — a torn artifact is a data-integrity failure, not a
+    "no graph for you" condition.
+    """
+
     def __init__(self, parsed_dir: Path) -> None:
         self.parsed_dir = parsed_dir
+        self._lock = threading.RLock()
+        # path -> (mtime_ns, size, StructuredDocument | None)
+        self._document_cache: dict[str, tuple[int, int, StructuredDocument | None]] = {}
+        # kb_id -> (signature, GraphView)
+        self._view_cache: dict[str, tuple[dict[str, tuple[int, int]], GraphView]] = {}
 
     def load(self, kb_id: str) -> GraphView:
+        with self._lock:
+            signature = self._artifact_signature()
+            cached = self._view_cache.get(kb_id)
+            if cached is not None and cached[0] == signature:
+                return cached[1]
+            view = self._build_view(kb_id)
+            self._view_cache[kb_id] = (signature, view)
+            # Drop view-cache entries whose signature no longer matches so
+            # memory does not grow with every KB ever queried.
+            stale = [
+                key for key, entry in self._view_cache.items() if entry[0] != signature
+            ]
+            for key in stale:
+                del self._view_cache[key]
+            return view
+
+    def _artifact_signature(self) -> dict[str, tuple[int, int]]:
+        signature: dict[str, tuple[int, int]] = {}
+        if not self.parsed_dir.exists():
+            return signature
+        for path in self.parsed_dir.glob("*.json"):
+            try:
+                stat = path.stat()
+            except OSError:
+                continue
+            signature[str(path)] = (stat.st_mtime_ns, stat.st_size)
+        return signature
+
+    def _build_view(self, kb_id: str) -> GraphView:
         view = GraphView()
-        for document in self._load_documents(kb_id):
+        if not self.parsed_dir.exists():
+            return view
+        for artifact in sorted(self.parsed_dir.glob("*.json")):
+            document = self._load_document_cached(artifact)
+            if document is None or document.kb_id != kb_id:
+                continue
             view.documents[document.doc_id] = document
             for node in document.iter_nodes():
                 view.nodes[node.node_id] = node
             self._merge_entities(view, document)
             self._append_relations(view, document.graph.relations)
         return view
+
+    def _load_document_cached(self, path: Path) -> StructuredDocument | None:
+        try:
+            stat = path.stat()
+        except OSError as exc:
+            raise RetrievalError(f"cannot stat parsed artifact {path}: {exc}") from exc
+        marker = (stat.st_mtime_ns, stat.st_size)
+        cached = self._document_cache.get(str(path))
+        if cached is not None and (cached[0], cached[1]) == marker:
+            return cached[2]
+        document = self._load_document(path)
+        self._document_cache[str(path)] = (marker[0], marker[1], document)
+        return document
 
     def expand_node_ids(
         self,
@@ -48,6 +119,17 @@ class GraphIndex:
         max_neighbors: int = 8,
     ) -> list[tuple[str, str]]:
         view = self.load(kb_id)
+        return self.expand_node_ids_in_view(
+            view, node_ids, max_neighbors=max_neighbors
+        )
+
+    def expand_node_ids_in_view(
+        self,
+        view: GraphView,
+        node_ids: set[str],
+        *,
+        max_neighbors: int,
+    ) -> list[tuple[str, str]]:
         expanded: list[tuple[str, str]] = []
         seen = set(node_ids)
         for node_id in node_ids:
@@ -187,25 +269,25 @@ class GraphIndex:
             self._add_relation_target(view, relation, "in", add, use_source=True)
         return self.node_summary(node), neighbors
 
-    def _load_documents(self, kb_id: str) -> list[StructuredDocument]:
-        documents: list[StructuredDocument] = []
-        if not self.parsed_dir.exists():
-            return documents
-        for artifact in sorted(self.parsed_dir.glob("*.json")):
-            document = self._load_document(artifact)
-            if document is not None and document.kb_id == kb_id:
-                documents.append(document)
-        return documents
-
     def _load_document(self, path: Path) -> StructuredDocument | None:
         try:
             payload = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            return None
+        except (OSError, json.JSONDecodeError) as exc:
+            raise RetrievalError(
+                f"parsed artifact {path} is corrupt and cannot be loaded for "
+                f"graph expansion: {exc}"
+            ) from exc
         raw = payload.get("structured_document") if isinstance(payload, dict) else None
         if not isinstance(raw, dict):
+            # No graph extraction for this artifact — a legitimate state, not
+            # a corruption.
             return None
-        return StructuredDocument.model_validate(raw)
+        try:
+            return StructuredDocument.model_validate(raw)
+        except Exception as exc:  # noqa: BLE001 - ValidationError and friends
+            raise RetrievalError(
+                f"parsed artifact {path} has an invalid structured_document: {exc}"
+            ) from exc
 
     def _merge_entities(self, view: GraphView, document: StructuredDocument) -> None:
         valid_node_ids = {node.node_id for node in document.iter_nodes()}

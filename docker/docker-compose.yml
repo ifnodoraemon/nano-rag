@@ -1,3 +1,54 @@
+x-app-env: &app-env
+  APP_CONFIG_DIR: /workspace/configs
+  RAG_ENV: ${RAG_ENV:-local}
+  HTTP_PROXY: ${HTTP_PROXY:-}
+  HTTPS_PROXY: ${HTTPS_PROXY:-}
+  NO_PROXY: ${NO_PROXY:-localhost,127.0.0.1,::1},app,redis,postgres
+  http_proxy: ${http_proxy:-}
+  https_proxy: ${https_proxy:-}
+  no_proxy: ${no_proxy:-localhost,127.0.0.1,::1},app,redis,postgres
+  ALL_PROXY: ""
+  all_proxy: ""
+  PARSED_OUTPUT_DIR: /workspace/data/parsed
+  INGEST_JOB_STORE_DIR: /workspace/data/reports/ingest_jobs
+  RAG_INGEST_EXECUTOR: ${RAG_INGEST_EXECUTOR:-celery}
+  RAG_BROKER_URL: ${RAG_BROKER_URL:-redis://redis:6379/0}
+  RAG_RESULT_BACKEND: ${RAG_RESULT_BACKEND:-redis://redis:6379/1}
+  RAG_GRAPH_BACKEND: ${RAG_GRAPH_BACKEND:-postgres}
+  PG_URI: ${PG_URI:-postgresql://nanorag:nano-rag@postgres:5432/nanorag}
+  EVAL_REPORT_DIR: /workspace/data/reports/eval
+  RAG_INGEST_ALLOWED_DIRS: /workspace/data/raw
+  EVAL_DATASET_DIR: /workspace/data/eval
+  RAG_AUTH_DISABLED: ${RAG_AUTH_DISABLED:-}
+  RAG_API_KEYS: ${RAG_API_KEYS:-nano-rag-local}
+  RAG_ADMIN_API_KEYS: ${RAG_ADMIN_API_KEYS:-nano-rag-local}
+  RAG_TRUSTED_PROXY_SECRET: ${RAG_TRUSTED_PROXY_SECRET:-}
+  RAG_RATE_LIMIT_REQUESTS_PER_MINUTE: ${RAG_RATE_LIMIT_REQUESTS_PER_MINUTE:-0}
+  RAG_DIAGNOSIS_ENABLED: ${RAG_DIAGNOSIS_ENABLED:-true}
+  RAG_EVAL_ENABLED: ${RAG_EVAL_ENABLED:-true}
+  # Document-level BM25 discovery layer (the wiki). On by default.
+  RAG_WIKI_ENABLED: ${RAG_WIKI_ENABLED:-true}
+  MODEL_PROVIDER_MAX_RETRIES: ${MODEL_PROVIDER_MAX_RETRIES:-2}
+  MODEL_PROVIDER_RETRY_BASE_SECONDS: ${MODEL_PROVIDER_RETRY_BASE_SECONDS:-0.5}
+  MODEL_PROVIDER_RETRY_MAX_SECONDS: ${MODEL_PROVIDER_RETRY_MAX_SECONDS:-8}
+  MODEL_GATEWAY_MODE: ${MODEL_GATEWAY_MODE:-live}
+  MODEL_GATEWAY_BASE_URL: ${COMPOSE_MODEL_GATEWAY_BASE_URL:-https://generativelanguage.googleapis.com/v1beta/openai}
+  MODEL_GATEWAY_API_KEY: ${COMPOSE_MODEL_GATEWAY_API_KEY:-}
+  GENERATION_MODEL_ALIAS: ${COMPOSE_GENERATION_MODEL_ALIAS:-gemini-flash-latest}
+  GENERATION_API_BASE_URL: ${COMPOSE_GENERATION_API_BASE_URL:-https://generativelanguage.googleapis.com/v1beta/openai}
+  GENERATION_API_KEY: ${COMPOSE_GENERATION_API_KEY:-}
+
+  DOCUMENT_PARSER_ENABLED: ${DOCUMENT_PARSER_ENABLED:-true}
+  DOCUMENT_PARSER_PROVIDER: ${COMPOSE_DOCUMENT_PARSER_PROVIDER:-gemini}
+  DOCUMENT_PARSER_MODEL: ${COMPOSE_DOCUMENT_PARSER_MODEL:-gemini-flash-latest}
+  DOCUMENT_PARSER_API_BASE_URL: ${COMPOSE_DOCUMENT_PARSER_API_BASE_URL:-https://generativelanguage.googleapis.com}
+  DOCUMENT_PARSER_API_KEY: ${COMPOSE_DOCUMENT_PARSER_API_KEY:-}
+  RERANK_MODEL_ALIAS: ${COMPOSE_RERANK_MODEL_ALIAS:-disabled}
+  RERANK_API_BASE_URL: ${COMPOSE_RERANK_API_BASE_URL:-}
+  RERANK_API_KEY: ${COMPOSE_RERANK_API_KEY:-}
+  RERANK_API_PATH: ${COMPOSE_RERANK_API_PATH:-}
+  DISABLE_RERANK: ${COMPOSE_DISABLE_RERANK:-true}
+
 services:
   app:
     build:
@@ -6,56 +57,12 @@ services:
     container_name: nanorag-app
     expose:
       - "8000"
-    environment: &app-env
-      APP_CONFIG_DIR: /workspace/configs
-      RAG_ENV: ${RAG_ENV:-local}
-      HTTP_PROXY: ${HTTP_PROXY:-}
-      HTTPS_PROXY: ${HTTPS_PROXY:-}
-      NO_PROXY: ${NO_PROXY:-localhost,127.0.0.1,::1},app,redis,postgres
-      http_proxy: ${http_proxy:-}
-      https_proxy: ${https_proxy:-}
-      no_proxy: ${no_proxy:-localhost,127.0.0.1,::1},app,redis,postgres
-      ALL_PROXY: ""
-      all_proxy: ""
-      PARSED_OUTPUT_DIR: /workspace/data/parsed
-      INGEST_JOB_STORE_DIR: /workspace/data/reports/ingest_jobs
-      RAG_INGEST_EXECUTOR: ${RAG_INGEST_EXECUTOR:-celery}
-      RAG_BROKER_URL: ${RAG_BROKER_URL:-redis://redis:6379/0}
-      RAG_RESULT_BACKEND: ${RAG_RESULT_BACKEND:-redis://redis:6379/1}
-      RAG_GRAPH_BACKEND: ${RAG_GRAPH_BACKEND:-postgres}
-      PG_URI: ${PG_URI:-postgresql://nanorag:nano-rag@postgres:5432/nanorag}
-      EVAL_REPORT_DIR: /workspace/data/reports/eval
-      RAG_INGEST_ALLOWED_DIRS: /workspace/data/raw
-      EVAL_DATASET_DIR: /workspace/data/eval
-      RAG_AUTH_DISABLED: ${RAG_AUTH_DISABLED:-}
-      RAG_API_KEYS: ${RAG_API_KEYS:-nano-rag-local}
-      RAG_ADMIN_API_KEYS: ${RAG_ADMIN_API_KEYS:-nano-rag-local}
-      RAG_TRUSTED_PROXY_SECRET: ${RAG_TRUSTED_PROXY_SECRET:-}
-      RAG_RATE_LIMIT_REQUESTS_PER_MINUTE: ${RAG_RATE_LIMIT_REQUESTS_PER_MINUTE:-0}
-      RAG_DIAGNOSIS_ENABLED: ${RAG_DIAGNOSIS_ENABLED:-true}
-      RAG_EVAL_ENABLED: ${RAG_EVAL_ENABLED:-true}
-      # Document-level BM25 discovery layer (the wiki). On by default.
-      RAG_WIKI_ENABLED: ${RAG_WIKI_ENABLED:-true}
-      MODEL_PROVIDER_MAX_RETRIES: ${MODEL_PROVIDER_MAX_RETRIES:-2}
-      MODEL_PROVIDER_RETRY_BASE_SECONDS: ${MODEL_PROVIDER_RETRY_BASE_SECONDS:-0.5}
-      MODEL_PROVIDER_RETRY_MAX_SECONDS: ${MODEL_PROVIDER_RETRY_MAX_SECONDS:-8}
-      MODEL_GATEWAY_MODE: ${MODEL_GATEWAY_MODE:-live}
-      MODEL_GATEWAY_BASE_URL: ${COMPOSE_MODEL_GATEWAY_BASE_URL:-https://generativelanguage.googleapis.com/v1beta/openai}
-      MODEL_GATEWAY_API_KEY: ${COMPOSE_MODEL_GATEWAY_API_KEY:-}
-      GENERATION_MODEL_ALIAS: ${COMPOSE_GENERATION_MODEL_ALIAS:-gemini-flash-latest}
-      GENERATION_API_BASE_URL: ${COMPOSE_GENERATION_API_BASE_URL:-https://generativelanguage.googleapis.com/v1beta/openai}
-      GENERATION_API_KEY: ${COMPOSE_GENERATION_API_KEY:-}
-
-      DOCUMENT_PARSER_ENABLED: ${DOCUMENT_PARSER_ENABLED:-true}
-      DOCUMENT_PARSER_PROVIDER: ${COMPOSE_DOCUMENT_PARSER_PROVIDER:-gemini}
-      DOCUMENT_PARSER_MODEL: ${COMPOSE_DOCUMENT_PARSER_MODEL:-gemini-flash-latest}
-      DOCUMENT_PARSER_API_BASE_URL: ${COMPOSE_DOCUMENT_PARSER_API_BASE_URL:-https://generativelanguage.googleapis.com}
-      DOCUMENT_PARSER_API_KEY: ${COMPOSE_DOCUMENT_PARSER_API_KEY:-}
-      RERANK_MODEL_ALIAS: ${COMPOSE_RERANK_MODEL_ALIAS:-disabled}
-      RERANK_API_BASE_URL: ${COMPOSE_RERANK_API_BASE_URL:-}
-      RERANK_API_KEY: ${COMPOSE_RERANK_API_KEY:-}
-      RERANK_API_PATH: ${COMPOSE_RERANK_API_PATH:-}
-      DISABLE_RERANK: ${COMPOSE_DISABLE_RERANK:-true}
+    environment:
+      <<: *app-env
+      # PostgreSQL default max_connections is 100. Budget: app 8 + 32 workers
+      # x 2 = 72, leaving headroom for migrations/maintenance.
+      RAG_PG_POOL_MIN: ${RAG_PG_POOL_MIN:-1}
+      RAG_PG_POOL_MAX: ${RAG_PG_POOL_MAX:-8}
     volumes:
       - ../configs:/workspace/configs:ro
       - ../data/raw:/workspace/data/raw:ro
@@ -102,7 +109,12 @@ services:
         "-Q",
         "ingest",
       ]
-    environment: *app-env
+    environment:
+      <<: *app-env
+      # Workers each run their own pool; with the default concurrency of 32
+      # this stays within PostgreSQL's default max_connections=100.
+      RAG_PG_POOL_MIN: ${RAG_WORKER_PG_POOL_MIN:-1}
+      RAG_PG_POOL_MAX: ${RAG_WORKER_PG_POOL_MAX:-2}
     volumes:
       - ../configs:/workspace/configs:ro
       - ../data/raw:/workspace/data/raw:ro

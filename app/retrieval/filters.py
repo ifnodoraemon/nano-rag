@@ -8,7 +8,6 @@ DATE_PATTERNS = (
     re.compile(r"((?:19|20)\d{2}/\d{1,2}/\d{1,2})"),
     re.compile(r"((?:19|20)\d{2}年\d{1,2}月\d{1,2}日)"),
 )
-YEAR_PATTERN = re.compile(r"\b((?:19|20)\d{2})\b")
 VERSION_PATTERNS = (
     re.compile(r"\b(v\d+(?:\.\d+)*)\b", re.IGNORECASE),
     re.compile(r"\b(version\s+\d+(?:\.\d+)*)\b", re.IGNORECASE),
@@ -17,6 +16,14 @@ VERSION_PATTERNS = (
 
 
 def infer_metadata_filters(query: str) -> dict[str, object]:
+    """Syntax-level filter inference from the query.
+
+    Only EXPLICIT full dates produce a (soft) date window. A bare year is
+    deliberately NOT expanded into a date range: "2013年制定的规定现在还有
+    效吗" would otherwise hard-exclude the newer current version that the
+    version ledger promotes — temporal semantics belong to the LLM reading
+    plan, not to a regex guess.
+    """
     inferred: dict[str, object] = {}
 
     explicit_date = _extract_first_match(query, DATE_PATTERNS)
@@ -24,13 +31,6 @@ def infer_metadata_filters(query: str) -> dict[str, object]:
         normalized = normalize_date_string(explicit_date)
         if normalized:
             inferred["effective_date_to"] = normalized
-            inferred["effective_date_match_mode"] = "soft"
-    else:
-        year_match = YEAR_PATTERN.search(query)
-        if year_match:
-            year = year_match.group(1)
-            inferred["effective_date_from"] = f"{year}-01-01"
-            inferred["effective_date_to"] = f"{year}-12-31"
             inferred["effective_date_match_mode"] = "soft"
 
     version = _extract_first_match(query, VERSION_PATTERNS)
@@ -87,18 +87,18 @@ def match_metadata_filters(
             }
         else:
             candidate_doc_types = {actual_doc_type} if actual_doc_type else set()
-        if (
-            filters.get("doc_type_match_mode") == "soft"
-            and not candidate_doc_types
-        ):
-            return True
-        if not candidate_doc_types.intersection(wanted_doc_types):
+        if not candidate_doc_types:
+            # Soft mode: a document without any doc_type does not disqualify
+            # itself here — but unlike the old early-return, the version and
+            # date checks below still apply to it.
+            if filters.get("doc_type_match_mode") != "soft":
+                return False
+        elif not candidate_doc_types.intersection(wanted_doc_types):
             return False
 
     version = filters.get("version")
     if version:
-        actual_version = normalize_version(metadata.get("version"))
-        if actual_version != normalize_version(version):
+        if not _version_matches(metadata.get("version"), version):
             return False
 
     effective_date = parse_date(metadata.get("effective_date"))
@@ -115,6 +115,31 @@ def match_metadata_filters(
             return False
 
     return True
+
+
+def _version_matches(actual: object, wanted: object) -> bool:
+    """Version comparison with one shared semantic for filter and ranking.
+
+    "v2" and "2.0" are the same version (numeric tuple comparison with
+    trailing zeros canonicalized, so "2.0" == "2"); only when either side has
+    no parseable numbers does it fall back to exact string equality.
+    """
+    actual_normalized = normalize_version(actual)
+    wanted_normalized = normalize_version(wanted)
+    if actual_normalized is None or wanted_normalized is None:
+        return actual_normalized == wanted_normalized
+    actual_key = _canonical_version_key(actual_normalized)
+    wanted_key = _canonical_version_key(wanted_normalized)
+    if actual_key and wanted_key:
+        return actual_key == wanted_key
+    return actual_normalized == wanted_normalized
+
+
+def _canonical_version_key(value: str) -> tuple[int, ...]:
+    key = version_key(value)
+    while key and key[-1] == 0:
+        key = key[:-1]
+    return key
 
 
 def parse_date(value: object) -> date | None:
@@ -152,6 +177,10 @@ def normalize_version(value: object) -> str | None:
     normalized = value.strip().lower()
     normalized = normalized.replace("版本", "").replace("version", "").replace("：", ":")
     normalized = normalized.replace(":", "").strip()
+    # "v2" and "2.0" must normalize to comparable forms: the leading "v" is
+    # notation, not identity.
+    if re.fullmatch(r"v\d+(?:\.\d+)*", normalized):
+        normalized = normalized[1:]
     return normalized or None
 
 
@@ -166,6 +195,21 @@ def sanitize_metadata_filters(
         if not str(key).endswith("_mode")
     }
     return cleaned or None
+
+
+def version_key(value: object) -> tuple[int, ...]:
+    """Extract a comparable version tuple from a free-form version string.
+
+    Shared by the retrieval freshness ranking, the metadata filter, and the
+    wiki version ledger so all three apply the same "higher numeric version
+    wins / equal numeric version matches" rule.
+    """
+    if not isinstance(value, str):
+        return ()
+    parts = re.findall(r"\d+", value)
+    if not parts:
+        return ()
+    return tuple(int(part) for part in parts)
 
 
 def _extract_first_match(text: str, patterns: tuple[re.Pattern[str], ...]) -> str | None:
