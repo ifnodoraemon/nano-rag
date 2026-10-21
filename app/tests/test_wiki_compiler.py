@@ -251,3 +251,50 @@ def test_wiki_compiler_corrupt_source_page_fails_loud(tmp_path) -> None:
             ),
             [],
         )
+
+
+def test_frontmatter_containing_a_triple_dash_survives_a_round_trip(tmp_path) -> None:
+    """A ``---`` inside a YAML value must not be mistaken for the delimiter.
+
+    A markdown table separator (``| --- | --- |``) in the document text lands in
+    ``summary``/``key_passages``. Parsing on the raw substring truncated the
+    YAML there, the page read back as "unreadable frontmatter", and bootstrap
+    failed - i.e. the application refused to start.
+    """
+    from app.schemas.chunk import Chunk
+    from app.schemas.document import Document
+
+    root = tmp_path / "wiki"
+    compiler = WikiCompiler(root)
+    table = "| 项目 | 值 |\n| --- | --- |\n| A | 1 |"
+    document = Document(
+        doc_id="doc-table",
+        source_path="spec.md",
+        title="spec",
+        content=f"# Spec\n\n{table}\n",
+        metadata={"kb_id": "default", "source_key": "spec"},
+    )
+    chunk = Chunk(
+        chunk_id="doc-table:0",
+        doc_id="doc-table",
+        chunk_index=0,
+        text=table,
+        source_path="spec.md",
+        title="spec",
+        metadata={"kb_id": "default"},
+    )
+
+    compiler.upsert_document(document, [chunk])
+
+    metadata, body = WikiCompiler.read_frontmatter(root / "sources" / "doc-table.md")
+    assert metadata["doc_id"] == "doc-table"
+    assert "| --- | --- |" in str(metadata.get("summary", "")) or "| --- |" in body
+    # The page must survive a full rebuild (this is what failed at startup).
+    rebuilt = WikiCompiler(root).bootstrap_from_parsed_dir(tmp_path / "parsed")
+    assert rebuilt == 0  # no parsed artifacts here; the point is it does not raise
+
+
+def test_frontmatter_without_closing_delimiter_is_unreadable() -> None:
+    metadata, body = WikiCompiler._parse_frontmatter_content("---\ntitle: x\n\nbody")
+    assert metadata == {}
+    assert body == "---\ntitle: x\n\nbody"

@@ -873,13 +873,30 @@ class WikiCompiler:
 
     @staticmethod
     def _parse_frontmatter_content(content: str) -> tuple[dict[str, object], str]:
-        if not content.startswith(f"{FRONTMATTER_BOUNDARY}\n"):
+        """Split a page into frontmatter and body using LINE boundaries.
+
+        The delimiter must occupy its own line (the standard front-matter
+        convention). Splitting on the raw "---" substring broke every page whose
+        YAML contained that sequence inside a value - a markdown table separator
+        (``| --- | --- |``) inside ``summary``/``key_passages`` was enough - and
+        the truncated YAML then read as "unreadable frontmatter", which made
+        bootstrap fail and the application refuse to start.
+        """
+        lines = content.splitlines()
+        if not lines or lines[0].strip() != FRONTMATTER_BOUNDARY:
             return {}, content
-        parts = content.split(FRONTMATTER_BOUNDARY, 2)
-        if len(parts) < 3:
+        closing_index = next(
+            (
+                index
+                for index, line in enumerate(lines[1:], start=1)
+                if line.strip() == FRONTMATTER_BOUNDARY
+            ),
+            None,
+        )
+        if closing_index is None:
             return {}, content
-        raw_metadata = parts[1].strip()
-        body = parts[2].strip()
+        raw_metadata = "\n".join(lines[1:closing_index]).strip()
+        body = "\n".join(lines[closing_index + 1 :]).strip()
         try:
             metadata = yaml.safe_load(raw_metadata) or {}
         except yaml.YAMLError:
