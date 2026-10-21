@@ -91,6 +91,7 @@ Do not use non-Docker commands to start the app for runtime validation.
 - `PG_URI` - PostgreSQL connection string for the graph store (defaults to the in-network `postgres` service)
 - `RAG_WIKI_ENABLED` - the BM25 discovery layer; must be `true` (it is the retrieval engine, with no dense fallback)
 - `RAG_PG_POOL_MIN` / `RAG_PG_POOL_MAX` - PostgreSQL pool bounds per process (app default 8; workers default 2 via `RAG_WORKER_PG_POOL_MAX` so 32 workers stay under `max_connections=100`)
+- `RAG_BM25_TOKENIZER` - CJK segmentation for the discovery index: `cjk_ngram` (default: characters + bigrams), `cjk_bigram` (bigrams only; best measured separation, but a one-character query cannot match), or `jieba` (dictionary words)
 - `RAG_BM25_MAX_DOCUMENTS` - discovery index capacity per process; exceeding it fails ingest loudly (default 50000)
 - `RAG_WIKI_MAX_PAGES_PER_KB` - per-KB source page quota enforced at ingest (default 20000)
 - `GENERATION_MAX_TOKENS` - generation output cap (0 = unset; invalid values fail startup)

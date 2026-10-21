@@ -312,6 +312,47 @@ python scripts/run_retrieval_eval.py \
 它回答的是“发现阶段有没有把正确文档找出来”，与答案级指标互补：分词方式、`discovery_top_k`、
 版本过滤规则、rerank 的改动是否真的有效，只有这个指标能判断。格式见 `data/eval/README.md`。
 
+### 中文分词 A/B
+
+中文没有词间空格，分词器决定"一个词是什么"，这是纯词法索引上最大的相关度杠杆。
+`RAG_BM25_TOKENIZER` 提供三种模式（非 CJK 文本在所有模式下切分完全一致，因此 A/B 只测 CJK 差异）：
+
+| 模式 | 切分方式 | 特点 |
+| --- | --- | --- |
+| `cjk_ngram`（默认） | 单字 + 双字 | 召回高、精度低：每个常用字都是词项，IDF 区分度被稀释 |
+| `cjk_bigram` | 仅双字 | 去掉单字噪声地板；**已知限制**：单字查询无法命中多字文档 |
+| `jieba` | 词典词（search 模式） | 词项精确、IDF 对比最好；依赖分词词典，词典不认同的词边界会漏 |
+
+复现实验（用本仓库真实中文语料切分出的 19 篇文档 + 19 条原文查询）：
+
+```bash
+python scripts/build_cjk_tokenizer_benchmark.py --out /tmp/cjkbench
+for mode in cjk_ngram cjk_bigram jieba; do
+  RAG_BM25_TOKENIZER=$mode PARSED_OUTPUT_DIR=/tmp/cjkbench/parsed \
+    WIKI_OUTPUT_DIR=/tmp/cjkbench/wiki \
+    python scripts/run_retrieval_eval.py --dataset /tmp/cjkbench/retrieval.jsonl
+done
+```
+
+结果（`separation_ratio` = 正确文档相对最强错误文档的领先幅度，尺度无关，可跨分词器比较；
+`cand` = 平均误命中候选数）：
+
+| query 长度 | cjk_ngram | cjk_bigram | jieba |
+| --- | --- | --- | --- |
+| 12 字 | 0.708 / 11.6 | **0.794 / 6.6** | 0.712 / 9.4 |
+| 18 字 | 0.720 / 11.7 | **0.806 / 7.3** | 0.703 / 10.4 |
+| 24 字 | 0.758 / 11.9 | **0.833 / 8.2** | 0.743 / 11.0 |
+
+三种查询长度下结论一致：`cjk_bigram` 的分离度最高，且误命中候选约为 ngram 的一半——与
+"单字是噪声、jieba 的子词展开产生部分匹配"的解释一致。
+
+**但默认值保持不变**（仍是 `cjk_ngram`）：语料只有 19 篇且查询是原文片段，recall 已饱和
+（三种模式 r@1 均为 1.00），无法证明 bigram 在更难查询上不丢召回；它还有"单字查询打不中"
+这个已知缺陷。**把这个实验在你的真实语料上重跑一次再决定是否切换**，不要根据这 19 篇的数据改默认值。
+
+注意 `separation_margin`（绝对分差）只能在同一配置的不同运行之间比较，不能跨分词器——产出词项
+更多的分词器原始 BM25 分数天然更大。跨配置请用 `separation_ratio`。
+
 ### 重复文档清理
 
 同一份内容以不同路径进入同一知识库（上传 + raw 副本、文件改名、语料重组，或历史版本用了不同的
