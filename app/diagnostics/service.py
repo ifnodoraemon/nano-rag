@@ -72,39 +72,32 @@ class DiagnosisService:
                 )
             )
             if claim_type_counts["conflict"] == 0:
-                findings.append(
-                    DiagnosisFinding(
-                        category="conflict_claim_missing",
-                        severity="medium",
-                        rationale="Conflicting evidence was retrieved, but no structured conflict claim was produced.",
-                        suggested_actions=[
-                            "Require the generation layer to emit at least one [conflict] supporting claim when conflicting evidence is present.",
-                            "Keep conflict claims short and bind them to explicit citation labels.",
-                            "Use claim-level checks in regression to prevent conflict omissions.",
-                        ],
-                        evidence={
-                            "conflicting_context_count": len(conflicting_contexts),
-                            "claim_type_counts": claim_type_counts,
-                        },
-                    )
-                )
-            if claim_type_counts["conflict"] == 0:
+                # One root cause, one finding. These used to be two separate
+                # checks on the same predicate, so every conflicting retrieval
+                # was counted twice in diagnosis_counts and the report showed
+                # two symptoms for a single defect.
                 findings.append(
                     DiagnosisFinding(
                         category="conflict_not_reflected_in_answer",
                         severity="high",
-                        rationale="A conflicting topic was retrieved, but the final answer did not include a structured conflict claim, creating overconfidence risk.",
+                        rationale=(
+                            "Conflicting evidence was retrieved, but the answer carried no "
+                            "structured [conflict] claim, so the disagreement is invisible to "
+                            "the reader and the answer reads as more certain than the evidence."
+                        ),
                         suggested_actions=[
+                            "Require the generation layer to emit at least one [conflict] supporting claim when conflicting evidence is present.",
                             "Tighten the prompt so conflicting topics must be acknowledged explicitly.",
-                            "Add conflict safeguards in the answer formatter or post-generation processing.",
-                            "When necessary, downgrade conflicting topics to a clarification-style answer.",
+                            "When conflicts cannot be resolved, downgrade to a clarification-style answer.",
                         ],
                         evidence={
-                            "answer_preview": answer[:200],
+                            "conflicting_context_count": len(conflicting_contexts),
                             "conflicting_chunk_ids": [
                                 context.get("chunk_id")
                                 for context in conflicting_contexts
                             ],
+                            "claim_type_counts": claim_type_counts,
+                            "answer_preview": answer[:200],
                         },
                     )
                 )

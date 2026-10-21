@@ -31,7 +31,18 @@ DEFAULT_PROMPT_CONTEXT_ITEM_MAX_CHARS = 6000
 
 
 class PromptBuilder:
-    def __init__(self, prompts: dict[str, object]) -> None:
+    def __init__(
+        self,
+        prompts: dict[str, object],
+        settings: dict[str, object] | None = None,
+    ) -> None:
+        # configs/settings.yaml has always carried prompt.max_context_chars /
+        # max_context_item_chars, but only the env vars were read, so editing
+        # the YAML silently did nothing. Settings are the default now and the
+        # env vars still override them.
+        prompt_settings = (settings or {}).get("prompt", {})
+        if not isinstance(prompt_settings, dict):
+            raise ConfigurationError("settings.yaml: 'prompt' must be a mapping")
         chat_prompts = prompts.get("chat", {})
         if not isinstance(chat_prompts, dict):
             # A malformed prompts.yaml is a configuration error, not something
@@ -49,14 +60,15 @@ class PromptBuilder:
         self._media_inline_max_bytes = int(
             os.getenv("RAG_PROMPT_INLINE_MEDIA_MAX_BYTES", str(10 * 1024 * 1024))
         )
-        self._context_max_chars = int(
-            os.getenv("RAG_PROMPT_CONTEXT_MAX_CHARS", str(DEFAULT_PROMPT_CONTEXT_MAX_CHARS))
+        self._context_max_chars = _int_setting(
+            "RAG_PROMPT_CONTEXT_MAX_CHARS",
+            prompt_settings.get("max_context_chars"),
+            DEFAULT_PROMPT_CONTEXT_MAX_CHARS,
         )
-        self._context_item_max_chars = int(
-            os.getenv(
-                "RAG_PROMPT_CONTEXT_ITEM_MAX_CHARS",
-                str(DEFAULT_PROMPT_CONTEXT_ITEM_MAX_CHARS),
-            )
+        self._context_item_max_chars = _int_setting(
+            "RAG_PROMPT_CONTEXT_ITEM_MAX_CHARS",
+            prompt_settings.get("max_context_item_chars"),
+            DEFAULT_PROMPT_CONTEXT_ITEM_MAX_CHARS,
         )
 
     def build_messages(
@@ -295,3 +307,28 @@ def _neutralize_fence_markers(text: str, fence: str) -> str:
     cleaned = cleaned.replace("</context>", "&lt;/context&gt;")
     cleaned = cleaned.replace("<context>", "&lt;context&gt;")
     return cleaned
+
+
+def _int_setting(env_name: str, configured: object, default: int) -> int:
+    """Env var wins, then settings.yaml, then the built-in default.
+
+    A malformed value raises instead of silently reverting to the default.
+    """
+    raw: object = os.getenv(env_name)
+    if raw is None:
+        raw = configured
+    if raw is None:
+        return default
+    if isinstance(raw, bool) or not isinstance(raw, (int, str)):
+        raise ConfigurationError(
+            f"{env_name} (or settings.yaml prompt.*) must be an integer, got {raw!r}"
+        )
+    try:
+        value = int(raw)
+    except (TypeError, ValueError) as exc:
+        raise ConfigurationError(
+            f"{env_name} (or settings.yaml prompt.*) must be an integer, got {raw!r}"
+        ) from exc
+    if value <= 0:
+        raise ConfigurationError(f"{env_name} must be > 0, got {value}")
+    return value

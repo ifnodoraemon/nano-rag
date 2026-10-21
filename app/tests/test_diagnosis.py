@@ -74,8 +74,11 @@ def test_diagnose_trace_flags_conflicting_wiki_contexts() -> None:
 
     categories = [finding.category for finding in diagnosis.findings]
     assert "wiki_conflict_detected" in categories
-    assert "conflict_claim_missing" in categories
+    # One root cause, one finding: the old pair of checks shared the same
+    # predicate and double-counted every conflicting retrieval.
     assert "conflict_not_reflected_in_answer" in categories
+    assert categories.count("conflict_not_reflected_in_answer") == 1
+    assert "conflict_claim_missing" not in categories
 
 
 def test_diagnose_trace_uses_structured_insufficiency_claim() -> None:

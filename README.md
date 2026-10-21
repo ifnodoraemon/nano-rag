@@ -24,14 +24,26 @@ docker compose -f docker/docker-compose.lite.yml up -d --build
 
 lite 模式使用 artifact 图扩展（无数据库）和 background ingest；正式规范压测仍建议使用默认生产栈（postgres 图存储）。
 
-浏览器端不需要配置 API key。前端 nginx 会为代理到后端的请求注入业务 key；本地 Docker 默认使用 `RAG_PROXY_API_KEY=nano-rag-local`，需要和后端 `RAG_API_KEYS` 中的一个值保持一致。
+浏览器**不持有业务密钥**：nginx 只为 `/v1/rag/` 业务路由注入业务 key。
+但**运维路由**（注入、上传、追踪、评测、回放、`/health/detail`）需要调用方自备管理密钥，
+在前端「设置 → 运维密钥」里填入 `RAG_ADMIN_API_KEYS` 中的任意一个值即可（存在浏览器 localStorage，
+以 `X-Admin-API-Key` 发送）；不填则这些面板会明确提示“运维数据不可用”，而不是显示空数据。
+
+`RAG_API_KEYS` / `RAG_ADMIN_API_KEYS` / `RAG_PROXY_API_KEY` 都必须显式设置（见 `docker/.env.example`），
+compose 在缺失时会直接拒绝启动；不再有 `nano-rag-local` 这类默认密钥。
+`RAG_PROXY_API_KEY` 通常与 `RAG_API_KEYS` 取值一致。
 
 启动后优先检查真实运行状态：
 
 ```bash
-curl -sS http://127.0.0.1:3001/health/detail
+# 公开摘要（无鉴权）
+curl -sS http://127.0.0.1:3001/health
+# 运维详情（需要管理密钥）
+curl -sS -H "X-Admin-API-Key: $RAG_ADMIN_API_KEYS" http://127.0.0.1:3001/health/detail
+# 业务查询（由 nginx 注入业务 key）
 curl -sS http://127.0.0.1:3001/v1/rag/knowledge-bases
-curl -sS http://127.0.0.1:3001/v1/rag/ingest/sources
+# 可注入来源（运维路由）
+curl -sS -H "X-Admin-API-Key: $RAG_ADMIN_API_KEYS" http://127.0.0.1:3001/v1/rag/ingest/sources
 ```
 
 ## 项目理念
@@ -50,7 +62,8 @@ Nano RAG 的核心原则是：**真实输入、真实索引、真实模型、真
 
 ## 当前能力
 
-- 业务 API：`/v1/rag/chat`、`/v1/rag/chat/stream`、`/v1/rag/retrieve`、`/v1/rag/ingest`、`/v1/rag/ingest/upload`、`/v1/rag/ingest/jobs/{job_id}`、`/v1/rag/documents`、`/v1/rag/knowledge-bases`、`/v1/rag/ingest/sources`、`/v1/rag/feedback`、`/v1/rag/traces/{trace_id}`
+- 业务 API（业务 key）：`/v1/rag/chat`、`/v1/rag/chat/stream`、`/v1/rag/retrieve`、`/v1/rag/ingest/jobs/{job_id}`、`/v1/rag/documents`、`/v1/rag/knowledge-bases`、`/v1/rag/feedback`、`/v1/rag/traces/{trace_id}`
+- 运维 API（管理 key）：`/v1/rag/ingest`、`/v1/rag/ingest/upload`、`/v1/rag/ingest/sources`、`/v1/rag/benchmark/run`、`/health/detail`
 - 文档结构 API：`/v1/rag/documents/{doc_id}/tree`、`/v1/rag/nodes/{node_id}`、`/v1/rag/tables/{table_id}`、`/v1/rag/graph/neighborhood`
 - 运维 API：`/health/detail`、`/debug/storage`、`/debug/parsed/{doc_id}`、`/retrieve/debug`、`/traces`、`/replay/{trace_id}`
 - 评测和诊断：`/eval/datasets`、`/eval/reports`、`/eval/run`、`/benchmark/reports`、`/diagnose/*`
@@ -62,6 +75,9 @@ Nano RAG 的核心原则是：**真实输入、真实索引、真实模型、真
 - agentic 检索：wiki BM25 发现 → 确定性版本过滤（按 `source_key` 取最新）→ LLM 结构化读计划（json_schema）→ 深读选中的 parsed artifact → 上下文构建；每个阶段进 trace
 - 证据治理：生成结果带 structured supporting claims，并在后处理里标记 claim 是否有引用支撑、缺失数字和缺失术语
 - 模型路径：生成、文档解析、可选 rerank 都直连显式配置的真实 provider；默认示例只覆盖 Gemini 和 Qwen；**不配置 embedding 端点**
+- rerank（可选，默认关闭）：cross-encoder 对发现阶段候选做重排，接在「版本过滤之后、读计划之前」。
+  它是打分模型而非 embedding——无向量库、无需重灌语料、换模型不影响已编译的 wiki 页。
+  启用后必须可用：失败会直接让请求失败，不会静默退回 BM25 顺序；重排结果与分数写入 trace 的 `retrieval_params.rerank`
 - 前端：React + Vite 源码位于 `frontend/` 子模块，Docker 构建为 nginx 静态站点并代理后端
 
 ## 目录
@@ -83,14 +99,22 @@ Docker 默认值：
 ```bash
 MODEL_GATEWAY_MODE=live
 GENERATION_API_BASE_URL=https://generativelanguage.googleapis.com/v1beta/openai
-RAG_API_KEYS=nano-rag-local
 RAG_GRAPH_BACKEND=postgres
 PG_URI=postgresql://nanorag:nano-rag@postgres:5432/nanorag
 RAG_WIKI_ENABLED=true
 RAG_DIAGNOSIS_ENABLED=true
 RAG_EVAL_ENABLED=true
 DOCUMENT_PARSER_ENABLED=true
+
+# 必须显式设置（compose 在缺失时拒绝启动）：
+RAG_API_KEYS=<openssl rand -hex 32>
+RAG_ADMIN_API_KEYS=<openssl rand -hex 32，且必须与业务 key 不同>
+RAG_PROXY_API_KEY=<通常等于 RAG_API_KEYS>
+RAG_ENV=prod            # local/dev/test 之外会拒绝已知弱默认密钥
+# FRONTEND_BIND=127.0.0.1   # 默认只绑本机；对外暴露请接自己的鉴权代理
 ```
+
+完整清单见 `docker/.env.example`。
 
 后端启动时会检查 generation、document parser 等关键配置，并连接 PostgreSQL 图存储。缺少 `DOCUMENT_PARSER_API_KEY` 这类真实 provider 配置时，容器日志会输出 `Startup readiness` 警告，`/health/detail` 会继续显示对应能力不可用；前端只消费这些后端状态，不负责提示 Docker 配置方式。
 
@@ -158,15 +182,18 @@ COMPOSE_DOCUMENT_PARSER_API_BASE_URL=http://vllm:8000/v1
 COMPOSE_DOCUMENT_PARSER_MODEL=Qwen/Qwen2.5-VL-7B-Instruct
 ```
 
-可选 Qwen rerank：
+可选 Qwen rerank（cross-encoder，重排发现阶段候选；非 embedding）：
 
 ```bash
 COMPOSE_RERANK_MODEL_ALIAS=qwen3-rerank
 COMPOSE_DISABLE_RERANK=false
 COMPOSE_RERANK_API_BASE_URL=https://dashscope-intl.aliyuncs.com/compatible-api/v1
 COMPOSE_RERANK_API_KEY=<your-dashscope-key>
-COMPOSE_RERANK_API_PATH=/reranks
+COMPOSE_RERANK_API_PATH=/reranks      # 启用后必填，缺失会直接启动报错
 ```
+
+启用后该阶段是硬依赖：provider 不可达、返回空结果、索引越界或缺 `relevance_score` 都会让请求失败，
+不会静默退回 BM25 顺序。重排后的顺序与分数记录在 trace 的 `retrieval_params.rerank` 里。
 
 如果没有有效 provider key，系统不会切到 mock；`/health/detail` 会显示 degraded，并在具体能力下返回上游错误。
 
@@ -205,7 +232,7 @@ docker logs --tail 120 nanorag-frontend
 docker compose -f docker/docker-compose.yml exec app \
   python -c "import urllib.request; print(urllib.request.urlopen('http://127.0.0.1:8000/health').read().decode())"
 curl -sS http://127.0.0.1:3001/health/detail \
-  -H 'X-API-Key: nano-rag-local'
+  -H "X-Admin-API-Key: $RAG_ADMIN_API_KEYS"
 ```
 
 ## API 示例
@@ -248,7 +275,9 @@ curl -sS -X POST http://127.0.0.1:3001/retrieve/debug \
 
 本仓库默认配置面向本地验证。上线前至少完成以下调整：
 
-- 设置 `RAG_ENV=production`，并替换 `RAG_API_KEYS`、`RAG_ADMIN_API_KEYS`、`PG_PASSWORD` 等所有默认密钥；生产环境会拒绝 `nano-rag-local` 这类默认 API key。
+- 显式设置 `RAG_API_KEYS`、`RAG_ADMIN_API_KEYS`、`RAG_PROXY_API_KEY`、`PG_PASSWORD`；`RAG_ENV` 保持非 local/dev/test 即可让服务拒绝已知弱默认密钥。
+- `RAG_AUTH_DISABLED` 只在 `RAG_ENV=local|dev|development|test|testing|unittest` 时生效，生产环境会被忽略并记日志。
+- `/docs` 与 `/openapi.json` 默认关闭，需要时用 `RAG_ENABLE_DOCS=true` 显式开启（它们会暴露全部运维路由）。
 - 业务接口使用 `RAG_API_KEYS` 或可信上游网关；管理、调试、评测、诊断和 replay 接口使用独立的 `RAG_ADMIN_API_KEYS`。
 - 如果由业务网关做登录和租户控制，设置 `RAG_TRUSTED_PROXY_SECRET`，并让网关注入 `X-RAG-Proxy-Secret`、`X-RAG-Principal-Id`、`X-RAG-Org-Id`、`X-RAG-Allowed-KB-Ids`。
 - 设置 `RAG_RATE_LIMIT_REQUESTS_PER_MINUTE`，并在外层网关或 WAF 做全局限流；仓库内的限流是单进程保护，不替代分布式限流。
@@ -263,7 +292,7 @@ curl -sS -X POST http://127.0.0.1:3001/retrieve/debug \
 - 上传大小由 `MAX_UPLOAD_BYTES` 控制，单批文件数由 `MAX_FILES_PER_BATCH` 控制；生产应在网关层同步设置 body size、杀毒/内容安全扫描和文件类型白名单。
 - 对标准、法规、合同、制度类文档，建议在文件名或正文中保留版本号、生效日期、章节号；发现层会使用 `doc_type`、`effective_date`、`version`、`source_key` 等元数据做确定性版本过滤。
 
-评测门禁示例：
+评测门禁示例（答案级）：
 
 ```bash
 python scripts/run_eval.py \
@@ -271,6 +300,17 @@ python scripts/run_eval.py \
   --min-context-recall 0.85 \
   --max-conflicting-hit-rate 0.05
 ```
+
+检索阶段门禁（只跑 wiki BM25 发现 + 版本过滤，**不调用任何模型**，适合放进 CI）：
+
+```bash
+python scripts/run_retrieval_eval.py \
+  --dataset data/eval/retrieval_employee_handbook.jsonl \
+  --min-recall-at 12=0.9 --min-mrr 0.5
+```
+
+它回答的是“发现阶段有没有把正确文档找出来”，与答案级指标互补：分词方式、`discovery_top_k`、
+版本过滤规则、rerank 的改动是否真的有效，只有这个指标能判断。格式见 `data/eval/README.md`。
 
 RAG 本体回归样本位于 `data/eval/rag_quality_regression.jsonl`，覆盖表格行查值、条款定位、术语定义、版本冲突和无答案边界。生产接入新语料后，应把业务高风险问题追加到这个集合并设为 CI 门禁。
 
@@ -282,6 +322,12 @@ RAG 本体回归样本位于 `data/eval/rag_quality_regression.jsonl`，覆盖�
 
 注意：
 
+- **`source_key` 语义变更（升级须知）**：`source_key` 现在是 `"<末级目录> <标题>"`（小写、空格分隔），
+  此前只有标题。旧语料的 wiki 页与 parsed artifact 里保存的是旧 key，`bootstrap_from_parsed_dir`
+  不会重算，因此已有语料保持原状、不会错乱；但**重新摄入某个文件**时它会迁移到新 key 组。
+  如果同一份语料里有多版本文件（如 `Policy v1` / `Policy v2`），升级后请把整组重新摄入一次，
+  否则它们会短暂分属两个版本组（各自都被视为最新）。改动原因：只用标题做 key 会让
+  `reports/spec.pdf` 与 `contracts/spec.pdf` 被判为同一文档的不同版本，其中一个被版本过滤静默丢弃。
 - `MODEL_GATEWAY_MODE=mock` 不再是受支持的运行模式。
 - `RAG_GRAPH_BACKEND` 默认生产栈是 `postgres`；本地脚本默认 `artifact`（无需数据库）。
 - 检索引擎是文档级 BM25 发现 + agentic 深读；`RAG_WIKI_ENABLED` 必须为 `true`，不存在稠密向量回退。

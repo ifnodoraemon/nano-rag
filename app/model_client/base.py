@@ -78,9 +78,11 @@ class AsyncJsonProviderClient:
                 )
                 status_code = int(getattr(response, "status_code", 200))
                 if self._should_retry_status(status_code) and attempt < attempts:
-                    await asyncio.sleep(
-                        self._retry_sleep(attempt, response=response)
-                    )
+                    delay = self._retry_sleep(attempt, response=response)
+                    # Release the discarded response: a retried 429/5xx storm
+                    # otherwise accumulates open connections.
+                    await response.aclose()
+                    await asyncio.sleep(delay)
                     continue
                 response.raise_for_status()
                 try:
