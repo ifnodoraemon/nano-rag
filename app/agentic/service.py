@@ -23,6 +23,7 @@ logger = logging.getLogger(__name__)
 if TYPE_CHECKING:
     from app.core.config import AppConfig
     from app.core.tracing import TraceStore, TracingManager
+    from app.model_client.rerank import RerankClient
     from app.retrieval.graph_store import GraphStore
     from app.wiki.search import WikiSearcher
 
@@ -152,6 +153,7 @@ class AgenticReasoningService:
         tracing_manager: TracingManager,
         graph_store: GraphStore | None = None,
         wiki_searcher: "WikiSearcher | None" = None,
+        rerank_client: "RerankClient | None" = None,
     ) -> None:
         if wiki_searcher is None:
             raise ConfigurationError(
@@ -175,6 +177,7 @@ class AgenticReasoningService:
             generation_client=generation_client,
             trace_store=trace_store,
             tracing_manager=tracing_manager,
+            rerank_client=rerank_client,
         )
         agent_settings = config.settings.get("agent", {})
         self.max_retrieval_loops = int(agent_settings.get("max_retrieval_loops", 2))

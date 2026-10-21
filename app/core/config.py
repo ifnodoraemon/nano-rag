@@ -412,12 +412,13 @@ class AppContainer:
         chat_pipeline = AgenticReasoningService(
             config=config,
             generation_client=generation_client,
-            prompt_builder=PromptBuilder(config.prompts),
+            prompt_builder=PromptBuilder(config.prompts, config.settings),
             answer_formatter=AnswerFormatter(),
             trace_store=trace_store,
             tracing_manager=tracing_manager,
             graph_store=graph_store,
             wiki_searcher=wiki_searcher,
+            rerank_client=rerank_client,
         )
         return cls(
             config=config,
