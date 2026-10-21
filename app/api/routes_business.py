@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import re
+import threading
 from pathlib import Path
 from time import time
 from uuid import uuid4
@@ -14,7 +15,12 @@ from fastapi.responses import StreamingResponse
 
 logger = logging.getLogger(__name__)
 
-from app.api.auth import RequestContext, require_admin_key, require_api_key
+from app.api.auth import (
+    RequestContext,
+    require_admin_key,
+    require_api_key,
+    require_api_or_admin_key,
+)
 from app.core.config import AppContainer
 from app.core.exceptions import StoreError
 from app.diagnostics.service import DiagnosisService
@@ -99,6 +105,17 @@ def _ensure_kb_access(container, kb_id: str, context: RequestContext | None = No
         )
 
 
+def _stale_job_seconds() -> float:
+    raw = os.getenv("RAG_INGEST_JOB_STALE_SECONDS", "3600")
+    try:
+        return float(raw)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=f"RAG_INGEST_JOB_STALE_SECONDS is misconfigured: {exc}",
+        ) from exc
+
+
 def _require_eval_runner(container: AppContainer) -> DeepevalRunner:
     runner = getattr(container, "eval_runner", None)
     if runner is None:
@@ -146,7 +163,31 @@ def _ensure_trace_scope(
 # Per-file payload cache for the document list endpoints: path -> (marker,
 # document dict | None, chunk count, mtime). The list endpoints previously
 # re-read and re-parsed every artifact in the corpus on every request.
+# Bounded: an unbounded module-level dict leaks one entry per artifact ever
+# seen (including deleted ones) for the lifetime of the process.
 _DOC_LIST_FILE_CACHE: dict[str, tuple[tuple[int, int], dict | None, int, float]] = {}
+_DOC_LIST_FILE_CACHE_MAX = 4096
+_DOC_LIST_FILE_CACHE_LOCK = threading.Lock()
+
+
+def _cache_document_summary(path: str, entry: tuple) -> None:
+    with _DOC_LIST_FILE_CACHE_LOCK:
+        if len(_DOC_LIST_FILE_CACHE) >= _DOC_LIST_FILE_CACHE_MAX:
+            # Cheap FIFO eviction: drop the oldest quarter. The next request
+            # simply re-parses those artifacts (correctness is unaffected).
+            for key in list(_DOC_LIST_FILE_CACHE)[: _DOC_LIST_FILE_CACHE_MAX // 4]:
+                _DOC_LIST_FILE_CACHE.pop(key, None)
+        _DOC_LIST_FILE_CACHE[path] = entry
+
+
+def _cached_document_summary(
+    path: str, marker: tuple[int, int]
+) -> tuple[tuple[int, int], dict | None, int, float] | None:
+    with _DOC_LIST_FILE_CACHE_LOCK:
+        cached = _DOC_LIST_FILE_CACHE.get(path)
+    if cached is not None and cached[0] == marker:
+        return cached
+    return None
 
 
 def _document_summary_from_artifact(
@@ -161,8 +202,8 @@ def _document_summary_from_artifact(
     except OSError as exc:
         raise StoreError(f"cannot stat parsed artifact {artifact}: {exc}") from exc
     marker = (stat.st_mtime_ns, stat.st_size)
-    cached = _DOC_LIST_FILE_CACHE.get(str(artifact))
-    if cached is not None and cached[0] == marker:
+    cached = _cached_document_summary(str(artifact), marker)
+    if cached is not None:
         return cached[1], cached[2], cached[3]
     try:
         payload = json.loads(artifact.read_text(encoding="utf-8"))
@@ -178,7 +219,7 @@ def _document_summary_from_artifact(
         len(chunks) if isinstance(chunks, list) else 0,
         stat.st_mtime,
     )
-    _DOC_LIST_FILE_CACHE[str(artifact)] = entry
+    _cache_document_summary(str(artifact), entry)
     return entry[1], entry[2], entry[3]
 
 
@@ -337,14 +378,16 @@ async def rag_chat_stream(
     container = request.app.state.container
     _ensure_kb_access(container, payload.kb_id, context)
 
+    heartbeat_seconds = 15.0
+
     async def event_generator():
         def _frame(payload: dict[str, object]) -> str:
             return "data: " + json.dumps(payload, ensure_ascii=False) + "\n\n"
 
         yield _frame({"status": "thinking", "message": "Retrieving and synthesizing..."})
 
-        try:
-            response = await container.chat_pipeline.run(
+        task = asyncio.create_task(
+            container.chat_pipeline.run(
                 ChatRequest(
                     query=payload.query,
                     top_k=payload.top_k,
@@ -353,6 +396,22 @@ async def rag_chat_stream(
                     metadata_filters=payload.metadata_filters,
                 )
             )
+        )
+        try:
+            # The pipeline runs for minutes; emit an SSE comment frame while it
+            # works so idle connections (proxies, load balancers, browsers) are
+            # not torn down before the answer exists.
+            while True:
+                done, _pending = await asyncio.wait({task}, timeout=heartbeat_seconds)
+                if done:
+                    break
+                yield ": heartbeat\n\n"
+        except asyncio.CancelledError:
+            task.cancel()
+            raise
+
+        try:
+            response = task.result()
         except asyncio.CancelledError:
             raise
         except Exception:  # noqa: BLE001 - surfaced as a generic SSE error frame
@@ -361,7 +420,9 @@ async def rag_chat_stream(
             yield _frame({"status": "error", "message": "upstream generation error"})
             return
 
-        yield _frame({"status": "generating", "chunk": response.answer})
+        # Exactly one answer frame: the pipeline is complete, so the answer is
+        # sent once with its citations (the previous implementation emitted the
+        # full answer twice, in a `generating` chunk and again in `success`).
         yield _frame(
             {
                 "status": "success",
@@ -371,7 +432,15 @@ async def rag_chat_stream(
             }
         )
 
-    return StreamingResponse(event_generator(), media_type="text/event-stream")
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+            "Connection": "keep-alive",
+        },
+    )
 
 
 @router.post(
@@ -397,7 +466,6 @@ async def rag_retrieve(
         query=payload.query,
         contexts=contexts,
         retrieved=contexts,
-        reranked=contexts,
         trace_id=str(trace.get("trace_id")),
         kb_id=payload.kb_id,
         session_id=payload.session_id,
@@ -407,6 +475,7 @@ async def rag_retrieve(
 @router.post(
     "/ingest",
     response_model=BusinessIngestResponse,
+    status_code=202,
 )
 async def rag_ingest(
     payload: BusinessIngestRequest,
@@ -446,10 +515,14 @@ async def rag_ingest(
 async def rag_ingest_job(
     job_id: str,
     request: Request,
-    context: RequestContext = Depends(require_api_key),
+    context: RequestContext = Depends(require_api_or_admin_key),
 ) -> BusinessIngestJobResponse:
     try:
-        record = request.app.state.container.ingest_job_store.get(job_id)
+        # Recover jobs whose worker died: a record stuck in "running" with a
+        # dead owner must report failure, not keep a client polling forever.
+        job_store = request.app.state.container.ingest_job_store
+        job_store.reap_stale_running(max_idle_seconds=_stale_job_seconds())
+        record = job_store.get(job_id)
     except StoreError as exc:
         # Corrupt job record: surface the store-integrity failure as an
         # explicit 500 instead of pretending the job never existed.
@@ -507,14 +580,18 @@ async def rag_ingest_sources() -> list[IngestSourceSummary]:
 @router.post(
     "/ingest/upload",
     response_model=BusinessIngestResponse,
+    status_code=202,
 )
 async def rag_ingest_upload(
     request: Request,
     files: list[UploadFile] = File(...),
     kb_id: str = Form(default="default"),
     background_tasks: BackgroundTasks = None,  # type: ignore
-    context: RequestContext = Depends(require_api_key),
+    context: RequestContext = Depends(require_admin_key),
 ) -> BusinessIngestResponse:
+    # Uploading writes files into the uploads volume and starts an ingest job:
+    # it is a write/operator action, so it requires the admin key exactly like
+    # the path-ingest endpoint above. The business key is read/ask-only.
     _ensure_kb_access(request.app.state.container, kb_id, context)
     if not files:
         raise HTTPException(status_code=400, detail="at least one file is required")
@@ -616,8 +693,10 @@ async def rag_ingest_upload(
         for upload in files:
             try:
                 await upload.close()
-            except Exception:
-                pass
+            except Exception:  # noqa: BLE001 - cleanup must not mask the real error
+                # Logged rather than swallowed silently: a upload handle that
+                # cannot be closed leaks a descriptor.
+                logger.warning("failed to close upload handle %r", getattr(upload, "filename", None), exc_info=True)
 
 
 @router.get(
@@ -643,6 +722,9 @@ async def rag_document_tree(
 ) -> dict:
     container = request.app.state.container
     _ensure_kb_access(container, kb_id, context)
+    if not re.fullmatch(r"[A-Za-z0-9_.:-]{1,160}", doc_id):
+        # Defence in depth: doc_id is used to build a filesystem path.
+        raise HTTPException(status_code=400, detail="invalid doc_id")
     document = _load_structured_document(container.config.parsed_dir, doc_id)
     if document is None or document.kb_id != kb_id:
         raise HTTPException(status_code=404, detail=f"document tree not found: {doc_id}")

@@ -19,6 +19,7 @@ from app.retrieval.versioning import version_sort_key
 from app.schemas.chat import ChatRequest
 from app.schemas.chunk import Chunk
 from app.retrieval.hits import SearchHit
+from app.utils.coerce import as_dict, as_list, as_str, as_str_list
 from app.utils.json_utils import parse_json_object
 from pydantic import ValidationError
 
@@ -205,9 +206,10 @@ class AgenticDiscovery:
                 ungrouped.append(hit)
 
         selected = list(ungrouped)
+        groups_report: list[dict[str, object]] = []
         filter_report: dict[str, object] = {
             "include_stale": self.include_stale_default,
-            "groups": [],
+            "groups": groups_report,
         }
         for (kb_id, source_key), group in grouped.items():
             ranked = sorted(
@@ -222,7 +224,7 @@ class AgenticDiscovery:
             if self.include_stale_default:
                 selected.extend(ranked[1:])
             dropped = [] if self.include_stale_default else [hit.chunk.doc_id for hit in ranked[1:]]
-            filter_report["groups"].append(
+            groups_report.append(
                 {
                     "kb_id": kb_id,
                     "source_key": source_key,
@@ -350,9 +352,10 @@ class AgenticDiscovery:
         deduped: list[dict[str, object]] = []
         seen: set[str] = set()
         for entry in entries:
-            if entry["doc_id"] in seen:
+            entry_doc_id = as_str(entry.get("doc_id"))
+            if entry_doc_id in seen:
                 continue
-            seen.add(entry["doc_id"])
+            seen.add(entry_doc_id)
             deduped.append(entry)
         # An empty selection is a legitimate structured decision: none of the
         # candidates plausibly contains the answer, so nothing is read.
@@ -362,7 +365,7 @@ class AgenticDiscovery:
         self, plan: dict[str, object], candidates: list[SearchHit]
     ) -> tuple[list[dict[str, object]], list[str], list[str]]:
         focus_by_doc: dict[str, set[str]] = {}
-        for entry in plan.get("selected_docs", []):  # type: ignore[union-attr]
+        for entry in as_list(plan.get("selected_docs")):
             if isinstance(entry, dict):
                 focus_by_doc[str(entry.get("doc_id"))] = {
                     str(item)
@@ -448,16 +451,18 @@ class AgenticDiscovery:
 
     def _select_chunks(
         self, raw_chunks: list[object], focus: set[str], doc_id: str
-    ) -> list[object]:
-        chunks = [chunk for chunk in raw_chunks if isinstance(chunk, dict)]
+    ) -> list[dict[str, object]]:
+        chunks: list[dict[str, object]] = [
+            chunk for chunk in raw_chunks if isinstance(chunk, dict)
+        ]
         if not focus:
             return chunks[: self.max_read_chunks_per_doc]
-        matched: list[object] = []
+        matched: list[dict[str, object]] = []
         matched_terms: set[str] = set()
         for chunk in chunks:
-            metadata = chunk.get("metadata") or {}
-            hierarchy = metadata.get("hierarchy_path") or []
-            haystack = [str(item) for item in hierarchy] + [str(chunk.get("title") or "")]
+            metadata = as_dict(chunk.get("metadata"))
+            # Section matching runs over the heading path and the chunk title.
+            haystack = [*as_str_list(metadata.get("hierarchy_path")), as_str(chunk.get("title"))]
             for term in focus:
                 if term in matched_terms:
                     continue

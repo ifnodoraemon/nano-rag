@@ -27,19 +27,39 @@ from app.wiki.compiler import WikiCompiler
 from app.wiki.search import WikiSearcher
 
 
-def _render_env(raw: str) -> str:
+def _load_yaml(path: Path) -> dict[str, Any]:
+    # Substitute AFTER parsing, and only inside string values. Substituting the
+    # raw YAML first meant a value like "on"/"yes"/"1" was parsed as a boolean
+    # or number (GENERATION_MODEL_ALIAS=on became True), and an unset ${VAR}
+    # kept its literal placeholder, which every downstream truthiness check
+    # then treated as a real configured value.
+    document = yaml.safe_load(path.read_text()) or {}
+    return _substitute_env_in_place(document, path)
+
+
+def _substitute_env_in_place(node: Any, path: Path) -> Any:
+    if isinstance(node, dict):
+        return {key: _substitute_env_in_place(value, path) for key, value in node.items()}
+    if isinstance(node, list):
+        return [_substitute_env_in_place(item, path) for item in node]
+    if not isinstance(node, str):
+        return node
+
     def replace(match: re.Match[str]) -> str:
         expression = match.group(1)
         if ":-" in expression:
             key, default = expression.split(":-", 1)
             return os.getenv(key, default)
-        return os.getenv(expression, match.group(0))
+        value = os.getenv(expression)
+        if value is None:
+            raise ConfigurationError(
+                f"{path.name}: environment variable {expression!r} referenced as "
+                f"${{{expression}}} is not set and has no default. Refusing to "
+                "start with a literal placeholder as the configured value."
+            )
+        return value
 
-    return re.sub(r"\$\{([^}]+)\}", replace, raw)
-
-
-def _load_yaml(path: Path) -> dict[str, Any]:
-    return yaml.safe_load(_render_env(path.read_text())) or {}
+    return re.sub(r"\$\{([^}]+)\}", replace, node)
 
 
 @dataclass

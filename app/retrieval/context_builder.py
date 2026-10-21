@@ -1,6 +1,8 @@
 import re
 import os
 
+from app.core.exceptions import ConfigurationError
+from app.utils.coerce import as_float
 from app.retrieval.hits import SearchHit
 
 DEFAULT_BUCKET_ORDER = ["topic", "raw", "source", "index"]
@@ -106,7 +108,7 @@ def _least_valuable_selected_index(
                 continue
             other_coverage.update(coverages.get(other_key, set()))
         unique_terms = coverages.get(key, set()) - other_coverage
-        raw_score = float(selected[index].get("score", 0.0) or 0.0)
+        raw_score = as_float(selected[index].get("score"))
         scores.append((len(unique_terms), raw_score, -index))
     return min(range(len(scores)), key=lambda index: scores[index])
 
@@ -306,9 +308,18 @@ def build_contexts(
 def _context_text_max_chars() -> int:
     raw = os.getenv("RAG_CONTEXT_TEXT_MAX_CHARS", str(DEFAULT_CONTEXT_TEXT_MAX_CHARS))
     try:
-        return max(500, int(raw))
-    except ValueError:
-        return DEFAULT_CONTEXT_TEXT_MAX_CHARS
+        value = int(raw)
+    except ValueError as exc:
+        # Silently reverting to the default hid a typo behind working (but
+        # unexpected) behaviour. Every other config knob fails loudly.
+        raise ConfigurationError(
+            f"RAG_CONTEXT_TEXT_MAX_CHARS must be an integer, got {raw!r}"
+        ) from exc
+    if value < 500:
+        raise ConfigurationError(
+            f"RAG_CONTEXT_TEXT_MAX_CHARS must be >= 500, got {value}"
+        )
+    return value
 
 
 def _truncate_text(value: str, limit: int) -> str:

@@ -9,6 +9,8 @@ from time import time
 
 from pydantic import BaseModel, Field
 
+from app.core.exceptions import StoreError
+
 
 ID_PATTERN = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}$")
 
@@ -92,14 +94,28 @@ class KnowledgeBaseCatalog:
         return self.get(kb_id) is not None
 
     def _load_unlocked(self) -> _CatalogPayload:
+        """Load the catalog, or raise if it exists but cannot be parsed.
+
+        Returning an empty payload here was silently destructive: __init__ then
+        re-saved it, replacing every knowledge base with the seed defaults. A
+        corrupt catalog is a data-integrity failure and must be repaired by an
+        operator, not overwritten by a retry.
+        """
         if not self.path.exists():
             return _CatalogPayload()
         try:
-            return _CatalogPayload.model_validate(
-                json.loads(self.path.read_text(encoding="utf-8"))
-            )
-        except (OSError, json.JSONDecodeError, ValueError):
-            return _CatalogPayload()
+            raw = self.path.read_text(encoding="utf-8")
+        except OSError as exc:
+            raise StoreError(
+                f"knowledge base catalog {self.path} is unreadable: {exc}"
+            ) from exc
+        try:
+            return _CatalogPayload.model_validate(json.loads(raw))
+        except (json.JSONDecodeError, ValueError) as exc:
+            raise StoreError(
+                f"knowledge base catalog {self.path} is corrupt and was NOT "
+                f"overwritten (repair or remove it explicitly): {exc}"
+            ) from exc
 
     def _save_unlocked(self, payload: _CatalogPayload) -> None:
         tmp_path = self.path.with_suffix(".json.tmp")

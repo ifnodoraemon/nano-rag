@@ -27,3 +27,11 @@ class StoreError(RuntimeError):
     """Persistent-store integrity failure (corrupt job records, unwritable
     state files). Never swallowed: a corrupt record must surface, not
     masquerade as "not found"."""
+
+
+class DiagnosisError(RuntimeError):
+    """A diagnosis stage failed (for example the optional AI suggestion call).
+
+    Raised instead of returning a partial diagnosis with the upstream error
+    text embedded in a 200 response.
+    """

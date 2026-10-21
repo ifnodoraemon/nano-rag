@@ -5,6 +5,7 @@ import logging
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+from app.core.exceptions import DiagnosisError, StoreError
 from app.schemas.diagnosis import DiagnosisFinding, DiagnosisResponse
 from app.schemas.trace import TraceRecord
 
@@ -207,10 +208,17 @@ class DiagnosisService:
     def diagnose_eval_result(
         self, report: dict[str, object], result_index: int
     ) -> DiagnosisResponse:
-        results = report.get("results", []) if isinstance(report, dict) else []
+        raw_results: object = report.get("results", []) if isinstance(report, dict) else []
+        if not isinstance(raw_results, list):
+            raise StoreError(
+                "eval report has a malformed 'results' field (expected a list)"
+            )
+        results = raw_results
         if result_index < 0 or result_index >= len(results):
             raise IndexError(f"eval result index out of range: {result_index}")
         result = results[result_index]
+        if not isinstance(result, dict):
+            raise StoreError("eval report row is not an object")
         findings: list[DiagnosisFinding] = []
 
         exact_match = float(result.get("answer_exact_match", 0.0) or 0.0)
@@ -307,7 +315,13 @@ class DiagnosisService:
         try:
             result = await self.generation_client.generate(messages)
             suggestion = str(result.get("content", "")).strip() or None
-        except Exception as exc:  # pragma: no cover
-            logger.warning("ai diagnosis suggestion failed: %s", exc)
-            suggestion = f"AI diagnosis unavailable: {exc}"
+        except Exception as exc:  # pragma: no cover - provider failure
+            # Log the detail server-side; never echo raw upstream error text to
+            # the caller (provider 4xx bodies can contain the key or URL), and
+            # never present a failed AI call as a diagnosis result.
+            logger.exception("ai diagnosis suggestion failed")
+            raise DiagnosisError(
+                "AI diagnosis suggestion failed; retry with include_ai disabled "
+                "or check the generation provider configuration."
+            ) from exc
         return diagnosis.model_copy(update={"ai_suggestion": suggestion})

@@ -49,7 +49,8 @@ class TraceRecord(BaseModel):
 
 class RetrievalDebugResponse(BaseModel):
     query: str
+    # Discovery output. There is no rerank stage in this build, so no
+    # ``reranked`` copy is emitted (it would imply a step that never ran).
     retrieved: list[dict]
-    reranked: list[dict]
     contexts: list[dict]
     trace_id: str | None = None

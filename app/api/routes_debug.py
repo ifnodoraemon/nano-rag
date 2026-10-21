@@ -238,7 +238,6 @@ async def retrieve_debug(
     return RetrievalDebugResponse(
         query=payload.query,
         retrieved=contexts,
-        reranked=contexts,
         contexts=contexts,
         trace_id=str(trace.get("trace_id")),
     )

@@ -1,6 +1,7 @@
 import re
 
 from app.schemas.chat import ChatResponse, Citation, SupportingClaim
+from app.utils.coerce import as_float
 
 EVIDENCE_PRIORITY = {"primary": 0, "supporting": 1, "conflicting": 2}
 EVIDENCE_SUMMARY_TITLES = {
@@ -9,14 +10,26 @@ EVIDENCE_SUMMARY_TITLES = {
     "conflicting": "Conflicting evidence",
 }
 MAX_SPAN_TEXT_CHARS = 180
+# Contract literals for SupportingClaim.claim_type; anything the model emits
+# outside this set is normalised instead of raising ValidationError and losing
+# the whole answer.
+CLAIM_TYPES = {
+    "factual": "factual",
+    "conditional": "conditional",
+    "conflict": "conflict",
+    "insufficiency": "insufficiency",
+}
 SENTENCE_SPLIT_RE = re.compile(r"(?<=[\.\!\?。！？；;])\s+|\n+")
 TOKEN_RE = re.compile(r"[A-Za-z0-9_]+")
 CJK_SEQUENCE_RE = re.compile(r"[\u4e00-\u9fff\u3400-\u4dbf\uf900-\ufaff]+")
 CITATION_LABEL_RE = re.compile(r"\[(C\d+)\]")
 CITATION_GROUP_RE = re.compile(r"\[((?:C\d+\s*,\s*)*C\d+)\]")
 NUMBER_RE = re.compile(r"\d[\d,]*(?:\.\d+)?")
+# Anchored on "Final Answer" only. Matching a bare "Answer:" meant any answer
+# line starting with that word (or a paraphrase the model produced) truncated
+# everything before it and silently dropped the real content.
 FINAL_ANSWER_SECTION_RE = re.compile(
-    r"(?:^|\n)(?:#{1,6}\s*)?(?:Final Answer|Answer)\s*:\s*\n?(.*?)(?=\n(?:#{1,6}\s*)?Supporting Claims\s*:|\Z)",
+    r"(?:^|\n)(?:#{1,6}\s*)?Final Answer\s*:\s*\n?(.*?)(?=\n(?:#{1,6}\s*)?Supporting Claims\s*:|\Z)",
     re.IGNORECASE | re.DOTALL,
 )
 SUPPORTING_CLAIMS_SECTION_RE = re.compile(
@@ -37,7 +50,7 @@ class AnswerFormatter:
             contexts,
             key=lambda item: (
                 EVIDENCE_PRIORITY.get(str(item.get("evidence_role")), 3),
-                -float(item.get("score", 0.0) or 0.0),
+                -as_float(item.get("score")),
             ),
         )
         citations_by_chunk: dict[str, Citation] = {}
@@ -58,17 +71,11 @@ class AnswerFormatter:
                     node_id=str(context.get("node_id"))
                     if context.get("node_id") is not None
                     else chunk_id,
-                    source=str(context["source"]),
-                    score=float(context["score"]),
-                    page_number=int(context["page_number"])
-                    if context.get("page_number") is not None
-                    else None,
-                    hierarchy_path=[
-                        str(item) for item in context.get("hierarchy_path", []) or []
-                    ],
-                    bounding_box=context.get("bounding_box")
-                    if isinstance(context.get("bounding_box"), dict)
-                    else None,
+                    source=str(context.get("source") or context.get("source_path") or ""),
+                    score=_safe_float(context.get("score")),
+                    page_number=_safe_int(context.get("page_number")),
+                    hierarchy_path=_string_path(context.get("hierarchy_path")),
+                    bounding_box=_optional_dict(context.get("bounding_box")),
                     evidence_role=str(context.get("evidence_role"))
                     if context.get("evidence_role") is not None
                     else None,
@@ -341,7 +348,7 @@ class AnswerFormatter:
                 continue
             claims.append(
                 SupportingClaim(
-                    claim_type=claim_type,
+                    claim_type=CLAIM_TYPES.get(str(claim_type).lower(), "factual"),  # type: ignore[arg-type]
                     text=claim_text,
                     citation_labels=citation_labels,
                 )
@@ -465,3 +472,30 @@ def _is_informative_token(token: str) -> bool:
     if any(ord(char) > 127 for char in token):
         return len(token) >= 2
     return len(token) >= 4
+
+
+def _optional_dict(value: object) -> dict[str, object] | None:
+    return value if isinstance(value, dict) else None
+
+
+def _string_path(value: object) -> list[str]:
+    """hierarchy_path is a list of headings; anything else becomes empty."""
+    if isinstance(value, list):
+        return [str(item) for item in value if str(item).strip()]
+    return []
+
+
+def _safe_float(value: object) -> float:
+    """Numeric context fields may be missing or stringly-typed; never 500."""
+    return as_float(value)
+
+
+def _safe_int(value: object) -> int | None:
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float, str)):
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return None
+    return None

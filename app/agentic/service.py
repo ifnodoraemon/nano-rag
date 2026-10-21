@@ -250,7 +250,6 @@ class AgenticReasoningService:
         }
 
     async def _verification_node(self, state: AgentState) -> AgentState:
-        payload = state["payload"]
         query = self._query_of(state)
         with self.tracing_manager.span("agent.verification", {"agent.query": query}):
             check = await self._verify(
@@ -600,16 +599,8 @@ class AgenticReasoningService:
         payload = parse_json_object(str(result.get("content") or ""))
         sufficient = self._parse_bool(payload.get("sufficient"))
         coverage_ratio = self._float_in_range(payload.get("coverage_ratio"), 0.0, 1.0)
-        missing = [
-            str(item).strip()
-            for item in payload.get("missing_terms", [])
-            if str(item).strip()
-        ]
-        follow_up_queries = [
-            str(item).strip()
-            for item in payload.get("follow_up_queries", [])
-            if str(item).strip()
-        ]
+        missing = self._string_list_field(payload, "missing_terms")
+        follow_up_queries = self._string_list_field(payload, "follow_up_queries")
         return EvidenceCheck(
             sufficient=sufficient,
             coverage_ratio=round(coverage_ratio, 3),
@@ -675,21 +666,47 @@ class AgenticReasoningService:
             )
         return compacted
 
+    def _string_list_field(self, payload: dict[str, object], key: str) -> list[str]:
+        """Read a JSON array of strings, failing loudly on any other shape."""
+        raw = payload.get(key, [])
+        if not isinstance(raw, list):
+            raise ModelOutputError(f"evidence verification {key} must be an array")
+        return [str(item).strip() for item in raw if str(item).strip()]
+
     def _float_in_range(self, value: object, minimum: float, maximum: float) -> float:
+        """Coerce a string/number the model may have emitted as JSON text.
+
+        A non-numeric value is a contract violation, not a 0.0 measurement:
+        silently defaulting made an unparseable audit look like "zero coverage"
+        and quietly drove an extra retrieval loop.
+        """
+        if isinstance(value, bool) or not isinstance(value, (int, float, str)):
+            raise ModelOutputError(
+                f"evidence verification coverage_ratio must be a number, got {value!r}"
+            )
         try:
             number = float(value)
-        except (TypeError, ValueError):
-            return minimum
+        except (TypeError, ValueError) as exc:
+            raise ModelOutputError(
+                f"evidence verification coverage_ratio must be a number, got {value!r}"
+            ) from exc
         return max(minimum, min(maximum, number))
 
     def _parse_bool(self, value: object) -> bool:
+        """Coerce a JSON-ish boolean; anything else is a contract violation."""
         if isinstance(value, bool):
             return value
+        if isinstance(value, int) and value in (0, 1):
+            return bool(value)
         if isinstance(value, str):
-            return value.strip().casefold() in {"true", "1", "yes"}
-        if isinstance(value, int | float):
-            return value != 0
-        return False
+            token = value.strip().casefold()
+            if token in {"true", "1", "yes"}:
+                return True
+            if token in {"false", "0", "no"}:
+                return False
+        raise ModelOutputError(
+            f"evidence verification sufficient must be a boolean, got {value!r}"
+        )
 
     def _dedupe(self, items: list[str]) -> list[str]:
         deduped: list[str] = []
