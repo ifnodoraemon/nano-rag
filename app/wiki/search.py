@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import os
 import threading
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -60,9 +61,34 @@ class WikiSearcher:
         self._page_mtimes: dict[str, int] = {}
         self._path_doc_ids: dict[str, str] = {}
         self._kb_page_counts: dict[str, int] = {}
+        self._kb_doc_ids: dict[str, set[str]] = {}
         self._max_pages_per_kb = self._max_pages_per_kb_config()
+        # Detecting on-disk changes needs one stat() per page, so a per-query
+        # scan costs ~7.5us/page (measured): at the 50k-page capacity that is
+        # ~370ms of pure syscall overhead per search, serialized behind the
+        # index lock. Coalesce the scan to at most once per window; hits within
+        # the window serve the already-synced index. Same-process ingest calls
+        # sync() explicitly, so freshness is not delayed there.
+        self._sync_interval_seconds = self._sync_interval_config()
+        self._last_sync_monotonic: float | None = None
+        self._last_dir_signature: tuple[tuple[str, int], ...] | None = None
         self._lock = threading.RLock()
         self.refresh()
+
+    @staticmethod
+    def _sync_interval_config() -> float:
+        raw = os.getenv("RAG_WIKI_SYNC_INTERVAL_SECONDS", "1.0")
+        try:
+            value = float(raw)
+        except ValueError as exc:
+            raise RetrievalError(
+                f"RAG_WIKI_SYNC_INTERVAL_SECONDS must be a number, got {raw!r}: {exc}"
+            ) from exc
+        if value < 0:
+            raise RetrievalError(
+                f"RAG_WIKI_SYNC_INTERVAL_SECONDS must be >= 0, got {raw!r}"
+            )
+        return value
 
     @staticmethod
     def _max_documents() -> int:
@@ -91,26 +117,61 @@ class WikiSearcher:
     def _collect_page_mtimes(self) -> dict[str, int]:
         """The on-disk page set as {path: mtime_ns} for the directories that
         are actually indexed. Cheap (a few directories) and covers additions,
-        edits, and removals — mtime alone would miss deletions."""
+        edits, and removals — mtime alone would miss deletions.
+
+        Only ``*.md`` files that are not hidden are pages. Anything else in
+        these directories (staging files from an interrupted atomic write,
+        editor swap files, ``.DS_Store``) is not a page and must not be
+        validated as one: a leftover staging file used to raise "unreadable
+        frontmatter" on every search and on every process start.
+        """
         snapshot: dict[str, int] = {}
         for directory in (self.sources_dir, self.topics_dir, self.indexes_dir):
             if not directory.exists():
                 continue
             for path in directory.iterdir():
-                if path.is_file():
-                    try:
-                        snapshot[str(path)] = path.stat().st_mtime_ns
-                    except OSError:
-                        continue
+                if not path.is_file():
+                    continue
+                if path.suffix != ".md" or path.name.startswith("."):
+                    continue
+                try:
+                    snapshot[str(path)] = path.stat().st_mtime_ns
+                except OSError:
+                    continue
         return snapshot
 
-    def _sync_if_stale(self) -> None:
+    def _dir_signature(self) -> tuple[tuple[str, int], ...]:
+        """Cheap (3 stat) signal that pages were created or deleted.
+
+        Directory mtime changes on create/unlink, so an ingest in another
+        process is visible on the next search without stat-ing every page.
+        Content-only overwrites keep the directory mtime; those are caught by
+        the sync window (or by an explicit sync() from the writing process).
+        """
+        signature: list[tuple[str, int]] = []
+        for directory in (self.sources_dir, self.topics_dir, self.indexes_dir):
+            try:
+                signature.append((str(directory), directory.stat().st_mtime_ns))
+            except OSError:
+                signature.append((str(directory), -1))
+        return tuple(signature)
+
+    def _pages_touched_on_disk(self) -> bool:
+        return self._dir_signature() != self._last_dir_signature
+
+    def _sync_if_stale(self, *, force: bool = False) -> None:
         # The in-memory BM25 index is process-local, but the wiki directory is
         # shared across processes: in the standard runtime the Celery ingest
         # worker writes pages while the app serves search. Re-index only the
         # delta since the last sync — otherwise the app stays blind to every
         # document ingested after it started (or burns the whole corpus
         # re-indexing on every search during ingest).
+        if not force and not self._pages_touched_on_disk():
+            last = self._last_sync_monotonic
+            if last is not None and (time.monotonic() - last) < self._sync_interval_seconds:
+                return
+        self._last_sync_monotonic = time.monotonic()
+        self._last_dir_signature = self._dir_signature()
         current = self._collect_page_mtimes()
         if current == self._page_mtimes:
             return
@@ -122,6 +183,17 @@ class WikiSearcher:
                 self._index_page(Path(path_str))
         self._page_mtimes = current
 
+    def sync(self, *, force: bool = True) -> None:
+        """Incrementally re-index on-disk page changes.
+
+        Called by the ingest path after writing pages (same process) so a
+        freshly ingested document is discoverable immediately instead of
+        waiting out the sync window.
+        """
+        with self._lock:
+            self._sync_if_stale(force=force)
+
+
     def refresh(self) -> None:
         """Full rebuild (startup, worker-side post-ingest verification)."""
         with self._lock:
@@ -130,16 +202,25 @@ class WikiSearcher:
             self._page_mtimes.clear()
             self._path_doc_ids.clear()
             self._kb_page_counts.clear()
+            self._kb_doc_ids.clear()
             if not self.root_dir.exists():
                 return
-            for path_str in sorted(self._collect_page_mtimes()):
+            # Record the SAME snapshot that was indexed. Re-collecting after
+            # the loop would mark a page created in between as "already
+            # indexed" and hide it from every future sync until it changed
+            # again — a silently unretrievable document.
+            snapshot = self._collect_page_mtimes()
+            for path_str in sorted(snapshot):
                 self._index_page(Path(path_str))
-            self._page_mtimes = self._collect_page_mtimes()
+            self._page_mtimes = snapshot
+            self._last_sync_monotonic = time.monotonic()
+            self._last_dir_signature = self._dir_signature()
 
     def stats(self) -> dict[str, object]:
         """Storage summary for the debug endpoints."""
         with self._lock:
-            self._sync_if_stale()
+            # Ops views must reflect disk now, not the coalesced view.
+            self._sync_if_stale(force=True)
             kinds: dict[str, int] = {}
             for document in self.documents.values():
                 kinds[document.kind] = kinds.get(document.kind, 0) + 1
@@ -163,16 +244,27 @@ class WikiSearcher:
         with self._lock:
             self._sync_if_stale()
             scope_id = WikiCompiler.scope_id(kb_id=kb_id)
-            allowed_doc_ids = {
-                doc_id
-                for doc_id, document in self.documents.items()
-                if document.kb_id == kb_id
-                and match_metadata_filters(document.metadata, metadata_filters)
-                and (
-                    document.kind in {"topic", "source"}
-                    or doc_id == f"wiki:index:{scope_id}"
-                )
-            }
+            index_doc_id = f"wiki:index:{scope_id}"
+            # Per-KB doc id sets are maintained incrementally: rebuilding the
+            # allowed set by scanning every document made every search O(corpus)
+            # even when the index itself was untouched.
+            kb_doc_ids: set[str] | frozenset[str] = self._kb_doc_ids.get(
+                kb_id, frozenset()
+            )
+            allowed_doc_ids: set[str] | frozenset[str]
+            if metadata_filters:
+                allowed_doc_ids = {
+                    doc_id
+                    for doc_id in kb_doc_ids
+                    if (document := self.documents.get(doc_id)) is not None
+                    and match_metadata_filters(document.metadata, metadata_filters)
+                    and (
+                        document.kind in {"topic", "source"}
+                        or doc_id == index_doc_id
+                    )
+                }
+            else:
+                allowed_doc_ids = kb_doc_ids
             if not allowed_doc_ids:
                 return []
             results = self.index.search(
@@ -235,6 +327,12 @@ class WikiSearcher:
         if doc_id is None:
             return
         document = self.documents.pop(doc_id, None)
+        if document is not None:
+            kb_docs = self._kb_doc_ids.get(document.kb_id)
+            if kb_docs is not None:
+                kb_docs.discard(doc_id)
+                if not kb_docs:
+                    self._kb_doc_ids.pop(document.kb_id, None)
         if document is not None and document.kind == "source":
             self._kb_page_counts[document.kb_id] = (
                 self._kb_page_counts.get(document.kb_id, 1) - 1
@@ -262,6 +360,7 @@ class WikiSearcher:
             self._kb_page_counts[document.kb_id] = count
         self._path_doc_ids[str(path)] = doc_id
         self.documents[doc_id] = document
+        self._kb_doc_ids.setdefault(document.kb_id, set()).add(doc_id)
         self.index.add_document(doc_id, document.body)
 
     def _index_source_page(self, page_path: Path) -> None:
@@ -290,6 +389,14 @@ class WikiSearcher:
 
     def _index_topic_page(self, page_path: Path) -> None:
         metadata, body = WikiCompiler.read_frontmatter(page_path)
+        if not metadata:
+            # Same rule as source pages: a topic page whose frontmatter cannot
+            # be read is corrupt. Indexing it with empty metadata would silently
+            # attribute it to kb_id "default" and leak it into that scope.
+            raise RetrievalError(
+                f"wiki topic page {page_path} has unreadable frontmatter; "
+                "the page is corrupt and must be recompiled"
+            )
         kb_id = str(metadata.get("kb_id", "default"))
         topic_name = str(metadata.get("topic", page_path.stem))
         doc_id = f"wiki:topic:{page_path.stem}"

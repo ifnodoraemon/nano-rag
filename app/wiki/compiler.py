@@ -5,16 +5,19 @@ import hashlib
 import json
 import os
 import re
+import time
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Generator
+from uuid import uuid4
 
 import yaml
 from pydantic import ValidationError
 
 from app.core.exceptions import ParsingError, RetrievalError
 from app.retrieval.versioning import version_sort_key
+from app.utils.coerce import as_int, as_list, as_str, as_str_list
 from app.schemas.chunk import Chunk
 from app.schemas.document import Document
 
@@ -55,6 +58,8 @@ class WikiCompiler:
         self.topics_dir = self.root_dir / "topics"
         self.indexes_dir = self.root_dir / "indexes"
         self._ensure_structure()
+        self.cleanup_stale_staging()
+        self._cleanup_legacy_staging()
 
     # ------------------------------------------------------------------ #
     # Public API (all take the cross-process lock)                        #
@@ -147,7 +152,11 @@ class WikiCompiler:
             return 0
         with self._cross_process_lock():
             for document, chunks in parsed:
-                self._write_source_page(document, chunks)
+                # Startup rebuild: keep identical pages byte-for-byte
+                # unchanged. Rewriting them would churn mtimes, which is
+                # exactly what forces the query-side searcher into a full
+                # re-index on every container start.
+                self._write_source_page(document, chunks, write_if_unchanged=True)
             ledger = self._rebuild_ledger_from_pages()
             self._apply_version_chain(ledger)
             self._write_index()
@@ -169,10 +178,65 @@ class WikiCompiler:
             fcntl.flock(lock_fd, fcntl.LOCK_UN)
             os.close(lock_fd)
 
+    def _tmp_dir(self) -> Path:
+        """Staging directory for atomic writes.
+
+        Deliberately OUTSIDE sources/topics/indexes: the query-side searcher
+        indexes every file it finds in those directories, so a staging file
+        left behind by a crash (worker SIGKILL, OOM, docker kill) used to be
+        parsed as a page, raise "unreadable frontmatter", and take down both
+        search and process startup until an operator deleted it by hand.
+        """
+        tmp_dir = self.root_dir / ".staging"
+        tmp_dir.mkdir(parents=True, exist_ok=True)
+        return tmp_dir
+
     def _write_atomic(self, path: Path, content: str) -> None:
-        tmp_path = path.with_name(f".{path.name}.tmp")
-        tmp_path.write_text(content, encoding="utf-8")
-        os.replace(str(tmp_path), str(path))
+        tmp_path = self._tmp_dir() / f"{path.name}.{uuid4().hex}.tmp"
+        try:
+            tmp_path.write_text(content, encoding="utf-8")
+            os.replace(str(tmp_path), str(path))
+        except BaseException:
+            tmp_path.unlink(missing_ok=True)
+            raise
+
+    def _cleanup_legacy_staging(self) -> int:
+        """Remove ``.*.tmp`` files left inside the page directories by builds
+        that staged next to the target. They can never be pages (pages end in
+        ``.md``), and the searcher no longer indexes them, but leaving them
+        would leak whatever a crashed worker was writing."""
+        removed = 0
+        for directory in (self.sources_dir, self.topics_dir, self.indexes_dir):
+            if not directory.exists():
+                continue
+            for path in directory.glob(".*.tmp"):
+                try:
+                    path.unlink(missing_ok=True)
+                    removed += 1
+                except OSError:
+                    continue
+        return removed
+
+    def cleanup_stale_staging(self, *, max_age_seconds: float = 3600.0) -> int:
+        """Drop abandoned staging files (a crash between write and rename).
+
+        Returns the number of files removed. Staging is outside the indexed
+        directories, so this is pure garbage collection — but leaving them to
+        accumulate forever is still a leak.
+        """
+        tmp_dir = self.root_dir / ".staging"
+        if not tmp_dir.exists():
+            return 0
+        cutoff = time.time() - max_age_seconds
+        removed = 0
+        for path in tmp_dir.glob("*.tmp"):
+            try:
+                if path.stat().st_mtime < cutoff:
+                    path.unlink(missing_ok=True)
+                    removed += 1
+            except OSError:
+                continue
+        return removed
 
     # ------------------------------------------------------------------ #
     # Version ledger                                                      #
@@ -240,7 +304,7 @@ class WikiCompiler:
                 del groups[previous_group]
         key = self._group_key(metadata.get("kb_id", "default"), source_key)
         group = groups.setdefault(key, {"members": {}})
-        members: dict[str, dict[str, object]] = group["members"]  # type: ignore[assignment]
+        members = group["members"]  # type: ignore[assignment]
         members[doc_id] = {
             "effective_date": metadata.get("effective_date"),
             "version": metadata.get("version"),
@@ -400,15 +464,49 @@ class WikiCompiler:
         }
 
     def _write_source_page(
-        self, document: Document, chunks: list[Chunk]
+        self,
+        document: Document,
+        chunks: list[Chunk],
+        *,
+        write_if_unchanged: bool = False,
     ) -> dict[str, object]:
-        """Write one source page and return its metadata (no chain/index/log)."""
+        """Write one source page and return its metadata (no chain/index/log).
+
+        ``write_if_unchanged`` (bootstrap only) preserves ``updated_at`` and
+        skips the write when the rendered page is identical, so a restart does
+        not churn mtimes for the whole corpus.
+        """
         metadata = self._build_page_metadata(document, chunks)
         page_path = self.sources_dir / f"{document.doc_id}.md"
-        self._write_page(
-            page_path, metadata, self._render_source_body(document, chunks, metadata)
-        )
+        if write_if_unchanged:
+            existing, _body = self._read_frontmatter(page_path) if page_path.exists() else ({}, "")
+            if (
+                existing
+                and existing.get("content_hash") == metadata.get("content_hash")
+                and existing.get("source_key") == metadata.get("source_key")
+                and existing.get("updated_at")
+            ):
+                metadata["updated_at"] = existing["updated_at"]
+        body = self._render_source_body(document, chunks, metadata)
+        if write_if_unchanged:
+            self._write_page_unchanged(page_path, metadata, body)
+        else:
+            self._write_page(page_path, metadata, body)
         return metadata
+
+    def _write_page_unchanged(
+        self, path: Path, metadata: dict[str, object], body: str
+    ) -> None:
+        frontmatter = yaml.safe_dump(
+            metadata,
+            allow_unicode=True,
+            sort_keys=False,
+            default_flow_style=False,
+        ).strip()
+        content = "\n".join(
+            [FRONTMATTER_BOUNDARY, frontmatter, FRONTMATTER_BOUNDARY, "", body, ""]
+        )
+        self._write_index_file(path, content)
 
     def _write_page(self, path: Path, metadata: dict[str, object], body: str) -> None:
         frontmatter = yaml.safe_dump(
@@ -427,7 +525,7 @@ class WikiCompiler:
     def _render_source_body(
         self, document: Document, chunks: list[Chunk], metadata: dict[str, object]
     ) -> str:
-        headings = metadata.get("headings", []) or []
+        headings = as_list(metadata.get("headings"))
         summary = str(metadata.get("summary", "")) or "No summary available."
         lines = [
             f"# {document.title}",
@@ -448,7 +546,7 @@ class WikiCompiler:
         else:
             lines.append("- No explicit markdown headings detected.")
         lines.extend(["", "## Key Passages"])
-        key_passages = metadata.get("key_passages", []) or []
+        key_passages = as_list(metadata.get("key_passages"))
         if key_passages:
             for index, passage in enumerate(key_passages):
                 chunk_id = chunks[index].chunk_id if index < len(chunks) else f"{document.doc_id}:{index}"
@@ -527,7 +625,7 @@ class WikiCompiler:
     def _render_index_entry(self, metadata: dict[str, object], body: str) -> str:
         title = str(metadata.get("title", metadata.get("doc_id", "Untitled")))
         source_path = str(metadata.get("source_path", ""))
-        chunk_count = int(metadata.get("chunk_count", 0))
+        chunk_count = as_int(metadata.get("chunk_count"))
         summary = str(metadata.get("summary", "")) or self._extract_summary(body)
         page_name = f"{metadata.get('doc_id')}.md"
         return (
@@ -575,7 +673,7 @@ class WikiCompiler:
     def _render_scoped_index_entry(self, metadata: dict[str, object], body: str) -> str:
         title = str(metadata.get("title", metadata.get("doc_id", "Untitled")))
         source_path = str(metadata.get("source_path", ""))
-        chunk_count = int(metadata.get("chunk_count", 0))
+        chunk_count = as_int(metadata.get("chunk_count"))
         summary = str(metadata.get("summary", "")) or self._extract_summary(body)
         page_name = f"{metadata.get('doc_id')}.md"
         return (
@@ -594,30 +692,25 @@ class WikiCompiler:
     def _write_topic_pages(
         self, grouped: dict[str, list[tuple[dict[str, object], str]]]
     ) -> list[dict[str, str]]:
-        grouped_topics: dict[tuple[str, str], list[dict[str, str]]] = {}
+        grouped_topics: dict[tuple[str, str], list[dict[str, object]]] = {}
         for _kb_id, records in grouped.items():
             for metadata, body in records:
                 kb_id = str(metadata.get("kb_id", "default"))
                 doc_id = str(metadata.get("doc_id", "unknown"))
                 title = str(metadata.get("title", doc_id))
                 summary = str(metadata.get("summary", "")) or self._extract_summary(body)
-                headings = metadata.get("headings", [])
-                key_passages = [
-                    str(item).strip()
-                    for item in (metadata.get("key_passages", []) or [])
-                    if str(item).strip()
-                ]
+                headings = as_list(metadata.get("headings"))
+                key_passages = as_str_list(metadata.get("key_passages"))
                 for topic_name in self._extract_topic_names(title, headings):
-                    grouped_topics.setdefault((kb_id, topic_name), []).append(
-                        {
-                            "doc_id": doc_id,
-                            "title": title,
-                            "source_path": str(metadata.get("source_path", "")),
-                            "summary": summary,
-                            "key_passages": key_passages,
-                            "doc_type": str(metadata.get("doc_type", "")),
-                        }
-                    )
+                    entry: dict[str, object] = {
+                        "doc_id": doc_id,
+                        "title": title,
+                        "source_path": str(metadata.get("source_path", "")),
+                        "summary": summary,
+                        "key_passages": key_passages,
+                        "doc_type": str(metadata.get("doc_type", "")),
+                    }
+                    grouped_topics.setdefault((kb_id, topic_name), []).append(entry)
 
         written_topics: list[dict[str, str]] = []
         wanted: set[str] = set()
@@ -628,7 +721,11 @@ class WikiCompiler:
             slug = self._topic_slug(kb_id, topic_name)
             wanted.add(f"{slug}.md")
             summary = self._preview(
-                " ".join(entry["summary"] for entry in entries if entry["summary"]),
+                " ".join(
+                    as_str(entry.get("summary"))
+                    for entry in entries
+                    if as_str(entry.get("summary"))
+                ),
                 MAX_SUMMARY_CHARS,
             )
             content = self._render_topic_page(
@@ -657,7 +754,7 @@ class WikiCompiler:
         self,
         topic_name: str,
         kb_id: str,
-        entries: list[dict[str, str]],
+        entries: list[dict[str, object]],
         summary: str,
     ) -> str:
         facts = self._build_topic_facts(topic_name, entries)
@@ -668,9 +765,9 @@ class WikiCompiler:
                 "kb_id": kb_id,
                 "doc_types": sorted(
                     {
-                        entry["doc_type"]
+                        as_str(entry.get("doc_type"))
                         for entry in entries
-                        if entry.get("doc_type")
+                        if as_str(entry.get("doc_type"))
                     }
                 ),
                 "source_count": len(entries),
@@ -707,7 +804,8 @@ class WikiCompiler:
         )
         for entry in entries[:MAX_TOPIC_ENTRIES]:
             lines.append(
-                f"- [{entry['title']}](../sources/{entry['doc_id']}.md) — {self._preview(entry['summary'], MAX_INDEX_SUMMARY_CHARS)} "
+                f"- [{as_str(entry.get('title'))}](../sources/{as_str(entry.get('doc_id'))}.md) — "
+                f"{self._preview(as_str(entry.get('summary')), MAX_INDEX_SUMMARY_CHARS)} "
                 f"(source: `{entry['source_path']}`)"
             )
         return "\n".join(lines).strip() + "\n"
@@ -859,12 +957,8 @@ class WikiCompiler:
         seen: set[str] = set()
         for entry in entries:
             candidate_texts = [
-                str(entry.get("summary", "")).strip(),
-                *[
-                    str(item).strip()
-                    for item in (entry.get("key_passages", []) or [])
-                    if str(item).strip()
-                ],
+                as_str(entry.get("summary")).strip(),
+                *as_str_list(entry.get("key_passages")),
             ]
             for candidate in candidate_texts:
                 if not candidate:
@@ -900,3 +994,6 @@ class WikiCompiler:
         if len(normalized) <= limit:
             return normalized
         return normalized[: limit - 3].rstrip() + "..."
+
+
+

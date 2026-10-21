@@ -99,10 +99,35 @@ def infer_doc_type(source_path: str, title: str, text: str) -> str:
     return "document"
 
 
-def build_source_key(source_path: str, title: str) -> str:
-    candidate = title.strip() or source_path.rsplit("/", 1)[-1]
-    candidate = re.sub(r"\.[A-Za-z0-9]+$", "", candidate)
+def _strip_version_tokens(value: str) -> str:
+    candidate = re.sub(r"\.[A-Za-z0-9]+$", "", value)
+    # Normalize separators FIRST: "Policy_v2" has no \b before the "v"
+    # (underscore is a word character), so the version token would survive and
+    # the v2 update would not group with its v1 sibling.
+    candidate = re.sub(r"[_\-/]+", " ", candidate)
     candidate = SOURCE_KEY_SUFFIX_RE.sub(" ", candidate)
+    return candidate
+
+
+def build_source_key(source_path: str, title: str) -> str:
+    """Version-group key for a document: ``<parent dir>/<title>``.
+
+    The parent directory is part of the identity on purpose. Keying on the
+    title alone made ``reports/spec.pdf`` and ``contracts/spec.pdf`` land in
+    the same source_key group; the version ledger then declared one the
+    superseded version of the other, and the version filter silently dropped
+    it from retrieval — a document that was ingested and indexed but could
+    never be found.
+    """
+    title_part = _strip_version_tokens(title.strip() or source_path.rsplit("/", 1)[-1])
+    parent = source_path.replace("\\", "/").rsplit("/", 1)[0] if "/" in source_path else ""
+    if parent:
+        # The leaf directory is enough to disambiguate; the full path would be
+        # brittle against re-rooted ingest roots.
+        parent_part = parent.rstrip("/").rsplit("/", 1)[-1]
+        candidate = f"{parent_part} {title_part}"
+    else:
+        candidate = title_part
     candidate = re.sub(r"[_\-/]+", " ", candidate)
     candidate = re.sub(r"\s+", " ", candidate).strip().lower()
     return candidate or "document"

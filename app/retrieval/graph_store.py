@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import json
 import os
+from collections.abc import Sequence
 from typing import Protocol
 
 from psycopg.rows import dict_row
-from psycopg_pool import ConnectionPool
+from psycopg_pool import ConnectionPool, PoolTimeout
 
 from app.core.exceptions import ConfigurationError
 from app.schemas.structured import ENTITY_ID_PREFIX, StructuredDocument
@@ -31,6 +32,10 @@ class GraphStore(Protocol):
     def stats(self) -> dict[str, object]: ...
 
     def close(self) -> None: ...
+
+    # Called by the ingest pipeline once per batch (not part of the per-document
+    # hot path); declaring it keeps the protocol honest for any implementation.
+    def collect_orphan_entities(self) -> int: ...
 
 
 _SCHEMA_STATEMENTS = (
@@ -120,6 +125,10 @@ SELECT target_id, relation_type FROM (
     JOIN seeds s ON r.target_id = s.node_id
     WHERE r.kb_id = %(kb_id)s
 ) expanded
+-- ORDER BY before LIMIT: without it the LIMIT kept an arbitrary subset, so
+-- the same query could expand to different neighbors on different runs and a
+-- cut-off at the limit was not reproducible.
+ORDER BY relation_type, target_id
 LIMIT %(expand_limit)s
 """
 
@@ -130,6 +139,7 @@ JOIN graph_node n ON n.node_id = ne.node_id
 WHERE ne.entity_id = ANY(%(entity_ids)s)
   AND n.kb_id = %(kb_id)s
   AND ne.node_id <> ALL(%(seed_node_ids)s)
+ORDER BY ne.entity_id, ne.node_id
 LIMIT %(expand_limit)s
 """
 
@@ -221,16 +231,29 @@ class PostgresGraphStore:
                 f"RAG_PG_POOL_MAX ({self.pool_max}) must be >= RAG_PG_POOL_MIN "
                 f"({self.pool_min})"
             )
+        connect_timeout = _pool_timeout_from_env("RAG_PG_CONNECT_TIMEOUT_SECONDS", 10.0)
         self._pool = ConnectionPool(
             conninfo=uri,
             min_size=self.pool_min,
             max_size=self.pool_max,
             kwargs={"row_factory": dict_row},
+            # Bound how long a caller waits for a connection: the library
+            # default is 30s, which turns an unreachable database into a
+            # 30-second startup hang before the (correct) failure surfaces.
+            timeout=connect_timeout,
         )
-        with self._pool.connection() as conn:
-            conn.execute("SELECT 1")
-            for statement in _SCHEMA_STATEMENTS:
-                conn.execute(statement)
+        try:
+            with self._pool.connection(timeout=connect_timeout) as conn:
+                conn.execute("SELECT 1")
+                for statement in _SCHEMA_STATEMENTS:
+                    conn.execute(statement)
+        except PoolTimeout as exc:
+            self._pool.close()
+            raise ConfigurationError(
+                f"cannot reach PostgreSQL for the graph store at startup "
+                f"(waited {connect_timeout:.0f}s). Check PG_URI and that the "
+                f"database is running: {exc}"
+            ) from exc
 
     @classmethod
     def from_env(cls) -> "PostgresGraphStore":
@@ -283,26 +306,32 @@ class PostgresGraphStore:
         # One connection for both the seed expansion and the entity backfill
         # so they observe a consistent snapshot.
         with self._pool.connection() as conn:
-            rows = conn.execute(
-                _EXPAND_QUERY,
-                {
-                    "node_ids": sorted(node_ids),
-                    "kb_id": kb_id,
-                    "expand_limit": expand_limit,
-                },
-            ).fetchall()
+            # row_factory is dict_row, so rows are dicts; psycopg's typing
+            # still reports tuples. _rows_as_dicts is the single cast point.
+            rows = _rows_as_dicts(
+                conn.execute(
+                    _EXPAND_QUERY,
+                    {
+                        "node_ids": sorted(node_ids),
+                        "kb_id": kb_id,
+                        "expand_limit": expand_limit,
+                    },
+                ).fetchall()
+            )
             entity_neighbors, neighbors = self._partition_neighbors(rows)
             if not entity_neighbors:
                 return self._dedupe_neighbors(neighbors, limit=max_neighbors)
-            backfill_rows = conn.execute(
-                _BACKFILL_QUERY,
-                {
-                    "entity_ids": [entity_id for entity_id, _ in entity_neighbors],
-                    "kb_id": kb_id,
-                    "seed_node_ids": sorted(node_ids),
-                    "expand_limit": expand_limit,
-                },
-            ).fetchall()
+            backfill_rows = _rows_as_dicts(
+                conn.execute(
+                    _BACKFILL_QUERY,
+                    {
+                        "entity_ids": [entity_id for entity_id, _ in entity_neighbors],
+                        "kb_id": kb_id,
+                        "seed_node_ids": sorted(node_ids),
+                        "expand_limit": expand_limit,
+                    },
+                ).fetchall()
+            )
         relation_by_entity = {
             entity_id: relation for entity_id, relation in entity_neighbors
         }
@@ -318,7 +347,7 @@ class PostgresGraphStore:
 
     def stats(self) -> dict[str, object]:
         with self._pool.connection() as conn:
-            row = conn.execute(
+            raw_row = conn.execute(
                 """
                 SELECT
                     (SELECT count(*) FROM graph_document) AS documents,
@@ -327,15 +356,19 @@ class PostgresGraphStore:
                     (SELECT count(*) FROM graph_relation) AS relations
                 """
             ).fetchone()
-        row = row or {}
+        # fetchone() is typed as tuple | None; row_factory=dict_row makes it a
+        # dict at runtime, and a zero-row aggregate still returns one row.
+        row: dict[str, object] = (
+            _rows_as_dicts([raw_row])[0] if raw_row is not None else {}
+        )
         return {
             "backend": "postgresql",
             "pool_min_size": self.pool_min,
             "pool_max_size": self.pool_max,
-            "documents": int(row.get("documents", 0)),
-            "nodes": int(row.get("nodes", 0)),
-            "entities": int(row.get("entities", 0)),
-            "relations": int(row.get("relations", 0)),
+            "documents": _as_int(row.get("documents")),
+            "nodes": _as_int(row.get("nodes")),
+            "entities": _as_int(row.get("entities")),
+            "relations": _as_int(row.get("relations")),
         }
 
     def close(self) -> None:
@@ -483,6 +516,50 @@ class PostgresGraphStore:
             if len(deduped) >= limit:
                 break
         return deduped
+
+
+def _pool_timeout_from_env(name: str, default: float) -> float:
+    raw = os.getenv(name)
+    if raw is None or not raw.strip():
+        return default
+    try:
+        value = float(raw)
+    except ValueError as exc:
+        raise ConfigurationError(f"{name} must be a number, got {raw!r}") from exc
+    if value <= 0:
+        raise ConfigurationError(f"{name} must be > 0, got {value}")
+    return value
+
+
+def _as_int(value: object, default: int = 0) -> int:
+    """count(*) comes back as an int/Decimal; never let a cast crash /health."""
+    if isinstance(value, bool):
+        return int(value)
+    if isinstance(value, (int, float, str)):
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return default
+    return default
+
+
+def _rows_as_dicts(rows: Sequence[object]) -> list[dict[str, object]]:
+    """Narrow psycopg rows to dicts.
+
+    The pool is configured with ``row_factory=dict_row``, so every fetched row
+    is a dict at runtime even though the driver's stubs say tuple. Casting once
+    here keeps the rest of the module honest for a type checker without lying
+    at each call site.
+    """
+    narrowed: list[dict[str, object]] = []
+    for row in rows:
+        if isinstance(row, dict):
+            narrowed.append(row)
+        else:
+            raise TypeError(
+                "graph store rows must be dict-like; is row_factory=dict_row set?"
+            )
+    return narrowed
 
 
 def _pool_size_from_env(name: str, default: int) -> int:

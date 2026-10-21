@@ -114,7 +114,7 @@ class BM25Index:
         self,
         query: str,
         top_k: int,
-        allowed_doc_ids: set[str] | None = None,
+        allowed_doc_ids: set[str] | frozenset[str] | None = None,
     ) -> list[tuple[str, float]]:
         with self._lock:
             if not self._doc_lengths:
@@ -163,7 +163,7 @@ class BM25Index:
                     score += idf * numerator / denominator
                 if score > 0:
                     scores.append((doc_id, score))
-            scores.sort(key=lambda item: item[1], reverse=True)
+            scores.sort(key=lambda item: (-item[1], item[0]))
             return scores[:top_k]
 
     def clear(self) -> None:
