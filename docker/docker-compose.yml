@@ -1,6 +1,10 @@
 x-app-env: &app-env
   APP_CONFIG_DIR: /workspace/configs
-  RAG_ENV: ${RAG_ENV:-local}
+  # Insecure default keys are only tolerated in local/dev/test; anything else
+  # (including unset) is treated as production and rejects them, so a
+  # deployment that forgets strong secrets fails closed instead of serving
+  # with a publicly known key.
+  RAG_ENV: ${RAG_ENV:-prod}
   HTTP_PROXY: ${HTTP_PROXY:-}
   HTTPS_PROXY: ${HTTPS_PROXY:-}
   NO_PROXY: ${NO_PROXY:-localhost,127.0.0.1,::1},app,redis,postgres
@@ -20,10 +24,13 @@ x-app-env: &app-env
   RAG_INGEST_ALLOWED_DIRS: /workspace/data/raw
   EVAL_DATASET_DIR: /workspace/data/eval
   RAG_AUTH_DISABLED: ${RAG_AUTH_DISABLED:-}
-  RAG_API_KEYS: ${RAG_API_KEYS:-nano-rag-local}
-  RAG_ADMIN_API_KEYS: ${RAG_ADMIN_API_KEYS:-nano-rag-local}
+  # Business and operator credentials must be explicit and distinct. Both are
+  # required: compose refuses to start rather than fall back to a known key.
+  # Generate them with: openssl rand -hex 32
+  RAG_API_KEYS: ${RAG_API_KEYS:?set RAG_API_KEYS in docker/.env (openssl rand -hex 32)}
+  RAG_ADMIN_API_KEYS: ${RAG_ADMIN_API_KEYS:?set RAG_ADMIN_API_KEYS in docker/.env (openssl rand -hex 32)}
   RAG_TRUSTED_PROXY_SECRET: ${RAG_TRUSTED_PROXY_SECRET:-}
-  RAG_RATE_LIMIT_REQUESTS_PER_MINUTE: ${RAG_RATE_LIMIT_REQUESTS_PER_MINUTE:-0}
+  RAG_RATE_LIMIT_REQUESTS_PER_MINUTE: ${RAG_RATE_LIMIT_REQUESTS_PER_MINUTE:-300}
   RAG_DIAGNOSIS_ENABLED: ${RAG_DIAGNOSIS_ENABLED:-true}
   RAG_EVAL_ENABLED: ${RAG_EVAL_ENABLED:-true}
   # Document-level BM25 discovery layer (the wiki). On by default.
@@ -171,13 +178,30 @@ services:
       dockerfile: docker/frontend.Dockerfile
     container_name: nanorag-frontend
     ports:
-      - "${FRONTEND_PORT:-3001}:80"
+      # Bound to loopback by default: the proxy injects the business key, so
+      # anything that can reach this port is authenticated as a business
+      # caller. Publish on 0.0.0.0 only behind your own authenticating proxy.
+      - "${FRONTEND_BIND:-127.0.0.1}:${FRONTEND_PORT:-3001}:80"
     environment:
-      RAG_PROXY_API_KEY: ${RAG_PROXY_API_KEY:-nano-rag-local}
+      # nginx injects this for /v1/rag/ business routes only. Usually equal to
+      # RAG_API_KEYS; set explicitly so the two cannot drift silently.
+      RAG_PROXY_API_KEY: ${RAG_PROXY_API_KEY:?set RAG_PROXY_API_KEY in docker/.env}
     depends_on:
       app:
         condition: service_healthy
     restart: unless-stopped
+    # The public entry needs its own liveness signal: without it a broken nginx
+    # config looks healthy to compose and to the port binding.
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "wget -q --spider http://127.0.0.1/ || exit 1",
+        ]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
 
 volumes:
   app-parsed-data:

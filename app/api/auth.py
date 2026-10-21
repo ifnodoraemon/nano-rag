@@ -82,7 +82,8 @@ def _split_kb_ids(value: str | None) -> set[str] | None:
 
 
 def _rate_limit_enabled() -> int:
-    raw = os.getenv("RAG_RATE_LIMIT_REQUESTS_PER_MINUTE", "0")
+    # On by default: leaving the limiter off meant unlimited admin-key guessing.
+    raw = os.getenv("RAG_RATE_LIMIT_REQUESTS_PER_MINUTE", "300")
     try:
         return max(0, int(raw))
     except ValueError as exc:
@@ -94,6 +95,33 @@ def _rate_limit_enabled() -> int:
                 "be an integer; refusing to serve with the limiter disabled"
             ),
         ) from exc
+
+
+def _client_address(request: Request | None) -> str:
+    """Best-effort client identity for rate limiting.
+
+    Behind the bundled nginx the socket address is the proxy, so the
+    nginx-supplied ``X-Real-IP`` is preferred — but only as a bucketing hint,
+    never for authorization.
+    """
+    if request is None:
+        return "unknown"
+    headers = getattr(request, "headers", None)
+    forwarded = None
+    if headers is not None and hasattr(headers, "get"):
+        forwarded = headers.get("x-real-ip") or headers.get("x-forwarded-for")
+    if forwarded:
+        return forwarded.split(",")[0].strip() or "unknown"
+    client = getattr(request, "client", None)
+    host = getattr(client, "host", None)
+    return str(host) if host else "unknown"
+
+
+def _rate_limit_subject(request: Request | None, credential: str | None) -> str:
+    """Bucket by client address AND credential so one shared proxy-injected
+    key does not put every browser in a single global bucket."""
+    address = _client_address(request)
+    return f"{address}|{credential or 'anonymous'}"
 
 
 def _enforce_rate_limit(key: str) -> None:
@@ -124,7 +152,25 @@ def _enforce_rate_limit(key: str) -> None:
 
 
 def is_auth_disabled() -> bool:
-    return os.getenv("RAG_AUTH_DISABLED", "").lower() in AUTH_TRUE_VALUES
+    """``RAG_AUTH_DISABLED=true`` is honoured only in an explicit local/dev/
+    test environment.
+
+    Insecure *keys* are already rejected outside those environments; letting
+    the kill switch through everywhere would be the same fail-open hole with
+    a bigger blast radius. A deployment that sets it in production keeps
+    authentication enforced (and the startup readiness log says so).
+    """
+    raw = os.getenv("RAG_AUTH_DISABLED", "").strip().lower()
+    if raw not in AUTH_TRUE_VALUES:
+        return False
+    if _allows_insecure_defaults():
+        return True
+    logger.error(
+        "RAG_AUTH_DISABLED=true is ignored outside a local/dev/test environment "
+        "(RAG_ENV=%r); authentication remains enforced.",
+        os.getenv("RAG_ENV", os.getenv("ENVIRONMENT", "")),
+    )
+    return False
 
 
 def _proxy_context(
@@ -171,7 +217,14 @@ def require_api_key(
         x_rag_allowed_kb_ids=x_rag_allowed_kb_ids,
     )
     if proxy_context is not None:
-        _enforce_rate_limit(proxy_context.principal_id or proxy_context.external_org_id or "trusted_proxy")
+        _enforce_rate_limit(
+            _rate_limit_subject(
+                request,
+                proxy_context.principal_id
+                or proxy_context.external_org_id
+                or "trusted_proxy",
+            )
+        )
         return proxy_context
     keys = container.config.business_api_keys
     _reject_insecure_defaults(keys, capability="RAG_API_KEYS")
@@ -188,7 +241,7 @@ def require_api_key(
         token = authorization[7:].strip()
     if not token or not _constant_time_check(token, keys):
         raise HTTPException(status_code=401, detail="invalid or missing api key")
-    _enforce_rate_limit(token)
+    _enforce_rate_limit(_rate_limit_subject(request, token))
     return RequestContext(auth_mode="api_key")
 
 
@@ -202,27 +255,24 @@ def require_admin_key(
     x_rag_org_id: str | None = Header(default=None),
     x_rag_allowed_kb_ids: str | None = Header(default=None),
 ) -> RequestContext:
+    """Operator authentication.
+
+    Deliberately NOT satisfiable by the trusted-proxy secret: the proxy is a
+    pass-through for business calls only. Operator routes must be
+    authenticated by the caller with an admin key, so a proxy (or anything
+    that can set headers on the public port) can never escalate to
+    admin/debug/eval.
+
+    The `x_rag_*` proxy headers stay in the signature so FastAPI keeps
+    accepting the requests, but they are ignored here — the proxy identity
+    is never trusted for admin access.
+    """
+    del x_rag_proxy_secret, x_rag_principal_id, x_rag_org_id, x_rag_allowed_kb_ids
     if is_auth_disabled():
         logger.warning(
             "Admin API authentication explicitly disabled via RAG_AUTH_DISABLED=true."
         )
         return RequestContext(auth_mode="disabled")
-    proxy_context = _proxy_context(
-        x_rag_proxy_secret=x_rag_proxy_secret,
-        x_rag_principal_id=x_rag_principal_id,
-        x_rag_org_id=x_rag_org_id,
-        x_rag_allowed_kb_ids=x_rag_allowed_kb_ids,
-    )
-    if proxy_context is not None:
-        _enforce_rate_limit(
-            f"admin:{proxy_context.principal_id or proxy_context.external_org_id or 'trusted_proxy'}"
-        )
-        return RequestContext(
-            auth_mode="trusted_proxy_admin",
-            principal_id=proxy_context.principal_id,
-            external_org_id=proxy_context.external_org_id,
-            allowed_kb_ids=proxy_context.allowed_kb_ids,
-        )
     keys = _admin_api_keys()
     _reject_insecure_defaults(keys, capability="RAG_ADMIN_API_KEYS")
     if not keys:
@@ -238,5 +288,44 @@ def require_admin_key(
         token = authorization[7:].strip()
     if not token or not _constant_time_check(token, keys):
         raise HTTPException(status_code=401, detail="invalid or missing admin api key")
-    _enforce_rate_limit(f"admin:{token}")
+    _enforce_rate_limit(_rate_limit_subject(request, f"admin:{token}"))
     return RequestContext(auth_mode="admin_api_key")
+
+
+def require_api_or_admin_key(
+    request: Request,
+    authorization: str | None = Header(default=None),
+    x_api_key: str | None = Header(default=None),
+    x_admin_api_key: str | None = Header(default=None),
+    x_rag_admin_key: str | None = Header(default=None),
+    x_rag_proxy_secret: str | None = Header(default=None),
+    x_rag_principal_id: str | None = Header(default=None),
+    x_rag_org_id: str | None = Header(default=None),
+    x_rag_allowed_kb_ids: str | None = Header(default=None),
+) -> RequestContext:
+    """Authenticate with either credential.
+
+    Used by read-only endpoints an operator drives directly (ingest job status):
+    the browser presents the proxy-injected business key, while a CLI operator
+    presents the admin key. The KB scope of whichever credential authenticated
+    is still enforced by the handler.
+    """
+    try:
+        return require_api_key(
+            request,
+            authorization=authorization,
+            x_api_key=x_api_key,
+            x_rag_proxy_secret=x_rag_proxy_secret,
+            x_rag_principal_id=x_rag_principal_id,
+            x_rag_org_id=x_rag_org_id,
+            x_rag_allowed_kb_ids=x_rag_allowed_kb_ids,
+        )
+    except HTTPException as business_error:
+        if business_error.status_code not in {401, 503}:
+            raise
+        return require_admin_key(
+            request,
+            authorization=authorization,
+            x_admin_api_key=x_admin_api_key,
+            x_rag_admin_key=x_rag_admin_key,
+        )

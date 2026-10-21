@@ -13,7 +13,7 @@ from fastapi.staticfiles import StaticFiles
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.types import ASGIApp
 
-from app.api.auth import is_auth_disabled, require_api_key
+from app.api.auth import is_auth_disabled, require_admin_key
 from app.api.routes_business import router as business_router
 from app.api.routes_debug import router as debug_router
 from app.api.routes_openai import router as openai_router
@@ -43,6 +43,11 @@ FRONTEND_DIST = Path(
 )
 
 
+def _docs_enabled() -> bool:
+    """Interactive API docs are opt-in: they enumerate every operator route."""
+    return os.getenv("RAG_ENABLE_DOCS", "").strip().lower() in {"1", "true", "yes", "on"}
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     configure_logging()
@@ -52,16 +57,41 @@ async def lifespan(app: FastAPI):
     await app.state.container.close()
 
 
-app = FastAPI(title="nano-rag", version="0.1.0", lifespan=lifespan)
+app = FastAPI(
+    title="nano-rag",
+    version="0.1.0",
+    lifespan=lifespan,
+    # The OpenAPI surface documents every admin/operator route; publishing it
+    # anonymously (the bundled nginx proxies /docs and /openapi.json) hands an
+    # attacker the full route map. Opt in explicitly for a trusted network.
+    docs_url="/docs" if _docs_enabled() else None,
+    redoc_url=None,
+    openapi_url="/openapi.json" if _docs_enabled() else None,
+)
 
-allowed_origins_str = os.getenv("ALLOWED_ORIGINS", "")
-if allowed_origins_str.strip():
+
+def _cors_origins() -> list[str]:
+    raw = os.getenv("ALLOWED_ORIGINS", "")
+    origins = [item.strip() for item in raw.split(",") if item.strip()]
+    if not origins:
+        return []
+    if "*" in origins:
+        # Browsers reject "*" combined with credentials; silently accepting it
+        # would leave CORS broken with no diagnostic.
+        raise ConfigurationError(
+            "ALLOWED_ORIGINS must list explicit origins; '*' is not allowed "
+            "because credentialed CORS requires an exact origin."
+        )
+    return origins
+
+
+if _cors_origins():
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=allowed_origins_str.split(","),
+        allow_origins=_cors_origins(),
         allow_credentials=True,
         allow_methods=["GET", "POST"],
-        allow_headers=["Authorization", "X-API-Key", "X-Api-Key", "Content-Type"],
+        allow_headers=["Authorization", "X-API-Key", "X-Api-Key", "X-Admin-API-Key", "Content-Type"],
     )
 app.add_middleware(SecurityHeadersMiddleware)
 
@@ -235,8 +265,10 @@ def _auth_state(config) -> dict[str, object]:  # noqa: ANN001
     }
 
 
-@app.get("/health/detail", dependencies=[Depends(require_api_key)])
+@app.get("/health/detail", dependencies=[Depends(require_admin_key)])
 async def health_detail(request: Request) -> dict[str, object]:
+    # Operator-only: the payload names internal paths, provider endpoints and
+    # storage backends. Business callers get the summary at /health.
     container = request.app.state.container
     cache_ttl_seconds = max(0.0, float(os.getenv("HEALTH_DETAIL_CACHE_SECONDS", "300")))
     query_params = getattr(request, "query_params", {})
