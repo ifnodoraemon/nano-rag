@@ -45,6 +45,10 @@ class TraceRecord(BaseModel):
     generation_usage: dict[str, object] = Field(default_factory=dict)
     retrieval_params: dict[str, object] = Field(default_factory=dict)
     step_latencies: dict[str, float] = Field(default_factory=dict)
+    # Deterministic citation audit (app/generation/citation_check.py): does every
+    # cited label exist, and do the numbers a cited sentence states appear in the
+    # context it cites. None on traces recorded before this check existed.
+    citation_integrity: dict[str, object] | None = None
 
 
 class RetrievalDebugResponse(BaseModel):

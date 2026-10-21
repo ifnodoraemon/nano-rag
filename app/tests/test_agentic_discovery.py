@@ -576,3 +576,7 @@ async def test_service_uses_wiki_discovery(tmp_path: Path) -> None:
     assert record.retrieval_params["agent"]["retrieval_engine"] == "agentic_wiki"
     # The discovery trace is present and marked the winner as primary.
     assert record.retrieval_params.get("read_doc_ids") == ["travel-v2"]
+    # The citation audit is recorded on every answer: a trace without it would
+    # mean "traceable answer" is again only a prompt-level promise.
+    assert record.citation_integrity is not None
+    assert "integrity_score" in record.citation_integrity

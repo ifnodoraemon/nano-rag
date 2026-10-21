@@ -4,6 +4,7 @@ import os
 import re
 from collections import Counter
 
+from app.generation.citation_check import check_citations
 from app.utils.coerce import as_float as _as_float
 from app.utils.coerce import as_int as _as_int
 from typing import TYPE_CHECKING
@@ -122,6 +123,10 @@ def _builtin_metrics(record: dict) -> dict:
         str(context)
         for context in (record.get("reference_contexts") or [])
     ]
+    report = check_citations(
+        str(record.get("answer", "") or ""),
+        _contexts_for_citation_check(record),
+    )
     return {
         "answer_exact_match": _answer_exact_match(
             str(record.get("answer", "") or ""),
@@ -130,7 +135,37 @@ def _builtin_metrics(record: dict) -> dict:
         "reference_context_recall": _reference_context_recall(
             reference_contexts, retrieved
         ),
+        # Deterministic and free: does the answer's own citation apparatus hold
+        # up against the contexts it was given? None when the answer cites
+        # nothing at all (not evaluable, not perfect) - the coverage gate then
+        # reports the rows it could not evaluate.
+        "citation_integrity": report.integrity_score,
     }
+
+
+def _contexts_for_citation_check(record: dict) -> list[dict[str, object]]:
+    """Normalize whatever context shape the dataset carries.
+
+    Records may hold plain strings (from the deterministic path) or context
+    dicts with ``citation_label``/``text`` (from the live trace). Only the dict
+    form can be audited, because a bare string has no label to resolve.
+    """
+    raw = record.get("retrieved_contexts") or record.get("contexts") or []
+    if not isinstance(raw, list):
+        return []
+    contexts: list[dict[str, object]] = []
+    for index, item in enumerate(raw):
+        if isinstance(item, dict):
+            context = dict(item)
+            if context.get("citation_label") is None:
+                # Positional labels are what the prompt builder emits.
+                context["citation_label"] = f"C{index + 1}"
+            contexts.append(context)
+        else:
+            contexts.append(
+                {"citation_label": f"C{index + 1}", "text": str(item)}
+            )
+    return contexts
 
 
 def _build_llm(generation_client):
@@ -308,6 +343,7 @@ class DeepevalRunner:
             "answer_relevancy",
             "context_precision",
             "context_recall",
+            "citation_integrity",
         ]:
             scores = [
                 value

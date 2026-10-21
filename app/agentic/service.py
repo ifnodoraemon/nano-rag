@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, TypedDict
 from app.agentic.discovery import AgenticDiscovery
 from app.core.exceptions import ConfigurationError, ModelOutputError
 from app.generation.answer_formatter import AnswerFormatter
+from app.generation.citation_check import check_citations
 from app.generation.prompt_builder import PromptBuilder
 from app.model_client.generation import GenerationClient
 from app.retrieval.graph_expander import GraphExpander
@@ -738,6 +739,9 @@ class AgenticReasoningService:
         record = self.trace_store.get(trace_id)
         if record is None:
             return
+        citation_integrity = check_citations(
+            response.answer, contexts
+        ).as_dict()
         updated = record.model_copy(
             update={
                 "answer": response.answer,
@@ -767,6 +771,7 @@ class AgenticReasoningService:
                     "generation_seconds": generation_seconds,
                     "agent_end_to_end_seconds": end_to_end_seconds,
                 },
+                "citation_integrity": citation_integrity,
             }
         )
         self.trace_store.update(updated)
