@@ -43,7 +43,7 @@ class ProviderConfig:
 
 
 class AsyncJsonProviderClient:
-    def __init__(self, provider: ProviderConfig, timeout_seconds: int) -> None:
+    def __init__(self, provider: ProviderConfig, timeout_seconds: float) -> None:
         self.provider = provider
         self.timeout = timeout_seconds
         self._client: httpx.AsyncClient | None = None
@@ -204,7 +204,7 @@ class AsyncJsonProviderClient:
 
 class GatewayClient:
     def __init__(
-        self, config: AppConfig, timeout_seconds: int, capability: str
+        self, config: AppConfig, timeout_seconds: float, capability: str
     ) -> None:
         self.config = config
         self.capability = capability

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 
+from app.core.timeouts import timeout_seconds
 from app.core.exceptions import ConfigurationError, ModelGatewayError
 from app.model_client.base import GatewayClient
 from app.model_client.schemas import RerankResult
@@ -19,12 +20,26 @@ class RerankClient(GatewayClient):
             self.capability = "rerank"
             self.base_url = ""
             self.api_key = ""
-            self.timeout = config.settings["timeout"]["rerank_seconds"]
+            self.timeout: float = timeout_seconds(
+                config.settings,
+                "rerank_seconds",
+                env_name="RERANK_TIMEOUT_SECONDS",
+                default=30,
+            )
             self._client = None
             self.alias = "disabled"
             self.path = ""
             return
-        super().__init__(config, config.settings["timeout"]["rerank_seconds"], "rerank")
+        super().__init__(
+            config,
+            timeout_seconds(
+                config.settings,
+                "rerank_seconds",
+                env_name="RERANK_TIMEOUT_SECONDS",
+                default=30,
+            ),
+            "rerank",
+        )
         self.alias = config.models["rerank"]["default_alias"]
         self.path = (
             os.getenv("RERANK_API_PATH")

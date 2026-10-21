@@ -107,3 +107,40 @@ async def test_non_json_calls_are_not_retried() -> None:
 
     assert result["content"] == "just some text"
     assert len(provider.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_empty_content_names_the_reasoning_budget_cause() -> None:
+    """A reasoning model can return finish_reason=stop with empty content.
+
+    Downstream that surfaced as "model returned no JSON object", which points at
+    the parser instead of the token budget. The cause must be named.
+    """
+    from app.core.exceptions import ModelGatewayError
+
+    client = GenerationClient.__new__(GenerationClient)
+    client.alias = "reasoning-model"
+    client.max_tokens = 512
+
+    class _EmptyContentProvider:
+        async def chat_completions(self, messages, model_alias, **extra):  # noqa: ANN001, ANN003
+            return {
+                "choices": [
+                    {
+                        "message": {"content": "", "reasoning_content": "..." * 100},
+                        "finish_reason": "stop",
+                    }
+                ],
+                "usage": {"completion_tokens": 512},
+                "model": model_alias,
+            }
+
+    client.provider_client = _EmptyContentProvider()  # type: ignore[assignment]
+
+    with pytest.raises(ModelGatewayError) as exc_info:
+        await client.generate([{"role": "user", "content": "q"}], response_format=SCHEMA)
+
+    message = str(exc_info.value)
+    assert "empty content" in message
+    assert "GENERATION_MAX_TOKENS" in message
+    assert "reasoning_chars=300" in message

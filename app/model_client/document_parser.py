@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING
 import httpx
 from pypdf import PdfReader, PdfWriter
 
+from app.core.timeouts import timeout_seconds
 from app.core.exceptions import ConfigurationError, ModelGatewayError, ParsingError
 from app.model_client.base import AsyncJsonProviderClient, ProviderConfig
 from app.utils.text import parse_bool_env
@@ -44,7 +45,14 @@ _EMPTY_SENTINEL = "__PARSER_EMPTY__"
 class DocumentParserClient:
     def __init__(self, config: AppConfig) -> None:
         self.config = config
-        self.timeout = int(config.settings["timeout"].get("document_parser_seconds", 120))
+        self.timeout = int(
+            timeout_seconds(
+                config.settings,
+                "document_parser_seconds",
+                env_name="DOCUMENT_PARSER_TIMEOUT_SECONDS",
+                default=120,
+            )
+        )
         self.enabled = self._resolve_enabled()
         self.provider = self._resolve_provider()
         self.alias = self._resolve_alias()

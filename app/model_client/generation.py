@@ -4,6 +4,7 @@ import logging
 import os
 from typing import TYPE_CHECKING, Any
 
+from app.core.timeouts import timeout_seconds
 from app.core.exceptions import (
     ConfigurationError,
     ModelGatewayError,
@@ -21,7 +22,14 @@ logger = logging.getLogger(__name__)
 class GenerationClient(GatewayClient):
     def __init__(self, config: AppConfig) -> None:
         super().__init__(
-            config, config.settings["timeout"]["generation_seconds"], "generation"
+            config,
+            timeout_seconds(
+                config.settings,
+                "generation_seconds",
+                env_name="GENERATION_TIMEOUT_SECONDS",
+                default=120,
+            ),
+            "generation",
         )
         self.alias = config.models["generation"]["default_alias"]
         raw_max_tokens = os.getenv("GENERATION_MAX_TOKENS", "0")
@@ -90,9 +98,24 @@ class GenerationClient(GatewayClient):
                 f"{model_alias or self.alias}: the structured answer did not fit "
                 "the token budget. Raise GENERATION_MAX_TOKENS or narrow the context."
             )
-        message = choice.get("message", {})
+        message = choice.get("message", {}) or {}
+        content = message.get("content") or ""
+        if not str(content).strip() and not message.get("tool_calls"):
+            # A reasoning model can spend the whole budget on reasoning tokens
+            # and return an empty content with finish_reason=stop. Reported as
+            # its own failure: downstream this looks like "model returned no
+            # JSON", which sends operators chasing the wrong problem.
+            reasoning = str(message.get("reasoning_content") or "")
+            raise ModelGatewayError(
+                "generation provider returned empty content for model "
+                f"{model_alias or self.alias} (finish_reason={finish_reason!r}, "
+                f"usage={data.get('usage')}). A reasoning model can consume the "
+                "whole token budget before emitting content - raise "
+                "GENERATION_MAX_TOKENS. "
+                f"reasoning_chars={len(reasoning)}"
+            )
         return {
-            "content": message.get("content", ""),
+            "content": content,
             "finish_reason": choice.get("finish_reason"),
             "usage": data.get("usage") or {},
             "model": data.get("model") or model_alias or self.alias,
