@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 from uuid import uuid4
 
+from app.ingestion.dedup import find_duplicates_for_content, remove_document_everywhere
 from app.ingestion.loader import discover_files
 from app.ingestion.metadata import build_source_key, extract_document_metadata
 from app.ingestion.graph_extractor import GraphExtractor
@@ -207,12 +208,63 @@ class IngestionPipeline:
             except BaseException:
                 await self._rollback_commit(prepared_documents, committed)
                 raise
+            # Only once the new copies are durably stored: deleting the old
+            # document before that would lose the content entirely if the
+            # commit failed. A failure here leaves a visible duplicate instead.
+            superseded = await self._supersede_same_content(prepared_documents)
             if self.wiki_compiler and self.wiki_searcher and prepared_documents:
                 # Incremental re-index (not a full rebuild) and off the loop:
                 # refresh() re-scanned and re-scored the entire corpus after
                 # every ingest, blocking every concurrent request.
                 await asyncio.to_thread(self.wiki_searcher.sync)
-            return IngestResponse(documents=doc_count, chunks=chunk_count)
+            if superseded:
+                logger.info(
+                    "ingest superseded %d same-content document(s): %s",
+                    len(superseded),
+                    ", ".join(superseded),
+                )
+            return IngestResponse(
+                documents=doc_count,
+                chunks=chunk_count,
+                superseded_doc_ids=superseded,
+            )
+
+    async def _supersede_same_content(
+        self, prepared_documents: list[PreparedDocument]
+    ) -> list[str]:
+        """Remove existing documents whose content equals an incoming one.
+
+        Runs after the batch is committed and the wiki written, so a failure
+        here leaves a duplicate (visible, harmless) rather than deleting the
+        old copy while the new one is not yet stored.
+        """
+        superseded: list[str] = []
+        for prepared in prepared_documents:
+            kb_id = str(prepared.document.metadata.get("kb_id") or "default")
+            duplicates = await asyncio.to_thread(
+                find_duplicates_for_content,
+                self.config.parsed_dir,
+                kb_id=kb_id,
+                content=prepared.document.content,
+                exclude_doc_id=prepared.document.doc_id,
+            )
+            for duplicate in duplicates:
+                touched = await asyncio.to_thread(
+                    remove_document_everywhere,
+                    doc_id=duplicate.doc_id,
+                    kb_id=duplicate.kb_id,
+                    parsed_dir=self.config.parsed_dir,
+                    graph_store=self.graph_store,
+                    wiki_compiler=self.wiki_compiler,
+                )
+                superseded.append(duplicate.doc_id)
+                logger.info(
+                    "superseded duplicate %s (content match with %s, stores: %s)",
+                    duplicate.doc_id,
+                    prepared.document.doc_id,
+                    ",".join(touched) or "none",
+                )
+        return superseded
 
     async def _rollback_commit(
         self, prepared_documents: list[PreparedDocument], committed: list[str]

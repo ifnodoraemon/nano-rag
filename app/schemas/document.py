@@ -17,3 +17,7 @@ class IngestRequest(BaseModel):
 class IngestResponse(BaseModel):
     documents: int
     chunks: int
+    # Documents removed because their content matched an incoming one (a file
+    # that moved or was re-uploaded under a different path). Reported so a
+    # supersede is never silent.
+    superseded_doc_ids: list[str] = Field(default_factory=list)
