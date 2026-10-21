@@ -39,7 +39,7 @@ async def test_generate_passes_through_kwargs_and_returns_shape() -> None:
         captured.update(kwargs)
         return {
             "choices": [
-                {"message": {"content": "answer"}, "finish_reason": "stop"}
+                {"message": {"content": '{"answer": "answer"}'}, "finish_reason": "stop"}
             ],
             "usage": {"total_tokens": 3},
             "model": "gemini-flash-lite-latest",
@@ -47,6 +47,8 @@ async def test_generate_passes_through_kwargs_and_returns_shape() -> None:
 
     client.provider_client.chat_completions = fake_chat_completions  # type: ignore[method-assign]
 
+    # A json_schema request must yield a JSON object: a prose reply is treated as
+    # "provider ignored the schema" (see test_generation_json_contract.py).
     response = await client.generate(
         [{"role": "user", "content": "hi"}],
         response_format={"type": "json_schema", "json_schema": {"name": "x", "strict": True}},
@@ -59,7 +61,7 @@ async def test_generate_passes_through_kwargs_and_returns_shape() -> None:
         "json_schema": {"name": "x", "strict": True},
     }
     assert captured["model_alias"] == "gemini-flash-lite-latest"
-    assert response["content"] == "answer"
+    assert response["content"] == '{"answer": "answer"}' 
     assert response["finish_reason"] == "stop"
     assert response["usage"] == {"total_tokens": 3}
     assert response["model"] == "gemini-flash-lite-latest"
