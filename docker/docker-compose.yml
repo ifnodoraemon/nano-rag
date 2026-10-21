@@ -1,10 +1,24 @@
 x-app-env: &app-env
+  # =================================================================== #
+  # 分三层，只有「外部凭据」需要你填。                                  #
+  #   1) 内部固定值：容器网络内部路径/地址，不需要也不能配。            #
+  #   2) 派生值：从别的变量算出来，不再单独要求一份（见下）。            #
+  #   3) 外部凭据：只有两类——生成模型、文档解析模型。                   #
+  # 用 `python scripts/init_env.py` 一次性生成 docker/.env。            #
+  # =================================================================== #
+
+  # --- 1) 内部固定值（内部的 postgres/redis 不对外发布，无需密钥） ---
   APP_CONFIG_DIR: /workspace/configs
-  # Insecure default keys are only tolerated in local/dev/test; anything else
-  # (including unset) is treated as production and rejects them, so a
-  # deployment that forgets strong secrets fails closed instead of serving
-  # with a publicly known key.
-  RAG_ENV: ${RAG_ENV:-prod}
+  PARSED_OUTPUT_DIR: /workspace/data/parsed
+  INGEST_JOB_STORE_DIR: /workspace/data/reports/ingest_jobs
+  EVAL_REPORT_DIR: /workspace/data/reports/eval
+  EVAL_DATASET_DIR: /workspace/data/eval
+  RAG_INGEST_ALLOWED_DIRS: /workspace/data/raw
+  RAG_BROKER_URL: ${RAG_BROKER_URL:-redis://redis:6379/0}
+  RAG_RESULT_BACKEND: ${RAG_RESULT_BACKEND:-redis://redis:6379/1}
+  RAG_GRAPH_BACKEND: ${RAG_GRAPH_BACKEND:-postgres}
+  RAG_INGEST_EXECUTOR: ${RAG_INGEST_EXECUTOR:-celery}
+  # proxy 变量：容器内访问外网用，留空即直连
   HTTP_PROXY: ${HTTP_PROXY:-}
   HTTPS_PROXY: ${HTTPS_PROXY:-}
   NO_PROXY: ${NO_PROXY:-localhost,127.0.0.1,::1},app,redis,postgres
@@ -13,48 +27,43 @@ x-app-env: &app-env
   no_proxy: ${no_proxy:-localhost,127.0.0.1,::1},app,redis,postgres
   ALL_PROXY: ""
   all_proxy: ""
-  PARSED_OUTPUT_DIR: /workspace/data/parsed
-  INGEST_JOB_STORE_DIR: /workspace/data/reports/ingest_jobs
-  RAG_INGEST_EXECUTOR: ${RAG_INGEST_EXECUTOR:-celery}
-  RAG_BROKER_URL: ${RAG_BROKER_URL:-redis://redis:6379/0}
-  RAG_RESULT_BACKEND: ${RAG_RESULT_BACKEND:-redis://redis:6379/1}
-  RAG_GRAPH_BACKEND: ${RAG_GRAPH_BACKEND:-postgres}
-  PG_URI: ${PG_URI:-postgresql://nanorag:nano-rag@postgres:5432/nanorag}
-  EVAL_REPORT_DIR: /workspace/data/reports/eval
-  RAG_INGEST_ALLOWED_DIRS: /workspace/data/raw
-  EVAL_DATASET_DIR: /workspace/data/eval
-  RAG_AUTH_DISABLED: ${RAG_AUTH_DISABLED:-}
-  # Business and operator credentials must be explicit and distinct. Both are
-  # required: compose refuses to start rather than fall back to a known key.
-  # Generate them with: openssl rand -hex 32
-  RAG_API_KEYS: ${RAG_API_KEYS:?set RAG_API_KEYS in docker/.env (openssl rand -hex 32)}
-  RAG_ADMIN_API_KEYS: ${RAG_ADMIN_API_KEYS:?set RAG_ADMIN_API_KEYS in docker/.env (openssl rand -hex 32)}
+
+  # --- 2) 派生值（不再单独配置） ------------------------------------- #
+  # PG_URI 由 postgres 服务自己的 user/password/db 拼出来：一处定义，两处使用。
+  PG_URI: ${PG_URI:-postgresql://${POSTGRES_USER:-nanorag}:${POSTGRES_PASSWORD:-nano-rag}@postgres:5432/${POSTGRES_DB:-nanorag}}
+  # 运维接口用独立密钥；企业环境必填。本地默认由 init_env 生成。
+  RAG_ENV: ${RAG_ENV:-prod}
+  RAG_API_KEYS: ${RAG_API_KEYS:?run `python scripts/init_env.py` (or set RAG_API_KEYS) to generate docker/.env}
+  RAG_ADMIN_API_KEYS: ${RAG_ADMIN_API_KEYS:?run `python scripts/init_env.py` (or set RAG_ADMIN_API_KEYS)}
   RAG_TRUSTED_PROXY_SECRET: ${RAG_TRUSTED_PROXY_SECRET:-}
+  RAG_AUTH_DISABLED: ${RAG_AUTH_DISABLED:-}
   RAG_RATE_LIMIT_REQUESTS_PER_MINUTE: ${RAG_RATE_LIMIT_REQUESTS_PER_MINUTE:-300}
   RAG_DIAGNOSIS_ENABLED: ${RAG_DIAGNOSIS_ENABLED:-true}
   RAG_EVAL_ENABLED: ${RAG_EVAL_ENABLED:-true}
-  # Document-level BM25 discovery layer (the wiki). On by default.
-  RAG_WIKI_ENABLED: ${RAG_WIKI_ENABLED:-true}
   MODEL_PROVIDER_MAX_RETRIES: ${MODEL_PROVIDER_MAX_RETRIES:-2}
   MODEL_PROVIDER_RETRY_BASE_SECONDS: ${MODEL_PROVIDER_RETRY_BASE_SECONDS:-0.5}
   MODEL_PROVIDER_RETRY_MAX_SECONDS: ${MODEL_PROVIDER_RETRY_MAX_SECONDS:-8}
-  MODEL_GATEWAY_MODE: ${MODEL_GATEWAY_MODE:-live}
-  MODEL_GATEWAY_BASE_URL: ${COMPOSE_MODEL_GATEWAY_BASE_URL:-https://generativelanguage.googleapis.com/v1beta/openai}
-  MODEL_GATEWAY_API_KEY: ${COMPOSE_MODEL_GATEWAY_API_KEY:-}
-  GENERATION_MODEL_ALIAS: ${COMPOSE_GENERATION_MODEL_ALIAS:-gemini-flash-latest}
-  GENERATION_API_BASE_URL: ${COMPOSE_GENERATION_API_BASE_URL:-https://generativelanguage.googleapis.com/v1beta/openai}
-  GENERATION_API_KEY: ${COMPOSE_GENERATION_API_KEY:-}
 
+  # --- 3) 外部凭据：只有这两类需要你提供 ------------------------------ #
+  # 生成模型（对话/阅读计划/图抽取都走它）。MODEL_GATEWAY_* 已是历史别名，
+  # 不再出现在这里：GENERATION_* 是唯一来源，代码里保留只读兼容。
+  GENERATION_API_KEY: ${GENERATION_API_KEY:-${COMPOSE_GENERATION_API_KEY:-}}
+  GENERATION_API_BASE_URL: ${GENERATION_API_BASE_URL:-${COMPOSE_GENERATION_API_BASE_URL:-https://generativelanguage.googleapis.com/v1beta/openai}}
+  GENERATION_MODEL_ALIAS: ${GENERATION_MODEL_ALIAS:-${COMPOSE_GENERATION_MODEL_ALIAS:-gemini-flash-latest}}
+
+  # 文档解析模型（只在你摄入 PDF/图片/Office 时需要）。
   DOCUMENT_PARSER_ENABLED: ${DOCUMENT_PARSER_ENABLED:-true}
-  DOCUMENT_PARSER_PROVIDER: ${COMPOSE_DOCUMENT_PARSER_PROVIDER:-gemini}
-  DOCUMENT_PARSER_MODEL: ${COMPOSE_DOCUMENT_PARSER_MODEL:-gemini-flash-latest}
-  DOCUMENT_PARSER_API_BASE_URL: ${COMPOSE_DOCUMENT_PARSER_API_BASE_URL:-https://generativelanguage.googleapis.com}
-  DOCUMENT_PARSER_API_KEY: ${COMPOSE_DOCUMENT_PARSER_API_KEY:-}
-  RERANK_MODEL_ALIAS: ${COMPOSE_RERANK_MODEL_ALIAS:-disabled}
-  RERANK_API_BASE_URL: ${COMPOSE_RERANK_API_BASE_URL:-}
-  RERANK_API_KEY: ${COMPOSE_RERANK_API_KEY:-}
-  RERANK_API_PATH: ${COMPOSE_RERANK_API_PATH:-}
-  DISABLE_RERANK: ${COMPOSE_DISABLE_RERANK:-true}
+  DOCUMENT_PARSER_PROVIDER: ${DOCUMENT_PARSER_PROVIDER:-${COMPOSE_DOCUMENT_PARSER_PROVIDER:-gemini}}
+  DOCUMENT_PARSER_MODEL: ${DOCUMENT_PARSER_MODEL:-${COMPOSE_DOCUMENT_PARSER_MODEL:-gemini-flash-latest}}
+  DOCUMENT_PARSER_API_BASE_URL: ${DOCUMENT_PARSER_API_BASE_URL:-${COMPOSE_DOCUMENT_PARSER_API_BASE_URL:-https://generativelanguage.googleapis.com}}
+  DOCUMENT_PARSER_API_KEY: ${DOCUMENT_PARSER_API_KEY:-${COMPOSE_DOCUMENT_PARSER_API_KEY:-}}
+
+  # 可选：cross-encoder 重排。默认关闭；开启需要同时给 path。
+  RERANK_MODEL_ALIAS: ${RERANK_MODEL_ALIAS:-${COMPOSE_RERANK_MODEL_ALIAS:-disabled}}
+  RERANK_API_BASE_URL: ${RERANK_API_BASE_URL:-${COMPOSE_RERANK_API_BASE_URL:-}}
+  RERANK_API_KEY: ${RERANK_API_KEY:-${COMPOSE_RERANK_API_KEY:-}}
+  RERANK_API_PATH: ${RERANK_API_PATH:-${COMPOSE_RERANK_API_PATH:-}}
+  DISABLE_RERANK: ${DISABLE_RERANK:-${COMPOSE_DISABLE_RERANK:-true}}
 
 services:
   app:
@@ -153,9 +162,13 @@ services:
     image: postgres:16-alpine
     container_name: nanorag-postgres
     environment:
-      POSTGRES_USER: nanorag
-      POSTGRES_PASSWORD: ${PG_PASSWORD:-nano-rag}
-      POSTGRES_DB: nanorag
+      # The single definition of the database credentials: PG_URI in x-app-env
+      # is derived from these three, so there is no second place to update.
+      # The service is expose-only (not published), so this is internal wiring,
+      # not an operator-facing secret - init_env generates it anyway.
+      POSTGRES_USER: ${POSTGRES_USER:-nanorag}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-${PG_PASSWORD:-nano-rag}}
+      POSTGRES_DB: ${POSTGRES_DB:-nanorag}
     expose:
       - "5432"
     volumes:
@@ -165,7 +178,7 @@ services:
       test:
         [
           "CMD-SHELL",
-          "pg_isready -U nanorag -d nanorag",
+          "pg_isready -U ${POSTGRES_USER:-nanorag} -d ${POSTGRES_DB:-nanorag}",
         ]
       interval: 10s
       timeout: 5s
@@ -183,9 +196,11 @@ services:
       # caller. Publish on 0.0.0.0 only behind your own authenticating proxy.
       - "${FRONTEND_BIND:-127.0.0.1}:${FRONTEND_PORT:-3001}:80"
     environment:
-      # nginx injects this for /v1/rag/ business routes only. Usually equal to
-      # RAG_API_KEYS; set explicitly so the two cannot drift silently.
-      RAG_PROXY_API_KEY: ${RAG_PROXY_API_KEY:?set RAG_PROXY_API_KEY in docker/.env}
+      # nginx injects this for /v1/rag/ business routes only. It must be ONE
+      # business key, so it is derived from RAG_API_KEYS (which init_env writes
+      # as a single key) instead of being a third copy of the same secret.
+      # Override only if the browser-facing key must differ from the first one.
+      RAG_PROXY_API_KEY: ${RAG_PROXY_API_KEY:-${RAG_API_KEYS}}
     depends_on:
       app:
         condition: service_healthy

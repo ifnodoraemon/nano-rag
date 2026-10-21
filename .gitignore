@@ -1,5 +1,12 @@
 .venv/
+# Secret files: `.env` alone does not cover backups/variants (.env.bak,
+# .env.local, docker/.env.prod), all of which can hold real API keys.
 .env
+.env.*
+*.env.bak
+docker/.env
+docker/.env.*
+!docker/.env.example
 .codex/
 frontend/node_modules/
 frontend/dist/
