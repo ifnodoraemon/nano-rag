@@ -1,6 +1,11 @@
 import asyncio
 import logging
+import os
 import re
+from collections import Counter
+
+from app.utils.coerce import as_float as _as_float
+from app.utils.coerce import as_int as _as_int
 from typing import TYPE_CHECKING
 
 
@@ -14,6 +19,20 @@ logger = logging.getLogger(__name__)
 # character overlap is at least this ratio (table rows are re-serialized into
 # "header=value" chunks, so byte-exact containment would always fail).
 _CONTEXT_MATCH_OVERLAP = 0.75
+
+# Bounds for the deepeval judge model (one call per metric per record).
+_EVAL_LLM_TIMEOUT_SECONDS = float(os.getenv("RAG_EVAL_LLM_TIMEOUT_SECONDS", "120"))
+_EVAL_LLM_MAX_RETRIES = int(os.getenv("RAG_EVAL_LLM_MAX_RETRIES", "1"))
+
+
+# Provenance markers that carry no answer content: the formatter appends
+# "[C1]" style labels to every cited sentence. Comparing them would make every
+# real answer "wrong".
+_CITATION_MARKER_RE = re.compile(r"\[\s*C\d+\s*\]|\[\s*C\d+(?:\s*,\s*C\d+)*\s*\]", re.IGNORECASE)
+
+
+def _strip_citation_markers(text: str) -> str:
+    return _CITATION_MARKER_RE.sub(" ", str(text))
 
 
 def _normalize_tokens(text: str) -> list[str]:
@@ -36,17 +55,25 @@ def _numeric_tokens(text: str) -> set[str]:
     return {token for token in _token_set(text) if token.isdigit()}
 
 
-def _answer_exact_match(answer: str, reference_answer: str) -> float:
-    """1.0 when every token of the reference answer (numbers included)
-    appears in the generated answer, else 0.0. A strict byte-equality check
-    would score every harmless paraphrase as a failure."""
-    if not reference_answer:
-        return 0.0
-    reference = _token_set(reference_answer)
+def _answer_exact_match(answer: str, reference_answer: str) -> float | None:
+    """1.0 when the answer and the reference carry the same token multiset.
+
+    Multiset equality, not set containment. Containment scored a *contradicting*
+    answer 1.0 — "员工 不 报销 15 天 内 无需 提交" contains every token of the
+    reference "15 天 内 提交" — which silently inflated the primary quality
+    metric. Extra tokens (negations, hedges) now make it a non-match; semantic
+    paraphrase is what the LLM-assisted deepeval metrics are for.
+
+    Returns None when the record carries no reference answer: "no reference"
+    is not "wrong answer", and folding it into the mean hides missing data.
+    """
+    if not str(reference_answer or "").strip():
+        return None
+    reference = Counter(_normalize_tokens(_strip_citation_markers(reference_answer)))
     if not reference:
-        return 0.0
-    answer = _token_set(answer)
-    return 1.0 if reference <= answer else 0.0
+        return None
+    answer_tokens = Counter(_normalize_tokens(_strip_citation_markers(answer)))
+    return 1.0 if reference == answer_tokens else 0.0
 
 
 def _context_matched(reference: str, retrieved: list[str]) -> bool:
@@ -64,10 +91,18 @@ def _context_matched(reference: str, retrieved: list[str]) -> bool:
     return False
 
 
-def _reference_context_recall(reference_contexts: list[str], retrieved: list[str]) -> float:
-    """Fraction of reference contexts recalled by the retrieved contexts."""
+def _reference_context_recall(
+    reference_contexts: list[str], retrieved: list[str]
+) -> float | None:
+    """Fraction of reference contexts recalled by the retrieved contexts.
+
+    Returns None (not 0.0) when the record has no reference contexts: a dataset
+    that omits references must not be scored as "recall totally failed", and a
+    gate on it must fail as *missing data* rather than pass on a fabricated
+    number.
+    """
     if not reference_contexts:
-        return 0.0
+        return None
     matched = sum(
         1 for reference in reference_contexts if _context_matched(reference, retrieved)
     )
@@ -105,9 +140,14 @@ def _build_llm(generation_client):
     class CustomOpenAI(DeepEvalBaseLLM):
         def __init__(self, gc):
             self.model = gc.alias
+            # An eval of hundreds of records must not hang forever on one
+            # upstream call: bound it and let the per-metric error path record
+            # the failure (with partial coverage now failing the gate).
             self.client = AsyncOpenAI(
                 base_url=gc.base_url,
                 api_key=gc.api_key,
+                timeout=_EVAL_LLM_TIMEOUT_SECONDS,
+                max_retries=_EVAL_LLM_MAX_RETRIES,
             )
 
         def load_model(self):
@@ -210,11 +250,14 @@ class DeepevalRunner:
                 retrieval_context=contexts,
             )
 
-            row_metrics = {}
+            row_metrics: dict[str, float] = {}
+            row_errors: dict[str, str] = {}
 
-            async def evaluate_metric(metric):
+            async def evaluate_metric(metric, case):
+                # Bind the case explicitly: the closure over the loop variable
+                # would measure whichever record the loop had reached.
                 try:
-                    await metric.a_measure(test_case)
+                    await metric.a_measure(case)
                     name = metric.__class__.__name__.replace("Metric", "").lower()
                     if name == "contextualprecision":
                         name = "context_precision"
@@ -225,14 +268,23 @@ class DeepevalRunner:
                     return name, round(metric.score, 4)
                 except Exception as e:
                     logger.error(f"Error computing metric {metric.__class__.__name__}: {e}")
-                    return None, None
+                    return metric.__class__.__name__.replace("Metric", "").lower(), None
 
-            metric_results = await asyncio.gather(*(evaluate_metric(m) for m in metrics))
+            metric_results = await asyncio.gather(
+                *(evaluate_metric(m, test_case) for m in metrics)
+            )
             for name, score in metric_results:
-                if name:
+                if score is None:
+                    # Keep the failure visible on the row (and countable by the
+                    # gate) instead of dropping the key and letting the mean
+                    # over survivors look healthy.
+                    row_errors[name] = "metric_error"
+                else:
                     row_metrics[name] = score
 
             entry = {**record, **_builtin_metrics(record), **row_metrics}
+            if row_errors:
+                entry["metric_errors"] = row_errors
             results.append(entry)
 
         return {
@@ -247,7 +299,8 @@ class DeepevalRunner:
         total = len(results)
         if total == 0:
             return {}
-        agg = {}
+        agg: dict[str, object] = {}
+        coverage: dict[str, float] = {}
         for key in [
             "answer_exact_match",
             "reference_context_recall",
@@ -256,22 +309,35 @@ class DeepevalRunner:
             "context_precision",
             "context_recall",
         ]:
-            scores = [r.get(key) for r in results if r.get(key) is not None]
+            scores = [
+                value
+                for r in results
+                if (value := r.get(key)) is not None
+            ]
             if scores:
-                agg[key] = round(sum(scores) / len(scores), 4)
+                numeric = [_as_float(value) for value in scores]
+                agg[key] = round(sum(numeric) / len(numeric), 4)
+                # Fraction of rows that actually produced this metric. A gate
+                # that only looks at the mean of survivors passes when 9/10
+                # rows errored out; the gate reads this to fail instead.
+                coverage[key] = round(len(scores) / total, 4)
+        agg["metric_coverage"] = coverage
+        agg["records_without_metric"] = {
+            key: total - int(round(value * total)) for key, value in coverage.items()
+        }
         agg["retrieved_context_count_avg"] = round(
             sum(len(r.get("retrieved_contexts") or []) for r in results) / total, 4
         )
         # Conflict stats from the materialized records so the
         # --max-conflicting-hit-rate gate works in deterministic mode too.
         conflicting_counts = [
-            int(r.get("conflicting_context_count", 0) or 0) for r in results
+            _as_int(r.get("conflicting_context_count")) for r in results
         ]
         agg["conflicting_context_count_avg"] = round(
             sum(conflicting_counts) / total, 4
         )
         agg["conflicting_hit_rate"] = round(
-            sum(1 for value in conflicting_counts if value > 0) / total, 4
+            sum(1 for value in conflicting_counts if _as_int(value) > 0) / total, 4
         )
         return agg
 

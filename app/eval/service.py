@@ -64,22 +64,36 @@ def _claim_verification_stats(claims: object) -> dict[str, object]:
             "missing_number_count": 0,
             "missing_term_count": 0,
         }
+    def _score_of(value: object) -> float | None:
+        if value is None:
+            return None
+        try:
+            return float(value)  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            return None
+
     scored = [
-        float(claim.get("support_score", 0.0) or 0.0)
+        score
         for claim in normalized
-        if claim.get("support_score") is not None
+        if (score := _score_of(claim.get("support_score"))) is not None
     ]
     verified = sum(1 for claim in normalized if claim.get("verified") is True)
     unsupported = sum(1 for claim in normalized if claim.get("verified") is False)
+    def _count_items(value: object) -> int:
+        """Count a list-ish field; a non-list (corrupt claim payload) is 0.
+
+        ``len(claim.get(...) or [])`` type-checks as len(object) and would raise
+        TypeError the moment a claim carried a scalar there.
+        """
+        if isinstance(value, list):
+            return len(value)
+        return 0
+
     missing_numbers = sum(
-        len(claim.get("missing_numbers", []) or [])
-        for claim in normalized
-        if isinstance(claim.get("missing_numbers", []), list)
+        _count_items(claim.get("missing_numbers")) for claim in normalized
     )
     missing_terms = sum(
-        len(claim.get("missing_terms", []) or [])
-        for claim in normalized
-        if isinstance(claim.get("missing_terms", []), list)
+        _count_items(claim.get("missing_terms")) for claim in normalized
     )
     return {
         "supporting_claim_count": len(normalized),
@@ -170,7 +184,7 @@ async def materialize_eval_records(
             claim_stats = _claim_verification_stats(prepared.get("supporting_claims", []))
 
         if not retrieved_contexts:
-            contexts, trace = await container.chat_pipeline.retrieve(
+            contexts, _retrieval_trace = await container.chat_pipeline.retrieve(
                 ChatRequest(
                     query=query,
                     top_k=top_k,

@@ -73,6 +73,11 @@ def main() -> int:
         report_dir.mkdir(parents=True, exist_ok=True)
         output_path = report_dir / f"{dataset_path.stem}_manual.json"
     dataset = load_jsonl_dataset(str(dataset_path))
+    if not dataset:
+        # An empty dataset used to write an "ok" report with an empty aggregate,
+        # so CI passed on zero records.
+        logger.error("dataset %s contains no records; refusing to produce a report", dataset_path)
+        return 2
     container = AppContainer.from_env()
     
     runner = container.eval_runner
@@ -89,7 +94,11 @@ def main() -> int:
     output_path.parent.mkdir(parents=True, exist_ok=True)
     save_json(str(output_path), report)
     logger.info("%s", output_path)
-    failed_thresholds = _failed_thresholds(report.get("aggregate", {}), args)
+    aggregate = report.get("aggregate", {})
+    if int(report.get("records", 0) or 0) == 0:
+        logger.error("report %s evaluated zero records", output_path)
+        return 2
+    failed_thresholds = _failed_thresholds(aggregate, args)
     if failed_thresholds:
         for failure in failed_thresholds:
             logger.error("%s", failure)
@@ -118,6 +127,18 @@ def _failed_thresholds(aggregate: dict, args: argparse.Namespace) -> list[str]:
                 f"{metric} is missing from the report; gate cannot be evaluated"
             )
             continue
+        # Partial coverage must fail too: the aggregate is a mean over the rows
+        # that produced the metric, so an upstream provider outage that errors
+        # most rows would otherwise be "passing" on the few survivors.
+        coverage = aggregate.get("metric_coverage") or {}
+        metric_coverage = coverage.get(metric)
+        if metric_coverage is None and metric == "reference_context_recall":
+            metric_coverage = coverage.get("context_recall")
+        if metric_coverage is not None and float(metric_coverage) < 1.0:
+            failures.append(
+                f"{metric} covers only {float(metric_coverage):.0%} of records; "
+                "gate cannot be evaluated on partial data"
+            )
         value = float(value)
         if mode == "min" and value < threshold:
             failures.append(f"{metric}={value:.4f} is below threshold {threshold:.4f}")

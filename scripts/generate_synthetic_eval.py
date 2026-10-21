@@ -2,6 +2,7 @@
 import asyncio
 import json
 import logging
+import os
 import random
 import sys
 from pathlib import Path
@@ -26,14 +27,19 @@ def _sample_chunks(parsed_dir: Path, limit: int) -> list[Chunk]:
         for path in sorted(parsed_dir.glob("*.json")):
             try:
                 payload = json.loads(path.read_text(encoding="utf-8"))
-            except (OSError, json.JSONDecodeError):
-                continue
+            except (OSError, json.JSONDecodeError) as exc:
+                # A corrupt parsed artifact is a data-integrity failure; this
+                # dataset feeds evaluation gates, so silently skipping it would
+                # produce a dataset that does not match the corpus.
+                raise SystemExit(
+                    f"parsed artifact {path} is corrupt: {exc}"
+                ) from exc
             for raw in payload.get("chunks", []):
-                try:
-                    pool.append(Chunk.model_validate(raw))
-                except Exception:  # noqa: BLE001
-                    continue
-    return random.sample(pool, min(limit, len(pool)))
+                pool.append(Chunk.model_validate(raw))
+    # Seeded sampling keeps a regenerated dataset comparable across runs;
+    # override with RAG_SYNTHETIC_SAMPLE_SEED for a fresh draw.
+    rng = random.Random(int(os.getenv("RAG_SYNTHETIC_SAMPLE_SEED", "17")))
+    return rng.sample(pool, min(limit, len(pool)))
 
 
 async def generate_synthetic_data(container: AppContainer, limit: int = 10) -> int:
@@ -54,6 +60,7 @@ async def generate_synthetic_data(container: AppContainer, limit: int = 10) -> i
     logger.info(f"Retrieved {len(hits)} chunks for generation.")
 
     synthetic_records = []
+    failures = 0
 
     prompt = """
     你是一个专业的数据集构建专家。请阅读以下文本片段，并基于它生成 1 个高质量的 RAG 问答测试对。
@@ -74,7 +81,7 @@ async def generate_synthetic_data(container: AppContainer, limit: int = 10) -> i
     """
 
     for i, hit in enumerate(hits[:limit]):
-        text = hit.chunk.text
+        text = hit.text
         messages = [
             {"role": "system", "content": "You are a helpful dataset generator."},
             {"role": "user", "content": prompt.format(text=text)}
@@ -94,20 +101,38 @@ async def generate_synthetic_data(container: AppContainer, limit: int = 10) -> i
                     "kb_id": "default",
                     "query": qa_pair["query"],
                     "reference_answer": qa_pair["expected_answer"],
-                    "reference_contexts": [text[:200] + "..."]
+                    # The full sampled text: a truncated reference guarantees
+                    # under-reported recall (the numbers often live past 200c).
+                    "reference_contexts": [text]
                 }
                 synthetic_records.append(record)
                 logger.info(f"Generated record {i+1}/{limit}")
         except Exception as e:
-            logger.warning(f"Failed to generate QA for chunk {i}: {e}")
+            logger.error(f"Failed to generate QA for chunk {i}: {e}")
+            failures += 1
 
     output_path = ROOT / "data" / "eval" / "rag_synthetic_dataset.jsonl"
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(output_path, "w", encoding="utf-8") as f:
-        for record in synthetic_records:
-            f.write(json.dumps(record, ensure_ascii=False) + "\n")
+    # Build the payload first, then write atomically off the event loop: a
+    # crash mid-write must not leave a partial dataset that the eval gate
+    # would then score.
+    payload = "".join(
+        json.dumps(record, ensure_ascii=False) + "\n" for record in synthetic_records
+    )
 
-    logger.info(f"Successfully generated {len(synthetic_records)} records to {output_path}")
+    def _write() -> None:
+        tmp = output_path.with_name(f".{output_path.name}.tmp")
+        tmp.write_text(payload, encoding="utf-8")
+        os.replace(str(tmp), str(output_path))
+
+    await asyncio.to_thread(_write)
+
+    logger.info(
+        "Generated %d records (%d chunk(s) failed) to %s",
+        len(synthetic_records),
+        failures,
+        output_path,
+    )
     return len(synthetic_records)
 
 

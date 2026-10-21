@@ -46,6 +46,13 @@ def main() -> int:
         output_path = output_dir / f"{dataset_path.stem}_benchmark.json"
 
     container = AppContainer.from_env()
+    # build_benchmark_report needs a diagnosis service; without it the run dies
+    # with AttributeError halfway through instead of saying what to enable.
+    if container.diagnosis_service is None:
+        raise SystemExit(
+            "benchmark requires diagnosis: set RAG_DIAGNOSIS_ENABLED=true "
+            "(and RAG_EVAL_ENABLED=true)."
+        )
     dataset = load_jsonl_dataset(str(dataset_path))
     evaluated_records = asyncio.run(materialize_eval_records(container, dataset))
     runner = container.eval_runner
@@ -59,7 +66,12 @@ def main() -> int:
         else runner.run(evaluated_records)
     )
     benchmark_report = build_benchmark_report(
-        dataset_path=str(dataset_path.relative_to(ROOT)),
+        # An --dataset outside the repo must not crash the run.
+        dataset_path=str(
+            dataset_path.relative_to(ROOT)
+            if dataset_path.is_relative_to(ROOT)
+            else dataset_path
+        ),
         eval_report=eval_report,
         trace_store=container.trace_store,
         diagnosis_service=container.diagnosis_service,

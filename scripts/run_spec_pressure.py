@@ -159,12 +159,19 @@ def configure_runtime(args: argparse.Namespace, corpus_dir: Path) -> None:
     normalize_provider_env()
     os.environ["MODEL_GATEWAY_MODE"] = "live"
     os.environ.setdefault("RAG_WIKI_ENABLED", "true")
-    os.environ["RAG_GRAPH_BACKEND"] = "artifact" if args.graph_backend == "none" else args.graph_backend
+    # "none" is executed as the artifact store (no database needed); report it
+    # as such instead of echoing the flag back.
+    effective_graph_backend = "artifact" if args.graph_backend == "none" else args.graph_backend
+    os.environ["RAG_GRAPH_BACKEND"] = effective_graph_backend
     os.environ["RAG_INGEST_ALLOWED_DIRS"] = str(corpus_dir.resolve())
     os.environ.setdefault("RAG_AUTH_DISABLED", "true")
-    os.environ.setdefault("DISABLE_RERANK", "true")
-    if args.graph_backend == "postgres":
-        os.environ.setdefault("PG_URI", "postgresql://nanorag:nano-rag@127.0.0.1:5432/nanorag")
+    # Do NOT force DISABLE_RERANK: the run reports the rerank stage, so silently
+    # skipping it would make the report describe a pipeline that did not run.
+    if args.graph_backend == "postgres" and not os.getenv("PG_URI"):
+        raise SystemExit(
+            "PG_URI must be set for --graph-backend postgres (no embedded "
+            "credentials are assumed)."
+        )
 
 
 def prepare_corpus(corpus_dir: Path, *, download: bool, force: bool, skip_pdf: bool) -> list[dict[str, Any]]:
@@ -409,7 +416,9 @@ async def main_async() -> int:
             "created_at": int(time.time()),
             "runtime": {
                 "discovery": container.wiki_searcher.stats() if container.wiki_searcher else {},
-                "graph_backend": args.graph_backend,
+                # Effective backend (artifact when "none" was requested), so the
+                # report cannot claim a store the run did not use.
+                "graph_backend": os.getenv("RAG_GRAPH_BACKEND"),
                 "kb_id": args.kb_id,
                 "top_k": args.top_k,
                 "query_concurrency": args.query_concurrency,

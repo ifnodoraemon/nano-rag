@@ -64,7 +64,7 @@ async def replay_trace(container: AppContainer, trace_id: str) -> ReplayResult:
         query=query,
         kb_id=kb_id,
         session_id=session_id,
-        metadata_filters=metadata_filters,
+        metadata_filters=metadata_filters if isinstance(metadata_filters, dict) else None,
     )
 
     chat_response = await container.chat_pipeline.run(chat_request)
@@ -73,29 +73,34 @@ async def replay_trace(container: AppContainer, trace_id: str) -> ReplayResult:
 
     original_chunk_ids = trace_record.contexts
     if isinstance(original_chunk_ids, list):
+        # Drop None: sorting a mixed str/None set raised TypeError and the
+        # replay of an old trace failed instead of diffing.
         original_ids = {
-            ctx.get("chunk_id") for ctx in original_chunk_ids if isinstance(ctx, dict)
+            ctx.get("chunk_id")
+            for ctx in original_chunk_ids
+            if isinstance(ctx, dict) and ctx.get("chunk_id")
         }
     else:
         original_ids = set()
 
     replayed_ids = {
-        ctx.get("chunk_id")
-        for ctx in chat_response.contexts
-        if isinstance(ctx, dict)
+        ctx.get("chunk_id") for ctx in chat_response.contexts
+        if isinstance(ctx, dict) and ctx.get("chunk_id")
     }
 
     if original_ids != replayed_ids:
         diffs.append(
             ReplayDiff(
                 field="context_chunk_ids",
-                original=sorted(original_ids),
-                replayed=sorted(replayed_ids),
+                original=sorted(_string_ids(original_ids)),
+                replayed=sorted(_string_ids(replayed_ids)),
             )
         )
 
     original_citation_ids = {
-        c.get("chunk_id") for c in trace_record.citations if isinstance(c, dict)
+        c.get("chunk_id")
+        for c in trace_record.citations
+        if isinstance(c, dict) and c.get("chunk_id")
     }
     replayed_citation_ids = {
         c.chunk_id for c in chat_response.citations
@@ -104,8 +109,8 @@ async def replay_trace(container: AppContainer, trace_id: str) -> ReplayResult:
         diffs.append(
             ReplayDiff(
                 field="citation_chunk_ids",
-                original=sorted(original_citation_ids),
-                replayed=sorted(replayed_citation_ids),
+                original=sorted(_string_ids(original_citation_ids)),
+                replayed=sorted(_string_ids(replayed_citation_ids)),
             )
         )
 
@@ -128,3 +133,9 @@ async def replay_trace(container: AppContainer, trace_id: str) -> ReplayResult:
         original_answer=trace_record.answer,
         replayed_answer=chat_response.answer,
     )
+
+
+def _string_ids(values: set[object] | set[str]) -> list[str]:
+    """Only string ids are diff-able; a stray None/None-like context id used to
+    raise TypeError when the two sets were sorted."""
+    return sorted(value for value in values if isinstance(value, str))

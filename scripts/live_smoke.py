@@ -1,9 +1,12 @@
 import argparse
 import asyncio
 import getpass
+import logging
 import os
 import sys
 from pathlib import Path
+
+logger = logging.getLogger("live_smoke")
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -45,7 +48,13 @@ def normalize_provider_env() -> None:
     gateway_base_url = os.getenv("MODEL_GATEWAY_BASE_URL", "")
     if gateway_base_url:
         os.environ.setdefault("GENERATION_API_BASE_URL", gateway_base_url)
-    os.environ.setdefault("DOCUMENT_PARSER_API_BASE_URL", "https://generativelanguage.googleapis.com")
+    # Do NOT default the parser endpoint: a configured DashScope/Qwen parser
+    # must not be silently redirected to Google.
+    if not os.getenv("DOCUMENT_PARSER_API_BASE_URL"):
+        logger.warning(
+            "DOCUMENT_PARSER_API_BASE_URL is unset; the parser capability will "
+            "report as unconfigured instead of guessing a provider endpoint."
+        )
     os.environ.setdefault("RAG_WIKI_ENABLED", "true")
 
 
@@ -82,8 +91,19 @@ async def run_smoke(args: argparse.Namespace) -> int:
                 {"role": "user", "content": "Return exactly: nano-rag-live-ok"},
             ]
         )
-        content = str(generated.get("content", "")).replace("\n", " ")[:160]
-        print(f"generation_ok={bool(content)} sample={content}", flush=True)
+        raw_content = str(generated.get("content", ""))
+        content = raw_content.replace("\n", " ")[:160]
+        # The prompt asks for a sentinel; "non-empty" alone would report success
+        # for an error string or a refusal.
+        generation_ok = "nano-rag-live-ok" in raw_content.casefold()
+        print(f"generation_ok={generation_ok} sample={content}", flush=True)
+        if not generation_ok:
+            print(
+                "generation check failed: the model did not return the "
+                "'nano-rag-live-ok' sentinel",
+                flush=True,
+            )
+            return 1
 
         if container.config.rerank_enabled:
             ranked = await container.rerank_client.rerank(
@@ -103,10 +123,14 @@ async def run_smoke(args: argparse.Namespace) -> int:
             str(ROOT / "data/raw/employee_handbook.md"),
             kb_id="default",
         )
+        ingest_ok = ingest.documents > 0 and ingest.chunks > 0
         print(
-            f"ingest_ok=true documents={ingest.documents} chunks={ingest.chunks}",
+            f"ingest_ok={ingest_ok} documents={ingest.documents} chunks={ingest.chunks}",
             flush=True,
         )
+        if not ingest_ok:
+            print("ingest check failed: no documents/chunks were produced", flush=True)
+            return 1
 
         chat = await container.chat_pipeline.run(
             ChatRequest(
@@ -116,11 +140,19 @@ async def run_smoke(args: argparse.Namespace) -> int:
             )
         )
         answer = chat.answer.replace("\n", " ")[:240]
+        chat_ok = bool(chat.answer.strip()) and bool(chat.contexts) and bool(chat.trace_id)
         print(
-            f"chat_ok={bool(chat.answer)} contexts={len(chat.contexts)} "
+            f"chat_ok={chat_ok} contexts={len(chat.contexts)} "
             f"trace_id={chat.trace_id} answer={answer}",
             flush=True,
         )
+        if not chat_ok:
+            print(
+                "chat check failed: an answer needs text, retrieved context and "
+                "a trace id to be traceable",
+                flush=True,
+            )
+            return 1
         return 0
     except Exception as exc:
         message = str(exc).replace("\n", " ")[:800]
