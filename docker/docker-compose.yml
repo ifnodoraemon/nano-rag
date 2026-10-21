@@ -73,6 +73,11 @@ services:
     container_name: nanorag-app
     expose:
       - "8000"
+    # Reach a model gateway running on the host (outside this compose project).
+    # host-gateway resolves to the host's bridge address regardless of subnet,
+    # so the value does not depend on a hardcoded 172.x IP.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     environment:
       <<: *app-env
       # PostgreSQL default max_connections is 100. Budget: app 8 + 32 workers
@@ -111,6 +116,8 @@ services:
       context: ..
       dockerfile: docker/app.Dockerfile
     container_name: nanorag-worker
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     command:
       [
         "celery",

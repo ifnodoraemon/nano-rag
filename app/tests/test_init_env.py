@@ -171,3 +171,84 @@ def test_placeholder_values_do_not_count_as_supplied(init_env) -> None:
     )
 
     assert module.check() == 1
+
+
+# --------------------------------------------------------------------------- #
+# Provider probe: a syntactically valid key can still be dead                 #
+# --------------------------------------------------------------------------- #
+
+def test_probe_reports_rejected_key(init_env, monkeypatch, capsys) -> None:
+    """A plausible-looking key that the provider rejects must be caught here,
+    not discovered later inside a running container."""
+    import urllib.error
+    import io
+
+    module, env_path = init_env
+    env_path.parent.mkdir(parents=True, exist_ok=True)
+    env_path.write_text(
+        "GENERATION_API_KEY=AIzaSyPlausibleLookingKey1234567890abc\n"
+        "DOCUMENT_PARSER_API_KEY=k\n"
+        "RAG_API_KEYS=business\nRAG_ADMIN_API_KEYS=admin\nPOSTGRES_PASSWORD=p\n",
+        encoding="utf-8",
+    )
+
+    def fake_urlopen(request, timeout=0):  # noqa: ANN001, ARG001
+        body = b'{"error": {"message": "API key not valid. Please pass a valid API key."}}'
+        raise urllib.error.HTTPError(
+            request.full_url, 400, "Bad Request", {}, io.BytesIO(body)
+        )
+
+    monkeypatch.setattr(module.urllib.request, "urlopen", fake_urlopen)
+
+    assert module.check(probe=True) == 1
+    output = capsys.readouterr().out
+    assert "rejected this key" in output
+
+
+def test_probe_accepts_working_key(init_env, monkeypatch, capsys) -> None:
+    import io
+
+    module, env_path = init_env
+    env_path.parent.mkdir(parents=True, exist_ok=True)
+    env_path.write_text(
+        "GENERATION_API_KEY=k1\nDOCUMENT_PARSER_API_KEY=k2\n"
+        "RAG_API_KEYS=business\nRAG_ADMIN_API_KEYS=admin\nPOSTGRES_PASSWORD=p\n",
+        encoding="utf-8",
+    )
+
+    class _Response(io.BytesIO):
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):  # noqa: ANN002
+            return False
+
+    monkeypatch.setattr(
+        module.urllib.request,
+        "urlopen",
+        lambda request, timeout=0: _Response(b'{"data": [{"id": "m1"}, {"id": "m2"}]}'),
+    )
+
+    assert module.check(probe=True) == 0
+    assert "reachable (2 model(s) listed)" in capsys.readouterr().out
+
+
+def test_probe_does_not_fail_on_unreachable_network(init_env, monkeypatch, capsys) -> None:
+    import urllib.error
+
+    module, env_path = init_env
+    env_path.parent.mkdir(parents=True, exist_ok=True)
+    env_path.write_text(
+        "GENERATION_API_KEY=k1\nDOCUMENT_PARSER_API_KEY=k2\n"
+        "RAG_API_KEYS=business\nRAG_ADMIN_API_KEYS=admin\nPOSTGRES_PASSWORD=p\n",
+        encoding="utf-8",
+    )
+
+    def fake_urlopen(request, timeout=0):  # noqa: ANN001, ARG001
+        raise urllib.error.URLError("name resolution failed")
+
+    monkeypatch.setattr(module.urllib.request, "urlopen", fake_urlopen)
+
+    assert module.check(probe=True) == 1
+    output = capsys.readouterr().out
+    assert "cannot reach" in output

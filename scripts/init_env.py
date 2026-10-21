@@ -18,9 +18,12 @@ Keys are generated with `secrets.token_hex`
 from __future__ import annotations
 
 import argparse
+import json
 import secrets
 import shutil
 import sys
+import urllib.error
+import urllib.request
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -137,12 +140,78 @@ def _has_real_value(value: str | None) -> bool:
     if not token:
         return False
     lowered = token.lower()
-    if any(marker in lowered for marker in ("<", "your-", "changeme", "xxx")):
-        return False
-    return True
+    return not any(
+        marker in lowered for marker in ("<", "your-", "changeme", "xxx")
+    )
 
 
-def check() -> int:
+def _probe_provider(base_url: str, api_key: str, timeout: float = 15.0) -> tuple[bool, str]:
+    """Ask the provider whether the key is actually usable.
+
+    A syntactically plausible key (right prefix and length) can still be dead -
+    revoked, wrong project, quota exhausted. Testing it here turns a confusing
+    runtime failure into one clear line before anything is deployed.
+    """
+    base = base_url.rstrip("/")
+    if not base:
+        # No base URL in the file: probe the documented default rather than
+        # building a relative "/models" URL that cannot resolve.
+        base = "https://generativelanguage.googleapis.com/v1beta/openai"
+    # host.docker.internal only resolves INSIDE a container. This check runs on
+    # the host, so map it to localhost - otherwise a perfectly good gateway
+    # looks unreachable and sends people chasing a nonexistent problem.
+    base = base.replace("host.docker.internal", "localhost").replace(
+        "//gateway.docker.internal", "//localhost"
+    )
+    attempts: list[tuple[str, dict[str, str] | None]] = [
+        (f"{base}/models", {"Authorization": f"Bearer {api_key}"}),
+    ]
+    # Native Gemini: the key travels as a query parameter.
+    if "generativelanguage.googleapis.com" in base:
+        attempts.append((f"{base}/v1beta/models?key={api_key}", None))
+        attempts.append((f"{base}/v1/models?key={api_key}", None))
+
+    last_detail = "no endpoint attempted"
+    for url, headers in attempts:
+        request = urllib.request.Request(url, headers=headers or {})
+        reachable, detail, conclusive = _try_probe(request, timeout)
+        if conclusive:
+            return reachable, detail
+        last_detail = detail
+    return False, last_detail
+
+
+def _try_probe(
+    request: urllib.request.Request, timeout: float
+) -> tuple[bool, str, bool]:
+    """Return (ok, detail, conclusive). A 404 means "wrong endpoint shape", not
+    "bad key", so the caller can try another path."""
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            raw = response.read().decode("utf-8", "replace")
+            try:
+                payload = json.loads(raw or "{}")
+            except json.JSONDecodeError:
+                return True, "reachable (non-JSON response)", True
+            count = len(payload.get("data") or payload.get("models") or [])
+            return True, f"reachable ({count} model(s) listed)", True
+    except urllib.error.HTTPError as exc:
+        body = ""
+        try:
+            body = exc.read().decode("utf-8", "replace")
+        except Exception:  # noqa: BLE001 - the body is only diagnostic detail
+            body = "<unreadable error body>"
+        detail = body.replace("\n", " ").strip()[:200]
+        if exc.code == 404:
+            return False, f"HTTP 404 (endpoint shape differs): {detail}", False
+        if exc.code in (401, 403) or "api key not valid" in body.lower() or "valid api key" in body.lower():
+            return False, f"the provider rejected this key (HTTP {exc.code}): {detail}", True
+        return False, f"HTTP {exc.code}: {detail}", True
+    except (urllib.error.URLError, TimeoutError, OSError) as exc:
+        return False, f"cannot reach the endpoint: {exc}", True
+
+
+def check(probe: bool = False) -> int:
     """Report readiness without touching anything."""
     values = _parse_env(ENV_PATH)
     problems: list[str] = []
@@ -152,7 +221,15 @@ def check() -> int:
     for name in GENERATED_SECRETS:
         if not _has_real_value(_lookup(values, name)):
             problems.append(f"{name} is missing (run: python scripts/init_env.py)")
-    for name in REQUIRED_EXTERNAL:
+    # The parser key is only required when the parser stage is enabled: a
+    # text-only provider cannot parse PDFs/images, and demanding a key for a
+    # capability that is switched off would be noise.
+    parser_enabled = (_lookup(values, "DOCUMENT_PARSER_ENABLED") or "true").strip().lower()
+    parser_required = parser_enabled not in {"false", "0", "no", "off"}
+    required = ["GENERATION_API_KEY"]
+    if parser_required:
+        required.append("DOCUMENT_PARSER_API_KEY")
+    for name in required:
         if not _has_real_value(_lookup(values, name)):
             problems.append(f"{name} is not filled in - this is the one you must provide")
     if any(key.startswith("COMPOSE_") for key in values):
@@ -174,8 +251,28 @@ def check() -> int:
             "RAG_PROXY_API_KEY to the first one)"
         )
 
+    if not problems and probe:
+        probes = [
+            ("generation", "GENERATION_API_KEY", "GENERATION_API_BASE_URL"),
+        ]
+        if parser_required:
+            probes.append(
+                ("document parser", "DOCUMENT_PARSER_API_KEY", "DOCUMENT_PARSER_API_BASE_URL")
+            )
+        for label, key_name, url_name in probes:
+            api_key = _lookup(values, key_name)
+            base_url = _lookup(values, url_name) or ""
+            if not _has_real_value(api_key):
+                continue  # not configured is already reported above
+            ok, detail = _probe_provider(str(base_url), str(api_key))
+            print(f"  {label:16s} {'OK' if ok else 'FAIL'} - {detail}")
+            if not ok:
+                problems.append(f"{label} credentials do not work: {detail}")
+
     if not problems:
         print(f"OK: {ENV_PATH} is ready.")
+        if not probe:
+            print("    add --probe to verify the provider keys actually work.")
         print("    optional: cross-encoder rerank is disabled; see section 4.")
         return 0
     print(f"{ENV_PATH} needs attention:")
@@ -277,11 +374,20 @@ def write(force: bool) -> int:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--check", action="store_true", help="report only, change nothing")
+    parser.add_argument(
+        "--check",
+        action="store_true",
+        help="report only, change nothing (add --probe to test the provider keys)",
+    )
+    parser.add_argument(
+        "--probe",
+        action="store_true",
+        help="also call the provider to check the key is valid (implies --check)",
+    )
     parser.add_argument("--force", action="store_true", help="regenerate secrets")
     args = parser.parse_args()
-    if args.check:
-        return check()
+    if args.check or args.probe:
+        return check(probe=args.probe)
     return write(args.force)
 
 
