@@ -92,13 +92,33 @@ def test_run_empty_records() -> None:
     assert report["results"] == []
 
 
-def test_answer_exact_match_is_token_based() -> None:
+def test_answer_exact_match_is_token_multiset_based() -> None:
+    # Citation labels are provenance, not content: they must not disqualify a
+    # verbatim answer.
+    assert (
+        _answer_exact_match(
+            "中宁县徐套乡的区片综合地价为 31800 元/亩。[C1]",
+            "中宁县徐套乡的区片综合地价为 31800 元/亩。",
+        )
+        == 1.0
+    )
+    # Exact match is EXACT: an added lead-in is extra content, not a match.
+    # (Semantic paraphrase is what the LLM-assisted metrics measure.)
     assert (
         _answer_exact_match(
             "根据规定，中宁县徐套乡的区片综合地价为 31800 元/亩。",
             "中宁县徐套乡的区片综合地价为 31800 元/亩。",
         )
-        == 1.0
+        == 0.0
+    )
+    # A contradicting answer must NOT score 1.0 just because it contains every
+    # reference token: "不/无需" invert the meaning. Set containment used to
+    # award full marks here.
+    assert (
+        _answer_exact_match(
+            "员工 不 报销 15 天 内 无需 提交", "15 天 内 提交"
+        )
+        == 0.0
     )
     # Wrong number → not a match, even though 99% of tokens match.
     assert (
@@ -108,8 +128,9 @@ def test_answer_exact_match_is_token_based() -> None:
         )
         == 0.0
     )
-    # Empty reference cannot produce a pass.
-    assert _answer_exact_match("anything", "") == 0.0
+    # No reference answer is missing data, not a failed answer: it must be
+    # excluded from the mean instead of scoring 0.0.
+    assert _answer_exact_match("anything", "") is None
 
 
 def test_reference_context_recall_table_row_serialization() -> None:
@@ -122,7 +143,9 @@ def test_reference_context_recall_table_row_serialization() -> None:
         )
         == 1.0
     )
-    assert _reference_context_recall([], ["anything"]) == 0.0
+    # No references supplied = unknown, excluded from the aggregate.
+    assert _reference_context_recall([], ["anything"]) is None
+    # References supplied but nothing retrieved = real failure.
     assert _reference_context_recall(["ref"], []) == 0.0
 
 

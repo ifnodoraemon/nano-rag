@@ -19,8 +19,40 @@ def test_business_auth_rejects_missing_key_when_not_configured(monkeypatch) -> N
 
 
 def test_business_auth_can_be_disabled_explicitly(monkeypatch) -> None:
+    # The kill switch is a local/dev convenience only.
+    monkeypatch.setenv("RAG_ENV", "local")
     monkeypatch.setenv("RAG_AUTH_DISABLED", "true")
-    require_api_key(_request_with_keys(set()), authorization=None, x_api_key=None)
+    context = require_api_key(_request_with_keys(set()), authorization=None, x_api_key=None)
+    assert context.auth_mode == "disabled"
+
+
+def test_auth_disabled_is_ignored_outside_local_env(monkeypatch) -> None:
+    # Fail-closed: an operator who flips RAG_AUTH_DISABLED=true in production
+    # must NOT get an unauthenticated API.
+    monkeypatch.setenv("RAG_ENV", "prod")
+    monkeypatch.setenv("RAG_AUTH_DISABLED", "true")
+    with pytest.raises(HTTPException) as exc_info:
+        require_api_key(_request_with_keys(set()), authorization=None, x_api_key=None)
+    assert exc_info.value.status_code == 503
+
+
+def test_admin_auth_ignores_trusted_proxy_secret(monkeypatch) -> None:
+    # The proxy is a business-call pass-through only. Operator routes must be
+    # authenticated by the caller with an admin key; a proxy secret must never
+    # escalate to admin (CLAUDE.md invariant).
+    monkeypatch.delenv("RAG_AUTH_DISABLED", raising=False)
+    monkeypatch.setenv("RAG_TRUSTED_PROXY_SECRET", "proxy-secret")
+    monkeypatch.setenv("RAG_ADMIN_API_KEYS", "admin-secret")
+    with pytest.raises(HTTPException) as exc_info:
+        require_admin_key(
+            _request_with_keys({"business-secret"}),
+            authorization=None,
+            x_admin_api_key=None,
+            x_rag_admin_key=None,
+            x_rag_proxy_secret="proxy-secret",
+            x_rag_principal_id="attacker",
+        )
+    assert exc_info.value.status_code == 401
 
 
 def test_business_auth_accepts_bearer_token(monkeypatch) -> None:

@@ -1,6 +1,6 @@
 import pytest
 
-from app.core.exceptions import ParsingError, RetrievalError
+from app.core.exceptions import RetrievalError
 from app.schemas.chunk import Chunk
 from app.schemas.document import Document
 from app.wiki.compiler import WikiCompiler

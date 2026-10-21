@@ -1,6 +1,5 @@
 import sys
 import json
-import asyncio
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -8,7 +7,6 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from app.core.config import AppContainer
-from app.core.tracing import FeedbackStore, TraceStore
 
 def generate_regression_dataset(output_path: Path):
     container = AppContainer.from_env()

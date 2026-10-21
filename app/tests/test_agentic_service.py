@@ -5,7 +5,7 @@ from types import SimpleNamespace
 import pytest
 
 from app.agentic import AgenticReasoningService
-from app.core.exceptions import ModelGatewayError, ModelOutputError
+from app.core.exceptions import ModelOutputError
 from app.core.tracing import TraceStore
 from app.generation.answer_formatter import AnswerFormatter
 from app.generation.prompt_builder import PromptBuilder

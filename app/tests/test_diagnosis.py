@@ -4,6 +4,7 @@ from types import SimpleNamespace
 
 from app.api.routes_debug import diagnose_auto
 from app.core.tracing import TraceStore
+from app.core.exceptions import DiagnosisError
 from app.diagnostics.service import DiagnosisService
 from app.schemas.diagnosis import AutoDiagnosisRequest
 from app.schemas.trace import TraceRecord
@@ -127,7 +128,7 @@ def test_diagnose_eval_flags_generation_misalignment_when_context_recall_is_full
 
 
 @pytest.mark.asyncio
-async def test_add_ai_suggestion_degrades_gracefully_on_generation_error() -> None:
+async def test_add_ai_suggestion_fails_loudly_on_generation_error() -> None:
     class BrokenGenerationClient:
         async def generate(self, messages):  # noqa: ANN001, ARG002
             raise RuntimeError("upstream unavailable")
@@ -150,9 +151,12 @@ async def test_add_ai_suggestion_degrades_gracefully_on_generation_error() -> No
         0,
     )
 
-    diagnosis = await service.add_ai_suggestion(diagnosis, {"foo": "bar"})
+    # No degradation path: a failed provider call must raise, not be reported
+    # as a successful diagnosis carrying the raw upstream error text.
+    with pytest.raises(DiagnosisError) as exc_info:
+        await service.add_ai_suggestion(diagnosis, {"foo": "bar"})
 
-    assert diagnosis.ai_suggestion == "AI diagnosis unavailable: upstream unavailable"
+    assert "upstream unavailable" not in str(exc_info.value)
 
 
 @pytest.mark.asyncio

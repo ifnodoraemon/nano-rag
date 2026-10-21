@@ -138,9 +138,10 @@ async def test_business_retrieve_uses_kb_scope_and_metadata_filters() -> None:
     assert response.session_id == "session-a"
     assert response.trace_id == "trace-retrieve-1"
     assert response.contexts == [{"chunk_id": "c1", "text": "answer context"}]
-    # contexts is fanned out to retrieved/reranked by the discovery-based route.
+    # `retrieved` mirrors the discovery output; there is no rerank stage, so no
+    # fabricated `reranked` copy is exposed.
     assert response.retrieved == response.contexts
-    assert response.reranked == response.contexts
+    assert "reranked" not in response.model_dump()
 
 
 @pytest.mark.asyncio
@@ -483,8 +484,11 @@ async def test_rag_chat_stream_runs_the_unified_pipeline() -> None:
                 frames.append(json.loads(line[6:]))
 
     statuses = [frame.get("status") for frame in frames]
-    assert statuses == ["thinking", "generating", "success"]
+    # One terminal answer frame: the answer (and its citations) is emitted
+    # exactly once instead of being duplicated across generating+success.
+    assert statuses == ["thinking", "success"]
+    answers = [frame for frame in frames if frame.get("answer") == "the answer"]
+    assert len(answers) == 1
     success = frames[-1]
-    assert success["answer"] == "the answer"
     assert success["trace_id"] == "trace-1"
     assert success["citations"][0]["chunk_id"] == "c1"

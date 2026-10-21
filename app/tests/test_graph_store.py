@@ -3,8 +3,6 @@ import json
 from app.retrieval.graph_store import PostgresGraphStore
 from app.schemas.structured import (
     DocumentNode,
-    GraphEntity,
-    GraphRelation,
     KnowledgeGraph,
     NodeProvenance,
     NodeType,

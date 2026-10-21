@@ -23,11 +23,18 @@ def normalize_for_comparison(text: str) -> str:
 
 
 def safe_float(value: object, default: float = 0.0) -> float:
+    """NaN-safe float coercion for an untyped metric value."""
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return float(value)
+    if not isinstance(value, (int, float, str)):
+        return default
     try:
-        result = float(value) if value is not None else default
-        return result if result == result else default
+        result = float(value)
     except (ValueError, TypeError):
         return default
+    return result if result == result else default
 
 
 def parse_bool_env(value: str | None) -> bool:

@@ -57,8 +57,9 @@ async def test_health_detail_rejects_missing_keys_over_http(monkeypatch) -> None
     finally:
         fastapi_app.state.container = previous_container
 
+    # /health/detail is an operator route: the 503 names the ADMIN key set.
     assert response.status_code == 503
-    assert "RAG_API_KEYS not configured" in response.json()["detail"]
+    assert "RAG_ADMIN_API_KEYS not configured" in response.json()["detail"]
 
 
 @pytest.mark.asyncio
@@ -378,6 +379,7 @@ async def test_health_route_does_not_degrade_when_langfuse_is_disabled(monkeypat
 
 @pytest.mark.asyncio
 async def test_health_route_respects_auth_disabled_override(monkeypatch) -> None:
+    monkeypatch.setenv("RAG_ENV", "local")
     monkeypatch.setenv("RAG_AUTH_DISABLED", "true")
     fake_trace_list = SimpleNamespace(total=0, items=[])
     fake_container = SimpleNamespace(
