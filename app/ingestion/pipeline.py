@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import asyncio
+import io
 import json
 import logging
 import os
@@ -15,7 +16,7 @@ from typing import TYPE_CHECKING
 from uuid import uuid4
 
 from app.ingestion.loader import discover_files
-from app.ingestion.metadata import extract_document_metadata
+from app.ingestion.metadata import build_source_key, extract_document_metadata
 from app.ingestion.graph_extractor import GraphExtractor
 from app.ingestion.parser_registry import model_parser_available
 from app.wiki.compiler import WikiCompiler
@@ -141,7 +142,8 @@ class IngestionPipeline:
                 "ingestion.kb_id": kb_id,
             },
         ):
-            files = discover_files(path)
+            # Recursive filesystem walk: keep it off the event loop.
+            files = await asyncio.to_thread(discover_files, path)
             chunk_count = 0
             doc_count = 0
             prepared_documents: list[PreparedDocument] = []
@@ -160,48 +162,96 @@ class IngestionPipeline:
                     chunk_count += len(prepared.chunks)
 
             self.config.parsed_dir.mkdir(parents=True, exist_ok=True)
-            for prepared in prepared_documents:
-                artifact_tmp = await asyncio.to_thread(
-                    self._stage_parsed_artifact,
-                    prepared.document,
-                    prepared.chunks,
-                    prepared.structured_document,
-                )
-                try:
-                    await asyncio.to_thread(
-                        self._commit_parsed_artifact,
-                        artifact_tmp,
-                        prepared.document.doc_id,
+            # Artifacts, graph rows and wiki pages live in three stores with no
+            # shared transaction. Committing artifacts first and failing later
+            # (graph upsert, wiki write) left discovery serving the previous
+            # version while deep-read read the new artifact. Track what this
+            # batch committed and undo it on failure so the three stay aligned.
+            committed: list[str] = []
+            try:
+                for prepared in prepared_documents:
+                    doc_id = prepared.document.doc_id
+                    artifact_tmp = await asyncio.to_thread(
+                        self._stage_parsed_artifact,
+                        prepared.document,
+                        prepared.chunks,
+                        prepared.structured_document,
                     )
+                    await asyncio.to_thread(
+                        self._commit_parsed_artifact, artifact_tmp, doc_id
+                    )
+                    committed.append(doc_id)
                     if self.graph_store and prepared.structured_document:
                         await asyncio.to_thread(
                             self.graph_store.upsert_document,
                             prepared.structured_document,
                         )
-                except Exception:
-                    artifact_tmp.unlink(missing_ok=True)
-                    raise
 
-            # One lock acquisition + one version-ledger/index write for the
-            # whole batch instead of per-file full rewrites.
-            if self.wiki_compiler and prepared_documents:
-                await asyncio.to_thread(
-                    self.wiki_compiler.upsert_documents,
-                    [
-                        (prepared.document, prepared.chunks)
-                        for prepared in prepared_documents
-                    ],
-                )
-            if self.graph_store and any(
-                prepared.structured_document for prepared in prepared_documents
-            ):
-                # Once-per-job maintenance: reclaim entity rows whose node
-                # links were rewritten by this batch (kept out of the
-                # per-document hot path).
-                await asyncio.to_thread(self.graph_store.collect_orphan_entities)
-            if self.wiki_compiler and self.wiki_searcher:
-                self.wiki_searcher.refresh()
+                # One lock acquisition + one version-ledger/index write for the
+                # whole batch instead of per-file full rewrites.
+                if self.wiki_compiler and prepared_documents:
+                    await asyncio.to_thread(
+                        self.wiki_compiler.upsert_documents,
+                        [
+                            (prepared.document, prepared.chunks)
+                            for prepared in prepared_documents
+                        ],
+                    )
+                if self.graph_store and any(
+                    prepared.structured_document for prepared in prepared_documents
+                ):
+                    # Once-per-job maintenance: reclaim entity rows whose node
+                    # links were rewritten by this batch (kept out of the
+                    # per-document hot path).
+                    await asyncio.to_thread(self.graph_store.collect_orphan_entities)
+            except BaseException:
+                await self._rollback_commit(prepared_documents, committed)
+                raise
+            if self.wiki_compiler and self.wiki_searcher and prepared_documents:
+                # Incremental re-index (not a full rebuild) and off the loop:
+                # refresh() re-scanned and re-scored the entire corpus after
+                # every ingest, blocking every concurrent request.
+                await asyncio.to_thread(self.wiki_searcher.sync)
             return IngestResponse(documents=doc_count, chunks=chunk_count)
+
+    async def _rollback_commit(
+        self, prepared_documents: list[PreparedDocument], committed: list[str]
+    ) -> None:
+        """Undo this batch's partial writes so the stores stay consistent.
+
+        Best-effort by design: a rollback failure must not mask the original
+        error, but it is logged loudly because the stores are then divergent.
+        """
+        committed_ids = set(committed)
+        for prepared in prepared_documents:
+            doc_id = prepared.document.doc_id
+            if doc_id in committed_ids:
+                try:
+                    await asyncio.to_thread(
+                        (self.config.parsed_dir / f"{doc_id}.json").unlink,
+                        missing_ok=True,
+                    )
+                except OSError:
+                    logger.exception("rollback: could not remove artifact for %s", doc_id)
+            if self.graph_store and prepared.structured_document:
+                try:
+                    await asyncio.to_thread(
+                        self.graph_store.delete_document,
+                        doc_id=doc_id,
+                        kb_id=prepared.document.metadata.get("kb_id", "default"),
+                    )
+                except Exception:  # noqa: BLE001 - reported, never re-raised
+                    logger.exception("rollback: could not delete graph rows for %s", doc_id)
+            if self.wiki_compiler:
+                try:
+                    await asyncio.to_thread(self.wiki_compiler.remove_document, doc_id)
+                except Exception:  # noqa: BLE001 - reported, never re-raised
+                    logger.exception("rollback: could not remove wiki page for %s", doc_id)
+        if self.wiki_compiler and self.wiki_searcher:
+            try:
+                await asyncio.to_thread(self.wiki_searcher.refresh)
+            except Exception:  # noqa: BLE001
+                logger.exception("rollback: wiki searcher refresh failed")
 
     async def _prepare_document(
         self,
@@ -227,7 +277,7 @@ class IngestionPipeline:
         )
         structured_document.graph = await self.graph_extractor.extract(structured_document)
         structured_document.metadata["graph_extraction"] = {"status": "ok"}
-        text = self._structured_document_text(structured_document)
+        text = await asyncio.to_thread(self._structured_document_text, structured_document)
         if not text:
             raise ParsingError(
                 f"Document parsing returned empty content for {source_path}. "
@@ -516,58 +566,109 @@ class IngestionPipeline:
         suffix = file_path.suffix.lower()
         if suffix not in DOCUMENT_ATTACHMENT_SUFFIXES or not _document_attachment_index_enabled():
             return []
-        if suffix == ".pdf":
-            page_chunks = self._pdf_page_attachment_chunks(
-                file_path=file_path,
-                source_path=source_path,
-                doc_id=doc_id,
-                title=title,
-                metadata=metadata,
-                start_index=start_index,
+        attachment_root = self.config.parsed_dir / "attachments"
+        final_dir = attachment_root / doc_id
+        # Build the whole attachment tree in a staging directory and swap it in
+        # at the end: an in-place rebuild deleted the previous version's files
+        # before the new ones existed, so a rendering failure left the still
+        # committed artifact pointing at missing media.
+        staging_dir = attachment_root / f"{doc_id}.{uuid4().hex}.tmp"
+        try:
+            if suffix == ".pdf":
+                page_chunks = self._pdf_page_attachment_chunks(
+                    file_path=file_path,
+                    source_path=source_path,
+                    doc_id=doc_id,
+                    title=title,
+                    metadata=metadata,
+                    start_index=start_index,
+                    attachment_dir=staging_dir,
+                )
+                image_chunks = self._pdf_rendered_page_image_chunks(
+                    file_path=file_path,
+                    source_path=source_path,
+                    doc_id=doc_id,
+                    title=title,
+                    metadata=metadata,
+                    start_index=start_index + len(page_chunks),
+                    attachment_dir=staging_dir,
+                )
+                built = [*page_chunks, *image_chunks]
+            else:
+                mime_type = DOCUMENT_ATTACHMENT_MIME_TYPES[suffix]
+                attachment_chunks = [
+                    Chunk(
+                        chunk_id=f"{doc_id}:attachment:0",
+                        doc_id=doc_id,
+                        chunk_index=start_index,
+                        text="",
+                        source_path=source_path,
+                        title=title,
+                        metadata={
+                            **metadata,
+                            "chunk_kind": "document_attachment",
+                            "chunk_strategy": "document_attachment",
+                            "source_modality": "document",
+                            "media_uri": self._media_uri_for_source(file_path, source_path),
+                            "mime_type": mime_type,
+                            "attachment_scope": "document",
+                            "claim_role": "evidence",
+                            "certainty": "weak",
+                        },
+                        modality="document",
+                        media_uri=self._media_uri_for_source(file_path, source_path),
+                        mime_type=mime_type,
+                    )
+                ]
+                built = [
+                    *attachment_chunks,
+                    *self._ooxml_embedded_image_chunks(
+                        file_path=file_path,
+                        source_path=source_path,
+                        doc_id=doc_id,
+                        title=title,
+                        metadata=metadata,
+                        start_index=start_index + len(attachment_chunks),
+                        attachment_dir=staging_dir,
+                    ),
+                ]
+            return self._commit_attachment_tree(staging_dir, final_dir, built)
+        except BaseException:
+            shutil.rmtree(staging_dir, ignore_errors=True)
+            raise
+
+    def _commit_attachment_tree(
+        self, staging_dir: Path, final_dir: Path, chunks: list[Chunk]
+    ) -> list[Chunk]:
+        """Atomically replace a document's attachment tree and repoint chunks.
+
+        Attachments are built under a staging path, so the media_uri values the
+        builders embedded must be rewritten once the tree lands in its final
+        location.
+        """
+        if not chunks and not staging_dir.exists():
+            # Nothing was produced: leave the (already committed) tree alone.
+            return []
+        if final_dir.exists():
+            shutil.rmtree(final_dir)
+        if staging_dir.exists():
+            staging_dir.parent.mkdir(parents=True, exist_ok=True)
+            os.replace(str(staging_dir), str(final_dir))
+        staging_prefix = str(staging_dir)
+        final_prefix = str(final_dir)
+        committed: list[Chunk] = []
+        for chunk in chunks:
+            media_uri = chunk.media_uri
+            metadata = dict(chunk.metadata or {})
+            metadata_uri = metadata.get("media_uri")
+            if isinstance(media_uri, str):
+                media_uri = media_uri.replace(staging_prefix, final_prefix)
+            if isinstance(metadata_uri, str):
+                metadata["media_uri"] = metadata_uri.replace(staging_prefix, final_prefix)
+            committed.append(
+                chunk.model_copy(update={"media_uri": media_uri, "metadata": metadata})
             )
-            image_chunks = self._pdf_rendered_page_image_chunks(
-                file_path=file_path,
-                source_path=source_path,
-                doc_id=doc_id,
-                title=title,
-                metadata=metadata,
-                start_index=start_index + len(page_chunks),
-            )
-            return [*page_chunks, *image_chunks]
-        mime_type = DOCUMENT_ATTACHMENT_MIME_TYPES[suffix]
-        attachment_chunks = [
-            Chunk(
-                chunk_id=f"{doc_id}:attachment:0",
-                doc_id=doc_id,
-                chunk_index=start_index,
-                text="",
-                source_path=source_path,
-                title=title,
-                metadata={
-                    **metadata,
-                    "chunk_kind": "document_attachment",
-                    "chunk_strategy": "document_attachment",
-                    "source_modality": "document",
-                    "media_uri": self._media_uri_for_source(file_path, source_path),
-                    "mime_type": mime_type,
-                    "attachment_scope": "document",
-                    "claim_role": "evidence",
-                    "certainty": "weak",
-                },
-                modality="document",
-                media_uri=self._media_uri_for_source(file_path, source_path),
-                mime_type=mime_type,
-            )
-        ]
-        embedded_images = self._ooxml_embedded_image_chunks(
-            file_path=file_path,
-            source_path=source_path,
-            doc_id=doc_id,
-            title=title,
-            metadata=metadata,
-            start_index=start_index + len(attachment_chunks),
-        )
-        return [*attachment_chunks, *embedded_images]
+        return committed
 
     def _pdf_page_attachment_chunks(
         self,
@@ -578,6 +679,7 @@ class IngestionPipeline:
         title: str,
         metadata: dict,
         start_index: int,
+        attachment_dir: Path,
     ) -> list[Chunk]:
         try:
             from pypdf import PdfReader, PdfWriter
@@ -594,7 +696,6 @@ class IngestionPipeline:
         page_count = len(reader.pages)
         if page_count <= 0:
             return []
-        attachment_dir = self.config.parsed_dir / "attachments" / doc_id
         attachment_dir.mkdir(parents=True, exist_ok=True)
         chunks: list[Chunk] = []
         for page_index, page in enumerate(reader.pages, start=1):
@@ -604,8 +705,7 @@ class IngestionPipeline:
             try:
                 writer = PdfWriter()
                 writer.add_page(page)
-                with page_path.open("wb") as handle:
-                    writer.write(handle)
+                _write_bytes_atomic(page_path, _pdf_writer_bytes(writer))
             except Exception as exc:
                 raise ParsingError(
                     f"failed to write PDF page attachment for {source_path} "
@@ -648,11 +748,9 @@ class IngestionPipeline:
         title: str,
         metadata: dict,
         start_index: int,
+        attachment_dir: Path,
     ) -> list[Chunk]:
-        rendered = _render_pdf_page_images(
-            file_path,
-            self.config.parsed_dir / "attachments" / doc_id / "rendered",
-        )
+        rendered = _render_pdf_page_images(file_path, attachment_dir / "rendered")
         chunks: list[Chunk] = []
         for page_number, image_path in rendered:
             chunks.append(
@@ -691,12 +789,13 @@ class IngestionPipeline:
         title: str,
         metadata: dict,
         start_index: int,
+        attachment_dir: Path,
     ) -> list[Chunk]:
         suffix = file_path.suffix.lower()
         media_prefix = OOXML_MEDIA_PREFIXES.get(suffix)
         if not media_prefix or not _embedded_image_index_enabled():
             return []
-        output_dir = self.config.parsed_dir / "attachments" / doc_id / "embedded"
+        output_dir = attachment_dir / "embedded"
         output_dir.mkdir(parents=True, exist_ok=True)
         chunks: list[Chunk] = []
         try:
@@ -710,7 +809,7 @@ class IngestionPipeline:
                 for name in sorted(media_names, key=_natural_key)[: _embedded_image_max_count()]:
                     suffix = Path(name).suffix.lower()
                     image_path = output_dir / f"image-{len(chunks) + 1}{suffix}"
-                    image_path.write_bytes(archive.read(name))
+                    _write_bytes_atomic(image_path, archive.read(name))
                     chunks.append(
                         Chunk(
                             chunk_id=f"{doc_id}:embedded-image:{len(chunks) + 1}",
@@ -767,7 +866,9 @@ class IngestionPipeline:
             "source_modality": modality,
             "mime_type": mime_type,
             "media_uri": self._media_uri_for_source(file_path, source_path),
-            "source_key": title.lower(),
+            # Same derivation as text documents: title alone collided across
+            # directories, making unrelated files "versions" of each other.
+            "source_key": build_source_key(source_path, title),
             "source_file_name": file_path.name,
             "source_suffix": suffix,
             "source_size_bytes": source_size_bytes,
@@ -794,7 +895,7 @@ class IngestionPipeline:
                 "claim_role": "evidence",
                 "certainty": "weak",
             },
-            modality=modality,
+            modality=_modality_literal(modality),
             media_uri=str(document_metadata["media_uri"]),
             mime_type=mime_type,
         )
@@ -812,7 +913,9 @@ class IngestionPipeline:
                 source_path=source_path,
             )
             if structured_document is not None:
-                text = self._structured_document_text(structured_document)
+                text = await asyncio.to_thread(
+                    self._structured_document_text, structured_document
+                )
                 if text:
                     document_metadata["media_text_extraction"] = "ok"
                     structured_document.metadata.update(
@@ -846,6 +949,18 @@ class IngestionPipeline:
                     )
                 else:
                     document_metadata["media_text_extraction"] = "empty"
+
+        if not text.strip():
+            # Audio/video (and images with no configured parser) used to be
+            # ingested as an empty document that the job reported as success.
+            # An empty document is undiscoverable: no BM25 text, no graph, no
+            # citations. Fail loudly instead of storing a silent hole.
+            raise ParsingError(
+                f"{file_path.name} ({modality}) produced no text during ingest "
+                f"(media_text_extraction={document_metadata['media_text_extraction']}). "
+                "Configure a multimodal document parser that supports this media "
+                "type, or ingest a text-bearing representation of it."
+            )
 
         chunks[0] = chunks[0].model_copy(
             update={
@@ -932,18 +1047,28 @@ def _text_chunk_max_chars(strategy: str = "structural_leaf") -> int:
     env_name, default = _chunk_size_setting(strategy, "max")
     raw = os.getenv(env_name, str(default))
     try:
-        return max(1000, int(raw))
+        value = int(raw)
     except ValueError as exc:
         raise ConfigurationError(f"{env_name} must be an integer, got {raw!r}") from exc
+    if value < 1000:
+        # Silently clamping up hid a misconfiguration behind "it works".
+        raise ConfigurationError(
+            f"{env_name} must be >= 1000 (got {value}); small windows shred "
+            "documents into meaningless chunks."
+        )
+    return value
 
 
 def _text_chunk_overlap_chars(strategy: str = "structural_leaf") -> int:
     env_name, default = _chunk_size_setting(strategy, "overlap")
     raw = os.getenv(env_name, str(default))
     try:
-        return max(0, int(raw))
+        value = int(raw)
     except ValueError as exc:
         raise ConfigurationError(f"{env_name} must be an integer, got {raw!r}") from exc
+    if value < 0:
+        raise ConfigurationError(f"{env_name} must be >= 0, got {value}")
+    return value
 
 
 def _chunk_size_setting(strategy: str, kind: str) -> tuple[str, int]:
@@ -977,9 +1102,71 @@ def _chunk_strategy_for_node(node_type: str, metadata: dict[str, object]) -> str
     return "structural_leaf"
 
 
+def _write_bytes_atomic(path: Path, payload: bytes) -> None:
+    """Write via a temp file + rename.
+
+    The target path is referenced by the committed parsed artifact, so a crash
+    mid-write must not leave a truncated file behind.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_name(f".{path.name}.{uuid4().hex}.tmp")
+    try:
+        tmp_path.write_bytes(payload)
+        os.replace(str(tmp_path), str(path))
+    except BaseException:
+        tmp_path.unlink(missing_ok=True)
+        raise
+
+
+def _pdf_writer_bytes(writer) -> bytes:  # noqa: ANN001
+    buffer = io.BytesIO()
+    writer.write(buffer)
+    return buffer.getvalue()
+
+
+_TRUE_TOKENS = {"true", "1", "yes", "on"}
+_FALSE_TOKENS = {"false", "0", "no", "off"}
+
+
+def _modality_literal(value: str):  # noqa: ANN202
+    """Narrow a suffix-derived modality to the schema's Literal.
+
+    Chunk.modality is a Literal; passing an unmapped suffix would fail
+    validation deep inside the ingest job instead of at the mapping.
+    """
+    from typing import cast, get_args
+
+    from app.schemas.chunk import Chunk as _Chunk
+
+    allowed = set(get_args(_Chunk.model_fields["modality"].annotation))
+    if value not in allowed:
+        raise ParsingError(
+            f"unsupported media modality {value!r}; expected one of {sorted(allowed)}"
+        )
+    return cast(str, value)
+
+
+def _strict_bool_env(name: str, default: str) -> bool:
+    """Boolean env parsing that refuses to guess.
+
+    A typo ("ture", "enable", "") used to read as *disabled*, silently
+    dropping an ingest stage. Malformed configuration must fail loudly.
+    """
+    raw = os.getenv(name)
+    if raw is None or not raw.strip():
+        return default.strip().lower() in _TRUE_TOKENS
+    token = raw.strip().lower()
+    if token in _TRUE_TOKENS:
+        return True
+    if token in _FALSE_TOKENS:
+        return False
+    raise ConfigurationError(
+        f"{name} must be a boolean (true/false), got {raw!r}"
+    )
+
+
 def _document_attachment_index_enabled() -> bool:
-    raw = os.getenv("RAG_DOCUMENT_ATTACHMENT_INDEX_ENABLED", "true")
-    return raw.lower() in {"true", "1", "yes"}
+    return _strict_bool_env("RAG_DOCUMENT_ATTACHMENT_INDEX_ENABLED", "true")
 
 
 def _pdf_attachment_max_pages() -> int:
@@ -993,13 +1180,11 @@ def _pdf_attachment_max_pages() -> int:
 
 
 def _rendered_pdf_image_index_enabled() -> bool:
-    raw = os.getenv("RAG_RENDERED_PAGE_IMAGE_INDEX_ENABLED", "true")
-    return raw.lower() in {"true", "1", "yes"}
+    return _strict_bool_env("RAG_RENDERED_PAGE_IMAGE_INDEX_ENABLED", "true")
 
 
 def _embedded_image_index_enabled() -> bool:
-    raw = os.getenv("RAG_EMBEDDED_IMAGE_INDEX_ENABLED", "true")
-    return raw.lower() in {"true", "1", "yes"}
+    return _strict_bool_env("RAG_EMBEDDED_IMAGE_INDEX_ENABLED", "true")
 
 
 def _embedded_image_max_count() -> int:
@@ -1010,6 +1195,21 @@ def _embedded_image_max_count() -> int:
         raise ConfigurationError(
             f"RAG_EMBEDDED_IMAGE_MAX_COUNT must be an integer, got {raw!r}"
         ) from exc
+
+
+def _pdf_render_timeout_seconds() -> float:
+    raw = os.getenv("RAG_PDF_RENDER_TIMEOUT_SECONDS", "300")
+    try:
+        value = float(raw)
+    except ValueError as exc:
+        raise ConfigurationError(
+            f"RAG_PDF_RENDER_TIMEOUT_SECONDS must be a number, got {raw!r}"
+        ) from exc
+    if value <= 0:
+        raise ConfigurationError(
+            f"RAG_PDF_RENDER_TIMEOUT_SECONDS must be > 0, got {value}"
+        )
+    return value
 
 
 def _render_pdf_page_images(pdf_path: Path, output_dir: Path) -> list[tuple[int, Path]]:
@@ -1043,7 +1243,17 @@ def _render_pdf_page_images(pdf_path: Path, output_dir: Path) -> list[tuple[int,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.PIPE,
             text=True,
+            # An unbounded renderer (corrupt PDF, poppler deadlock, enormous
+            # page) used to block this ingest thread forever: the job stayed
+            # RUNNING with nothing to reclaim it.
+            timeout=_pdf_render_timeout_seconds(),
         )
+    except subprocess.TimeoutExpired as exc:
+        raise ParsingError(
+            f"PDF page rendering timed out after "
+            f"{_pdf_render_timeout_seconds():.0f}s for {pdf_path}; the file may "
+            "be corrupt or too large to render."
+        ) from exc
     except (OSError, subprocess.CalledProcessError) as exc:
         raise ParsingError(
             f"failed to render PDF pages for {pdf_path}: "

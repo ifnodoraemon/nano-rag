@@ -176,6 +176,10 @@ class StructuredDocumentParser:
             definition = self._parse_definition(stripped)
             if heading or clause or definition or (numbered and len(stripped) <= 120):
                 flush_paragraph(index)
+                # Explicit annotation: the branches below put str and int values
+                # in the same dict, and mypy would otherwise infer the first
+                # branch's shape (dict[str, int]) and reject the others.
+                metadata: dict[str, object]
                 if heading:
                     level = len(heading.group(1))
                     title = heading.group(2).strip()
@@ -201,6 +205,8 @@ class StructuredDocumentParser:
                         "clause_type": "definition",
                     }
                 else:
+                    # narrowed by the branch condition above
+                    assert numbered is not None
                     marker = numbered.group(1)
                     title = f"{marker} {numbered.group(2).strip()}"
                     level = 1 if marker.startswith("第") or "." not in marker else min(marker.count(".") + 1, 6)

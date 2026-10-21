@@ -80,6 +80,7 @@ async def parse_content(
     # supports: local extraction (pypdf/office) loses layout, tables and
     # images, so it may only run when no model parser is configured.
     if model_parser_available(document_parser, path):
+        assert document_parser is not None  # implied by model_parser_available
         parsed = await document_parser.parse_file(path)
         if parsed.strip():
             return ParsedContent(text=parsed, parser_name="multimodal-llm-tree")

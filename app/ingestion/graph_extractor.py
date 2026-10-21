@@ -209,10 +209,23 @@ class GraphExtractor:
         )
 
     def _confidence(self, value: object) -> float:
+        """Clamp a model-provided confidence, failing loudly on garbage.
+
+        Defaulting to 0.7 turned an unparseable score into a plausible-looking
+        edge weight, which then influenced graph expansion.
+        """
+        if value is None:
+            return 0.7  # the field is optional in the extraction contract
+        if isinstance(value, bool) or not isinstance(value, (int, float, str)):
+            raise ModelOutputError(
+                f"graph relation confidence must be a number, got {value!r}"
+            )
         try:
             confidence = float(value)
-        except (TypeError, ValueError):
-            return 0.7
+        except (TypeError, ValueError) as exc:
+            raise ModelOutputError(
+                f"graph relation confidence must be a number, got {value!r}"
+            ) from exc
         return max(0.0, min(1.0, confidence))
 
     def _entity_id(self, kb_id: str, name: str) -> str:

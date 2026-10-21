@@ -42,6 +42,10 @@ class IngestJobRecord(BaseModel):
     submitted_at: float = Field(default_factory=time)
     started_at: float | None = None
     completed_at: float | None = None
+    # Updated while the job works. A job whose heartbeat is older than the
+    # stale threshold was abandoned (worker SIGKILL, OOM, container restart);
+    # without this the record stayed "running" forever.
+    heartbeat_at: float | None = None
 
 
 class IngestJobStore:
@@ -70,6 +74,7 @@ class IngestJobStore:
         uploaded_files: list[str] | None = None,
     ) -> IngestJobRecord:
         self._purge_expired_jobs()
+        self.reap_stale_running(max_idle_seconds=_job_stale_seconds())
         record = IngestJobRecord(
             job_id=f"job-{uuid4().hex[:16]}",
             kb_id=kb_id,
@@ -101,9 +106,56 @@ class IngestJobStore:
         record.status = IngestJobStatus.RUNNING
         record.stage = stage
         record.started_at = record.started_at or time()
+        record.heartbeat_at = time()
         record.error = None
         self.save(record)
         return record
+
+    def heartbeat(self, job_id: str, stage: str | None = None) -> None:
+        """Refresh the liveness marker of a running job."""
+        record = self._require(job_id)
+        record.heartbeat_at = time()
+        if stage is not None:
+            record.stage = stage
+        self.save(record)
+
+    def reap_stale_running(self, *, max_idle_seconds: float) -> list[str]:
+        """Mark abandoned RUNNING jobs as FAILED.
+
+        Returns the reaped job ids. A record whose heartbeat is older than
+        ``max_idle_seconds`` cannot still be executing: the process that owned
+        it is gone, so reporting "running" forever would be a lie.
+        """
+        if max_idle_seconds <= 0:
+            return []
+        cutoff = time() - max_idle_seconds
+        reaped: list[str] = []
+        for path in sorted(self.root_dir.glob("job-*.json")):
+            try:
+                record = self.get(path.stem)
+            except StoreError:
+                continue
+            if record is None or record.status != IngestJobStatus.RUNNING:
+                continue
+            # Explicit None checks: 0.0 is a valid (very old) timestamp, and
+            # treating it as falsy made a stale record look fresh.
+            last_seen = (
+                record.heartbeat_at
+                if record.heartbeat_at is not None
+                else (record.started_at if record.started_at is not None else record.submitted_at)
+            )
+            if last_seen >= cutoff:
+                continue
+            record.status = IngestJobStatus.FAILED
+            record.stage = "failed"
+            record.error = (
+                "ingest job was abandoned: no heartbeat for "
+                f"{int(time() - last_seen)}s (worker was killed or restarted)"
+            )
+            record.completed_at = time()
+            self.save(record)
+            reaped.append(record.job_id)
+        return reaped
 
     def mark_completed(
         self, job_id: str, *, documents: int, chunks: int
@@ -164,6 +216,16 @@ class IngestJobStore:
                     record_path.unlink(missing_ok=True)
             except OSError:
                 continue
+
+
+def _job_stale_seconds() -> float:
+    raw = os.getenv("RAG_INGEST_JOB_STALE_SECONDS", "3600")
+    try:
+        return float(raw)
+    except ValueError as exc:
+        raise StoreError(
+            f"RAG_INGEST_JOB_STALE_SECONDS must be a number, got {raw!r}"
+        ) from exc
 
 
 def _job_ttl_days() -> int:
