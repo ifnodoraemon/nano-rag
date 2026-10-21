@@ -1,0 +1,6 @@
+{"sample_id": "retrieval-handbook-1", "kb_id": "default", "query": "差旅报销多久内提交？", "expected_titles": ["employee_handbook"]}
+{"sample_id": "retrieval-handbook-2", "kb_id": "default", "query": "员工应在出差结束后多长时间提交差旅报销申请？", "expected_titles": ["employee_handbook"]}
+{"sample_id": "retrieval-handbook-3", "kb_id": "default", "query": "差旅报销单需要附上哪些票据？", "expected_titles": ["employee_handbook"]}
+{"sample_id": "retrieval-handbook-4", "kb_id": "default", "query": "如果报销有特殊情况，需要谁来补充说明？", "expected_titles": ["employee_handbook"]}
+{"sample_id": "retrieval-handbook-5", "kb_id": "default", "query": "病假超过几天需要医院证明？", "expected_titles": ["employee_handbook"]}
+{"sample_id": "retrieval-handbook-6", "kb_id": "default", "query": "请假规则里，病假证明的要求是什么？", "expected_titles": ["employee_handbook"]}
