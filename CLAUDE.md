@@ -50,6 +50,8 @@ scripts/        # run_eval.py, run_benchmark.py, live_smoke.py
 
 Document -> configured parser -> normalizer -> chunker -> metadata -> committed parsed artifact + PostgreSQL graph rows + wiki discovery page
 
+Document identity is content-addressed on ingest: a file that arrives under a new path (upload, rename, reorganized corpus) but whose text equals an existing document in the same KB supersedes it instead of adding a second copy. Duplicates are not cosmetic — each copy takes a discovery slot and splits BM25 scores, which measurably pushes the real answer out of the top-k. Superseded ids are reported on the ingest response; `scripts/dedup_corpus.py` cleans a corpus that already accumulated them.
+
 ### Retrieval (Agentic Discovery) Pipeline
 
 Query -> wiki BM25 discovery (document-level) -> deterministic version filter (latest wins per source_key) -> LLM read plan (structured json_schema) -> deep-read selected parsed artifacts -> context builder (+ optional PostgreSQL graph expansion)
