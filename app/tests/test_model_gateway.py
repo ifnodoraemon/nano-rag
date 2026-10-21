@@ -4,165 +4,69 @@ from app.core.config import AppConfig
 from app.core.config import AppContainer
 from app.core.exceptions import ConfigurationError
 from app.model_client.base import GatewayClient
-from app.model_client.rerank import RerankClient
 
 
-def test_gateway_client_headers_include_bearer_token() -> None:
-    config = AppConfig(
+def _config(**models) -> AppConfig:
+    return AppConfig(
         config_dir=None,  # type: ignore[arg-type]
         settings={},
-        models={
+        models=models or {
             "model_gateway": {"base_url": "http://localhost:4000", "api_key": "secret"},
             "generation": {"base_url": "http://localhost:4000", "api_key": "secret"},
         },
         prompts={},
     )
-    client = GatewayClient(config, timeout_seconds=5, capability="generation")
+
+
+def test_gateway_client_headers_include_bearer_token() -> None:
+    client = GatewayClient(_config(), timeout_seconds=5, capability="generation")
     assert client.headers["Authorization"] == "Bearer secret"
 
 
 def test_gateway_api_key_prefers_capability_specific_env(monkeypatch) -> None:
     monkeypatch.setenv("GENERATION_API_KEY", "gemini-secret")
-    config = AppConfig(
-        config_dir=None,  # type: ignore[arg-type]
-        settings={},
-        models={
-            "model_gateway": {"base_url": "http://localhost:4000", "api_key": "secret"},
-            "generation": {"base_url": "http://localhost:4000", "api_key": "secret"},
-        },
-        prompts={},
-    )
-    client = GatewayClient(config, timeout_seconds=5, capability="generation")
+    client = GatewayClient(_config(), timeout_seconds=5, capability="generation")
     assert client.headers["Authorization"] == "Bearer gemini-secret"
 
 
 def test_langfuse_endpoints_are_disabled_by_default() -> None:
-    config = AppConfig(
-        config_dir=None,  # type: ignore[arg-type]
-        settings={},
-        models={
-            "model_gateway": {"base_url": "http://localhost:4000", "api_key": "secret"},
-            "generation": {"base_url": "http://localhost:4000", "api_key": "secret"},
-        },
-        prompts={},
-    )
+    config = _config()
     assert config.langfuse_otel_endpoint == ""
     assert config.langfuse_ui_endpoint == ""
     assert config.langfuse_otel_headers == {}
 
 
-def test_capability_gateway_prefers_capability_specific_env(monkeypatch) -> None:
-    monkeypatch.setenv("RERANK_API_BASE_URL", "http://rerank.example.com/v1")
-    monkeypatch.setenv("RERANK_API_KEY", "rerank-secret")
-    config = AppConfig(
-        config_dir=None,  # type: ignore[arg-type]
-        settings={},
-        models={
-            "model_gateway": {"base_url": "http://localhost:4000", "api_key": "secret"},
-            "rerank": {"default_alias": "bge-reranker-v2"},
-        },
-        prompts={},
-    )
-    assert config.gateway_for("rerank") == {
-        "base_url": "http://rerank.example.com/v1",
-        "api_key": "rerank-secret",
-    }
-
-
 def test_capability_gateway_requires_explicit_capability_config(monkeypatch) -> None:
     monkeypatch.delenv("DOCUMENT_PARSER_API_BASE_URL", raising=False)
     monkeypatch.delenv("DOCUMENT_PARSER_API_KEY", raising=False)
-    config = AppConfig(
-        config_dir=None,  # type: ignore[arg-type]
-        settings={},
-        models={
-            "model_gateway": {"base_url": "http://localhost:4000", "api_key": "secret"},
-            "document_parser": {"default_alias": "gemini-flash-latest"},
-        },
-        prompts={},
+    config = _config(
+        model_gateway={"base_url": "http://localhost:4000", "api_key": "secret"},
+        document_parser={"default_alias": "gemini-flash-latest"},
     )
     with pytest.raises(ConfigurationError, match="DOCUMENT_PARSER_API_BASE_URL"):
         config.gateway_for("document_parser")
 
 
-@pytest.mark.asyncio
-async def test_rerank_client_uses_configured_qwen_endpoint(monkeypatch) -> None:
-    monkeypatch.delenv("DISABLE_RERANK", raising=False)
-    monkeypatch.delenv("RERANK_API_BASE_URL", raising=False)
-    monkeypatch.delenv("RERANK_API_PATH", raising=False)
-    config = AppConfig(
-        config_dir=None,  # type: ignore[arg-type]
-        settings={"timeout": {"rerank_seconds": 5}},
-        models={
-            "model_gateway": {"base_url": "", "api_key": ""},
-            "rerank": {
-                "default_alias": "qwen3-rerank",
-                "base_url": "https://dashscope-intl.aliyuncs.com/compatible-api/v1",
-                "api_key": "dashscope-secret",
-                "path": "/reranks",
-            },
-        },
-        prompts={},
+def test_generation_gateway_prefers_capability_specific_env(monkeypatch) -> None:
+    monkeypatch.setenv("GENERATION_API_BASE_URL", "http://gen.example.com/v1")
+    monkeypatch.setenv("GENERATION_API_KEY", "gen-secret")
+    config = _config(
+        model_gateway={"base_url": "http://localhost:4000", "api_key": "secret"},
+        generation={"default_alias": "gemini-flash-latest"},
     )
-
-    class FakeResponse:
-        def raise_for_status(self) -> None:
-            return None
-
-        def json(self) -> dict:
-            return {
-                "results": [
-                    {"index": 1, "relevance_score": 0.9},
-                    {"index": 0, "relevance_score": 0.5},
-                ]
-            }
-
-    class FakeAsyncClient:
-        def __init__(self) -> None:
-            self.calls = []
-
-        async def post(self, url: str, **kwargs):  # noqa: ANN003
-            self.calls.append({"url": url, **kwargs})
-            return FakeResponse()
-
-    client = RerankClient(config)
-    fake_http = FakeAsyncClient()
-    client.provider_client._client = fake_http  # noqa: SLF001
-
-    results = await client.rerank("报销", ["规则 A", "规则 B"], top_k=2)
-
-    assert [result.index for result in results] == [1, 0]
-    assert fake_http.calls[0]["url"] == (
-        "https://dashscope-intl.aliyuncs.com/compatible-api/v1/reranks"
-    )
-    assert fake_http.calls[0]["json"] == {
-        "model": "qwen3-rerank",
-        "query": "报销",
-        "documents": ["规则 A", "规则 B"],
-        "top_n": 2,
+    assert config.gateway_for("generation") == {
+        "base_url": "http://gen.example.com/v1",
+        "api_key": "gen-secret",
     }
 
 
 @pytest.mark.asyncio
-async def test_disabled_rerank_client_close_is_noop(monkeypatch) -> None:
-    monkeypatch.setenv("DISABLE_RERANK", "1")
-    config = AppConfig(
-        config_dir=None,  # type: ignore[arg-type]
-        settings={"timeout": {"rerank_seconds": 5}},
-        models={
-            "model_gateway": {"base_url": "", "api_key": ""},
-            "rerank": {"default_alias": "qwen3-rerank"},
-        },
-        prompts={},
-    )
+async def test_app_container_close_closes_every_client() -> None:
+    """One model to run them all: generation, document parser, graph store.
 
-    client = RerankClient(config)
-
-    await client.close()
-
-
-@pytest.mark.asyncio
-async def test_app_container_close_closes_all_client_capabilities() -> None:
+    There is no embedding client and no rerank client to close - this build runs
+    a single generation model.
+    """
     closed: list[str] = []
 
     class AsyncClosable:
@@ -178,7 +82,6 @@ async def test_app_container_close_closes_all_client_capabilities() -> None:
 
     container = AppContainer(
         config=None,  # type: ignore[arg-type]
-        rerank_client=AsyncClosable("rerank"),  # type: ignore[arg-type]
         generation_client=AsyncClosable("generation"),  # type: ignore[arg-type]
         document_parser=AsyncClosable("document_parser"),  # type: ignore[arg-type]
         ingestion_pipeline=None,  # type: ignore[arg-type]
@@ -194,4 +97,4 @@ async def test_app_container_close_closes_all_client_capabilities() -> None:
 
     await container.close()
 
-    assert closed == ["rerank", "generation", "document_parser", "graph_store"]
+    assert closed == ["generation", "document_parser", "graph_store"]

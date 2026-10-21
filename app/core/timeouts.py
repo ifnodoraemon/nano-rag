@@ -23,7 +23,7 @@ def timeout_seconds(
 
     Timeouts used to be editable only in configs/settings.yaml, so tuning one for
     a slower provider (or for an experiment) meant editing a mounted file and
-    restarting - and a slow reranker just timed out with no override.
+    restarting - and a slow provider just timed out with no override.
     """
     raw: object = os.getenv(env_name)
     if raw is None:

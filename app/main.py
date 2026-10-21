@@ -111,8 +111,6 @@ def _log_startup_readiness(config) -> None:  # noqa: ANN001
         )
 
     capabilities = ["generation"]
-    if config.rerank_enabled:
-        capabilities.append("rerank")
     for capability in capabilities:
         try:
             config.gateway_for(capability)
@@ -310,8 +308,6 @@ async def _build_health_detail(container) -> dict[str, object]:  # noqa: ANN001
     document_parser = config.document_parser_configured
 
     required_capabilities = ["generation"]
-    if config.rerank_enabled:
-        required_capabilities.append("rerank")
 
     gateway_ok = True
     for capability in required_capabilities:

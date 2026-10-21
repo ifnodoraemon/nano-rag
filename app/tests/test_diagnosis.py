@@ -16,9 +16,7 @@ def test_diagnose_trace_flags_refusal_with_context() -> None:
         trace_id="trace-1",
         query="差旅报销多久内提交？",
         retrieved_chunk_ids=["c1"],
-        reranked_chunk_ids=["c1"],
         retrieved=[{"chunk_id": "c1", "text": "员工应在出差结束后 15 个自然日内提交差旅报销申请。"}],
-        reranked=[{"chunk_id": "c1", "text": "员工应在出差结束后 15 个自然日内提交差旅报销申请。"}],
         contexts=[{"chunk_id": "c1", "text": "员工应在出差结束后 15 个自然日内提交差旅报销申请。"}],
         answer="无法确认。现有证据不足。",
         supporting_claims=[
@@ -42,16 +40,7 @@ def test_diagnose_trace_flags_conflicting_wiki_contexts() -> None:
         trace_id="trace-2",
         query="PTO 可以结转吗？",
         retrieved_chunk_ids=["wiki:topic:leave-policy"],
-        reranked_chunk_ids=["wiki:topic:leave-policy"],
         retrieved=[
-            {
-                "chunk_id": "wiki:topic:leave-policy",
-                "text": "Topic page with conflicting facts.",
-                "wiki_status": "conflicting",
-                "source": "wiki/topics/default--leave-policy.md",
-            }
-        ],
-        reranked=[
             {
                 "chunk_id": "wiki:topic:leave-policy",
                 "text": "Topic page with conflicting facts.",
@@ -87,9 +76,7 @@ def test_diagnose_trace_uses_structured_insufficiency_claim() -> None:
         trace_id="trace-3",
         query="What is the contractor carryover policy?",
         retrieved_chunk_ids=["c1"],
-        reranked_chunk_ids=["c1"],
         retrieved=[{"chunk_id": "c1", "text": "No contractor policy is documented."}],
-        reranked=[{"chunk_id": "c1", "text": "No contractor policy is documented."}],
         contexts=[{"chunk_id": "c1", "text": "No contractor policy is documented."}],
         answer="Insufficient evidence to determine the contractor carryover policy.",
         supporting_claims=[

@@ -165,7 +165,6 @@ def configure_runtime(args: argparse.Namespace, corpus_dir: Path) -> None:
     os.environ["RAG_GRAPH_BACKEND"] = effective_graph_backend
     os.environ["RAG_INGEST_ALLOWED_DIRS"] = str(corpus_dir.resolve())
     os.environ.setdefault("RAG_AUTH_DISABLED", "true")
-    # Do NOT force DISABLE_RERANK: the run reports the rerank stage, so silently
     # skipping it would make the report describe a pipeline that did not run.
     if args.graph_backend == "postgres" and not os.getenv("PG_URI"):
         raise SystemExit(

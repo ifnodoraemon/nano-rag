@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run the retrieval A/B experiments (tokenizer, rerank) reproducibly.
+"""Run the retrieval A/B experiments reproducibly (currently: tokenizer).
 
 Every experiment goes through the same path: build (or reuse) a benchmark
 corpus, then run scripts/run_retrieval_eval.py once per variant and print a
@@ -9,9 +9,10 @@ remembering which variables a variant needs.
     # tokenizer A/B on a public Chinese corpus
     python scripts/ab_retrieval.py tokenizer --benchmark /tmp/t2r-bench
 
-    # rerank on/off (needs a reachable rerank endpoint)
-    python scripts/ab_retrieval.py rerank --benchmark /tmp/t2r-bench \
-        --rerank-base-url http://127.0.0.1:8099 --rerank-path /reranks
+
+This build runs a single model (generation): there is no embedding model and no
+rerank model, so the tokenizer is the only ranking lever that can be A/B tested
+without adding one.
 
 Reports land in <benchmark>/ab/<variant>/ so each run is inspectable.
 """
@@ -137,41 +138,9 @@ def tokenizer_experiment(benchmark: Path, dataset: Path, modes: list[str]) -> in
     return 0 if results else 1
 
 
-def rerank_experiment(
-    benchmark: Path,
-    dataset: Path,
-    *,
-    base_url: str,
-    path: str,
-    model: str,
-    api_key: str,
-    tokenizer: str,
-) -> int:
-    results: dict[str, dict[str, object]] = {}
-    shared = {"RAG_BM25_TOKENIZER": tokenizer}
-    for variant, extra in (
-        ("rerank-off", {"DISABLE_RERANK": "true"}),
-        (
-            "rerank-on",
-            {
-                "DISABLE_RERANK": "false",
-                "RERANK_MODEL_ALIAS": model,
-                "RERANK_API_BASE_URL": base_url,
-                "RERANK_API_PATH": path,
-                "RERANK_API_KEY": api_key,
-            },
-        ),
-    ):
-        report = _run_variant(benchmark, dataset, variant, {**shared, **extra})
-        if report:
-            results[variant] = report
-    _table(results)
-    return 0 if results else 1
-
-
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("experiment", choices=("tokenizer", "rerank"))
+    parser.add_argument("experiment", choices=("tokenizer",))
     parser.add_argument("--benchmark", required=True, help="built benchmark directory")
     parser.add_argument("--dataset", default=None, help="defaults to <benchmark>/retrieval.jsonl")
     parser.add_argument(
@@ -179,11 +148,6 @@ def main() -> int:
         default="cjk_ngram,cjk_bigram,jieba",
         help="tokenizer variants (tokenizer experiment)",
     )
-    parser.add_argument("--tokenizer", default="cjk_ngram", help="tokenizer for the rerank experiment")
-    parser.add_argument("--rerank-base-url", default="http://127.0.0.1:8099")
-    parser.add_argument("--rerank-path", default="/reranks")
-    parser.add_argument("--rerank-model", default="llm-rerank-shim")
-    parser.add_argument("--rerank-api-key", default="shim")
     args = parser.parse_args()
 
     benchmark = Path(args.benchmark).resolve()
@@ -191,18 +155,8 @@ def main() -> int:
     if not dataset.exists():
         raise SystemExit(f"dataset not found: {dataset}")
 
-    if args.experiment == "tokenizer":
-        return tokenizer_experiment(
-            benchmark, dataset, [m for m in args.modes.split(",") if m]
-        )
-    return rerank_experiment(
-        benchmark,
-        dataset,
-        base_url=args.rerank_base_url,
-        path=args.rerank_path,
-        model=args.rerank_model,
-        api_key=args.rerank_api_key,
-        tokenizer=args.tokenizer,
+    return tokenizer_experiment(
+        benchmark, dataset, [m for m in args.modes.split(",") if m]
     )
 
 

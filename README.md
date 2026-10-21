@@ -74,10 +74,7 @@ Nano RAG 的核心原则是：**真实输入、真实索引、真实模型、真
 - 图片索引：图片文件默认生成视觉媒体 chunk；如果配置了多模态 document parser 且能抽出文字，会同时生成文本/结构 chunk
 - agentic 检索：wiki BM25 发现 → 确定性版本过滤（按 `source_key` 取最新）→ LLM 结构化读计划（json_schema）→ 深读选中的 parsed artifact → 上下文构建；每个阶段进 trace
 - 证据治理：生成结果带 structured supporting claims，并在后处理里标记 claim 是否有引用支撑、缺失数字和缺失术语
-- 模型路径：生成、文档解析、可选 rerank 都直连显式配置的真实 provider；默认示例只覆盖 Gemini 和 Qwen；**不配置 embedding 端点**
-- rerank（可选，默认关闭）：cross-encoder 对发现阶段候选做重排，接在「版本过滤之后、读计划之前」。
-  它是打分模型而非 embedding——无向量库、无需重灌语料、换模型不影响已编译的 wiki 页。
-  启用后必须可用：失败会直接让请求失败，不会静默退回 BM25 顺序；重排结果与分数写入 trace 的 `retrieval_params.rerank`
+- 模型路径：**一个模型走天下**——查询理解、阅读计划、证据审计、图抽取、答案生成全部由同一个生成模型完成；文档解析复用该 provider 的多模态能力。**不配置 embedding 模型，也不配置 rerank 模型**
 - 前端：React + Vite 源码位于 `frontend/` 子模块，Docker 构建为 nginx 静态站点并代理后端
 
 ## 目录
@@ -128,7 +125,6 @@ python scripts/init_env.py --check   # 随时检查还缺什么
 | 跑测试 / 检索评测 / dedup / 分词 A/B / 引用校验 | **什么都不需要**（无 LLM 调用） |
 | 真实问答（端到端） | `GENERATION_API_KEY` |
 | 摄入 PDF / 图片 / Office | 再加 `DOCUMENT_PARSER_API_KEY` |
-| 开启 cross-encoder 重排 | 再加 `RERANK_API_BASE_URL` + `RERANK_API_PATH`（`DISABLE_RERANK=false`） |
 
 ### 启动
 
@@ -161,7 +157,6 @@ curl -sS -H "X-Admin-API-Key: $(grep ^RAG_ADMIN_API_KEYS= docker/.env | cut -d= 
 
 - `generation`：OpenAI-compatible chat completions，支持 Gemini、Qwen DashScope、Qwen vLLM。
 - `document_parser`：`gemini` 使用 Gemini Files API；`qwen` 使用 OpenAI-compatible chat completions，可指向 DashScope 或 vLLM。
-- `rerank`：默认关闭；需要时显式配置 Qwen rerank endpoint 和 path。
 - `trace`：默认写入本地 `TraceStore`，可选通过 `LANGFUSE_OTEL_ENDPOINT` 对接外部 Langfuse；默认 Docker 栈不再内置 Langfuse 容器。
 
 Gemini 示例：
@@ -216,19 +211,6 @@ DOCUMENT_PARSER_API_KEY=EMPTY
 DOCUMENT_PARSER_API_BASE_URL=http://vllm:8000/v1
 DOCUMENT_PARSER_MODEL=Qwen/Qwen2.5-VL-7B-Instruct
 ```
-
-可选 Qwen rerank（cross-encoder，重排发现阶段候选；非 embedding）：
-
-```bash
-RERANK_MODEL_ALIAS=qwen3-rerank
-DISABLE_RERANK=false
-RERANK_API_BASE_URL=https://dashscope-intl.aliyuncs.com/compatible-api/v1
-RERANK_API_KEY=<your-dashscope-key>
-RERANK_API_PATH=/reranks      # 启用后必填，缺失会直接启动报错
-```
-
-启用后该阶段是硬依赖：provider 不可达、返回空结果、索引越界或缺 `relevance_score` 都会让请求失败，
-不会静默退回 BM25 顺序。重排后的顺序与分数记录在 trace 的 `retrieval_params.rerank` 里。
 
 如果没有有效 provider key，系统不会切到 mock；`/health/detail` 会显示 degraded，并在具体能力下返回上游错误。
 
@@ -345,7 +327,7 @@ python scripts/run_retrieval_eval.py \
 ```
 
 它回答的是“发现阶段有没有把正确文档找出来”，与答案级指标互补：分词方式、`discovery_top_k`、
-版本过滤规则、rerank 的改动是否真的有效，只有这个指标能判断。格式见 `data/eval/README.md`。
+版本过滤规则的改动是否真的有效，只有这个指标能判断。格式见 `data/eval/README.md`。
 
 ### 中文分词 A/B
 
@@ -413,17 +395,27 @@ python scripts/ab_retrieval.py tokenizer --benchmark /tmp/t2r-bench
 但 recall@4/@12 更低、未召回更多。发现层是喂给 LLM 阅读计划的第一跳——阅读计划能丢弃噪声，
 但无法找回从未发现的文档，所以这里召回优先。
 
-**重排（50 条查询，LLM 打分版重排器）**
+### 为什么没有 rerank（以及这个选择的代价）
 
-| 指标 | 仅 BM25 | BM25 + 重排 | 增益 |
+本项目的目标是**一个模型走天下**：不引入 embedding 模型，也不引入 rerank 模型。因此重排阶段已从
+代码里彻底移除（客户端、配置、健康探测、trace 字段、A/B 工具链全部删除），而不是"留着但默认关闭"。
+留着一个永远不会被调用的能力，等于让 `/health/detail` 报告一个不存在的能力——这正是本项目一直在清理的
+那类假承诺。
+
+这个选择的代价有实测数据（在 C-MTEB/T2Retrieval 抽样的 50 条查询上，用聊天模型当评审模拟重排）：
+
+| 指标 | 无重排（当前架构） | 若有 cross-encoder 重排 | 差距 |
 | --- | --- | --- | --- |
-| recall@1 | 0.5233 | **0.6033** | +8.0 pt |
-| recall@4 | 0.8433 | **0.9133** | +7.0 pt |
-| MRR | 0.9127 | **0.9850** | +7.2 pt |
+| recall@1 | 0.5233 | 0.6033 | +8.0 pt |
+| recall@4 | 0.8433 | 0.9133 | +7.0 pt |
+| MRR | 0.9127 | 0.9850 | +7.2 pt |
 
-结论：重排在这份语料上对 top-1 精度增益明显。**注意**：该实验用的是聊天模型当评审
-（`scripts/llm_rerank_shim.py` + `scripts/offline_rerank_ab.py`），不是 cross-encoder，
-只证明"重排这件事有用"，不衡量生产级重排器的质量与延迟。
+也就是说：不做重排，top-1 命中率大约低 8 个百分点。**这是有意接受的成本**，换取的是一套只需一个模型
+凭据、无需额外模型部署与运维的运行时。该实验只测量"重排这件事的效果"，不代表生产级 cross-encoder
+的质量或延迟。
+
+如果将来重排带来的这 8 个百分点变得不可接受，正确的做法是把 cross-encoder 作为一个显式的架构决策
+重新引入（含模型部署、延迟预算、故障语义），而不是偷偷加一个可选开关。
 
 ### 重复文档清理
 

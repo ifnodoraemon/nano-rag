@@ -28,7 +28,6 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
     from app.core.config import AppConfig
     from app.core.tracing import TraceStore, TracingManager
     from app.model_client.generation import GenerationClient
-    from app.model_client.rerank import RerankClient
     from app.wiki.search import WikiSearcher
 
 logger = logging.getLogger(__name__)
@@ -61,7 +60,6 @@ class DiscoveryCandidates:
     discovered: list[SearchHit]
     candidates: list[SearchHit]
     version_filter: dict[str, object]
-    rerank: dict[str, object]
 
 
 class AgenticDiscovery:
@@ -88,20 +86,12 @@ class AgenticDiscovery:
         generation_client: "GenerationClient",
         trace_store: "TraceStore",
         tracing_manager: "TracingManager",
-        rerank_client: "RerankClient | None" = None,
     ) -> None:
         self.config = config
         self.wiki_searcher = wiki_searcher
         self.generation_client = generation_client
         self.trace_store = trace_store
         self.tracing_manager = tracing_manager
-        # Optional cross-encoder rerank over the discovered candidates. This is
-        # a scoring model, not an embedding model: no vector index, no corpus
-        # re-ingest, and a different model can be swapped without touching the
-        # stored pages.
-        self.rerank_client = (
-            rerank_client if getattr(config, "rerank_enabled", False) else None
-        )
         self.parsed_dir: Path = config.parsed_dir
         agent_settings = config.settings.get("agent", {})
         self.discovery_top_k = int(agent_settings.get("discovery_top_k", DEFAULT_DISCOVERY_TOP_K))
@@ -131,12 +121,10 @@ class AgenticDiscovery:
         """
         discovered = await self._discover(query, kb_id, filters)
         candidates, version_filter = self._select_versions(discovered)
-        candidates, rerank_report = await self._maybe_rerank(query, candidates)
         return DiscoveryCandidates(
             discovered=discovered,
             candidates=candidates,
             version_filter=version_filter,
-            rerank=rerank_report,
         )
 
     async def retrieve(
@@ -192,7 +180,6 @@ class AgenticDiscovery:
                         for hit in discovered
                     ],
                     "version_filter": version_filter,
-                    "rerank": staged.rerank,
                     "reading_plan": plan,
                     "read_doc_ids": read_doc_ids,
                     "read_chunk_ids": read_chunk_ids,
@@ -285,55 +272,6 @@ class AgenticDiscovery:
         # best evidence first. Stable: score ties keep BM25 discovery order.
         selected = sorted(selected, key=lambda hit: hit.score, reverse=True)
         return selected[: self.discovery_top_k], filter_report
-
-    async def _maybe_rerank(
-        self, query: str, candidates: list[SearchHit]
-    ) -> tuple[list[SearchHit], dict[str, object]]:
-        """Reorder discovered candidates with the cross-encoder, if enabled.
-
-        BM25 scores a *document-level* page (title + summary + headings + key
-        passages), which is a coarse relevance signal; a cross-encoder scoring
-        (query, page) directly is materially sharper. Disabled by default: when
-        `rerank_enabled` is false nothing here runs and the report says so.
-
-        Enabled means it must work: a rerank failure raises rather than
-        silently falling back to BM25 order (the project has no degraded path).
-        """
-        if self.rerank_client is None or not candidates:
-            return candidates, {"enabled": False, "applied": False}
-
-        documents = [hit.chunk.text for hit in candidates]
-        with self.tracing_manager.span(
-            "agentic.rerank", {"agentic.query": query, "agentic.candidates": len(candidates)}
-        ):
-            ranked = await self.rerank_client.rerank(query, documents, len(documents))
-        if not ranked:
-            raise RetrievalError(
-                "rerank is enabled but returned no results for "
-                f"{len(candidates)} candidate(s); refusing to silently keep BM25 order"
-            )
-
-        by_index = {result.index: result.score for result in ranked}
-        reranked = [candidates[index] for index in by_index]
-        # The service returns only indices it considers valid. Anything it did
-        # not return keeps its BM25 position after the reranked block, so an
-        # incomplete response can never make a document disappear.
-        dropped = [
-            hit for index, hit in enumerate(candidates) if index not in by_index
-        ]
-        return reranked + dropped, {
-            "enabled": True,
-            "applied": True,
-            "model": getattr(self.rerank_client, "alias", None),
-            "candidate_count": len(candidates),
-            "reranked_count": len(reranked),
-            "reordered": [hit.chunk.doc_id for hit in reranked],
-            "unscored_doc_ids": [hit.chunk.doc_id for hit in dropped],
-            "scores": {
-                candidates[index].chunk.doc_id: round(score, 6)
-                for index, score in by_index.items()
-            },
-        }
 
     async def _plan_reads(
         self, query: str, candidates: list[SearchHit]

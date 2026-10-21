@@ -86,7 +86,6 @@ async def test_health_route(monkeypatch) -> None:
                 "missing": [],
             },
             parsed_dir="/tmp/parsed",
-            rerank_enabled=False,
             business_api_keys=set(),
         ),
         wiki_searcher=SimpleNamespace(
@@ -175,7 +174,6 @@ async def test_health_detail_uses_cache_for_repeated_probes(monkeypatch) -> None
                 "missing": [],
             },
             parsed_dir="/tmp/parsed",
-            rerank_enabled=False,
             business_api_keys=set(),
         ),
         wiki_searcher=SimpleNamespace(
@@ -251,7 +249,6 @@ async def test_health_route_marks_gateway_4xx_as_degraded(monkeypatch) -> None:
                 "missing": [],
             },
             parsed_dir="/tmp/parsed",
-            rerank_enabled=False,
             business_api_keys=set(),
         ),
         wiki_searcher=SimpleNamespace(
@@ -333,7 +330,6 @@ async def test_health_route_does_not_degrade_when_langfuse_is_disabled(monkeypat
                 "missing": [],
             },
             parsed_dir="/tmp/parsed",
-            rerank_enabled=False,
             business_api_keys=set(),
         ),
         wiki_searcher=SimpleNamespace(
@@ -402,7 +398,6 @@ async def test_health_route_respects_auth_disabled_override(monkeypatch) -> None
                 "missing": [],
             },
             parsed_dir="/tmp/parsed",
-            rerank_enabled=False,
             business_api_keys={"secret"},
         ),
         wiki_searcher=SimpleNamespace(
@@ -470,7 +465,6 @@ async def test_health_route_reports_configured_auth(monkeypatch) -> None:
                 "missing": [],
             },
             parsed_dir="/tmp/parsed",
-            rerank_enabled=False,
             business_api_keys={"secret"},
         ),
         wiki_searcher=SimpleNamespace(

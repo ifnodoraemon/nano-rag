@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Build a Chinese retrieval benchmark from a public dataset (C-MTEB/T2Retrieval).
 
-Why: the tokenizer and rerank A/B experiments need a corpus with *real* user
+Why: the tokenizer A/B experiment needs a corpus with *real* user
 queries and judged relevance. The repo only ships a few KB of Chinese prose, and
 verbatim-fragment queries cannot discriminate ranking strategies (recall
 saturates at 1.0). T2Retrieval is a public Chinese text-retrieval benchmark:

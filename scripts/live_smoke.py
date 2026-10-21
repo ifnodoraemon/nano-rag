@@ -66,8 +66,6 @@ async def run_smoke(args: argparse.Namespace) -> int:
             os.environ["MODEL_GATEWAY_API_KEY"] = api_key
     if args.generation_model:
         os.environ["GENERATION_MODEL_ALIAS"] = args.generation_model
-    if args.rerank_model:
-        os.environ["RERANK_MODEL_ALIAS"] = args.rerank_model
     normalize_provider_env()
     os.environ["MODEL_GATEWAY_MODE"] = "live"
     os.environ["RAG_INGEST_ALLOWED_DIRS"] = str((ROOT / "data/raw").resolve())
@@ -80,8 +78,6 @@ async def run_smoke(args: argparse.Namespace) -> int:
         print(f"MODEL_GATEWAY_BASE_URL={container.config.gateway_base_url}", flush=True)
         print(f"MODEL_GATEWAY_API_KEY={configured('MODEL_GATEWAY_API_KEY')}", flush=True)
         print(f"GENERATION_MODEL_ALIAS={container.generation_client.alias}", flush=True)
-        print(f"RERANK_MODEL_ALIAS={container.rerank_client.alias}", flush=True)
-        print(f"rerank_enabled={container.config.rerank_enabled}", flush=True)
         if container.wiki_searcher is not None:
             print(f"discovery={container.wiki_searcher.stats()}", flush=True)
 
@@ -105,19 +101,6 @@ async def run_smoke(args: argparse.Namespace) -> int:
             )
             return 1
 
-        if container.config.rerank_enabled:
-            ranked = await container.rerank_client.rerank(
-                "差旅报销多久内提交？",
-                [
-                    "病假超过 3 天需要提供医院证明。",
-                    "员工应在出差结束后 15 个自然日内提交差旅报销申请。",
-                ],
-                2,
-            )
-            top_index = ranked[0].index if ranked else None
-            print(f"rerank_ok={bool(ranked)} top_index={top_index}", flush=True)
-        else:
-            print("rerank_skipped=disabled_by_config", flush=True)
 
         ingest = await container.ingestion_pipeline.run(
             str(ROOT / "data/raw/employee_handbook.md"),
@@ -166,7 +149,6 @@ async def run_smoke(args: argparse.Namespace) -> int:
 def main() -> int:
     parser = argparse.ArgumentParser(description="Run live model gateway smoke test.")
     parser.add_argument("--generation-model")
-    parser.add_argument("--rerank-model")
     parser.add_argument("--api-key-stdin", action="store_true")
     args = parser.parse_args()
     return asyncio.run(run_smoke(args))

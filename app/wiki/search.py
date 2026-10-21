@@ -281,7 +281,7 @@ class WikiSearcher:
             results = self.index.search(
                 query, top_k=max(top_k * 4, 8), allowed_doc_ids=allowed_doc_ids
             )
-            reranked = sorted(
+            ordered = sorted(
                 results,
                 key=lambda item: (
                     item[1] + self._kind_bonus(self.documents.get(item[0])),
@@ -290,7 +290,7 @@ class WikiSearcher:
                 reverse=True,
             )[:top_k]
             hits: list[SearchHit] = []
-            for doc_id, score in reranked:
+            for doc_id, score in ordered:
                 document = self.documents.get(doc_id)
                 if document is None:
                     continue

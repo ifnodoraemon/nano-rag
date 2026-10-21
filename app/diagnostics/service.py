@@ -153,24 +153,6 @@ class DiagnosisService:
                 )
             )
 
-        if retrieved and trace.reranked_chunk_ids and trace.retrieved_chunk_ids:
-            if set(trace.reranked_chunk_ids) - set(trace.retrieved_chunk_ids):
-                findings.append(
-                    DiagnosisFinding(
-                        category="rerank_inconsistent",
-                        severity="high",
-                        rationale="The rerank result includes chunk_ids that were not present in retrieval, which indicates inconsistent pipeline state.",
-                        suggested_actions=[
-                            "Check the mapping between rerank result indexes and the original hits.",
-                            "Confirm that the trace record was not overwritten by a later request.",
-                        ],
-                        evidence={
-                            "retrieved_chunk_ids": trace.retrieved_chunk_ids,
-                            "reranked_chunk_ids": trace.reranked_chunk_ids,
-                        },
-                    )
-                )
-
         if not findings:
             findings.append(
                 DiagnosisFinding(

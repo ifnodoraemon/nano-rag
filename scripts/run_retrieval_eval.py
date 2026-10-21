@@ -2,7 +2,7 @@
 """Score the retrieval (discovery) stage on a dataset.
 
 This is the retrieval analogue of scripts/run_eval.py: it runs the wiki BM25
-discovery + deterministic version filter (and the optional rerank) with no
+discovery + deterministic version filter with no
 generation calls, so it is cheap, reproducible, and safe to gate CI on.
 
 Dataset (JSONL), one row per question:

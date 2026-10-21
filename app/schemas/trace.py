@@ -28,17 +28,14 @@ class TraceRecord(BaseModel):
     session_id: str | None = None
     sample_id: str | None = None
     retrieved_chunk_ids: list[str] = Field(default_factory=list)
-    reranked_chunk_ids: list[str] = Field(default_factory=list)
     freshness_ranked_chunk_ids: list[str] = Field(default_factory=list)
     retrieved: list[dict] = Field(default_factory=list)
-    reranked: list[dict] = Field(default_factory=list)
     freshness_ranked: list[dict] = Field(default_factory=list)
     contexts: list[dict] = Field(default_factory=list)
     citations: list[dict] = Field(default_factory=list)
     supporting_claims: list[dict] = Field(default_factory=list)
     answer: str | None = None
     model_alias: str | None = None
-    rerank_model_alias: str | None = None
     prompt_version: str | None = None
     prompt_messages: list[dict] = Field(default_factory=list)
     generation_finish_reason: str | None = None
@@ -53,8 +50,9 @@ class TraceRecord(BaseModel):
 
 class RetrievalDebugResponse(BaseModel):
     query: str
-    # Discovery output. There is no rerank stage in this build, so no
-    # ``reranked`` copy is emitted (it would imply a step that never ran).
+    # Discovery output. This build has one model (generation) and therefore no
+    # rerank stage, so no ``reranked`` copy is emitted - it would imply a step
+    # that never ran.
     retrieved: list[dict]
     contexts: list[dict]
     trace_id: str | None = None

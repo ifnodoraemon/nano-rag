@@ -19,7 +19,6 @@ from app.ingestion.pipeline import IngestionPipeline
 from app.ingestion.jobs import IngestJobStore
 from app.model_client.document_parser import DocumentParserClient
 from app.model_client.generation import GenerationClient
-from app.model_client.rerank import RerankClient
 from app.retrieval.graph_store import GraphStore, PostgresGraphStore
 from app.utils.text import parse_bool_env
 from app.knowledge_bases.catalog import KnowledgeBaseCatalog
@@ -89,7 +88,6 @@ class AppConfig:
     def gateway_for(self, capability: str, validate: bool = True) -> dict[str, str]:
         env_prefix_map = {
             "generation": "GENERATION",
-            "rerank": "RERANK",
         }
         env_prefix = env_prefix_map.get(capability, capability.upper())
         section = self.models.get(capability, {})
@@ -127,15 +125,6 @@ class AppConfig:
                 "MODEL_GATEWAY_MODE=mock is not supported in the real-data runtime."
             )
         return mode
-
-    @property
-    def rerank_enabled(self) -> bool:
-        if parse_bool_env(os.getenv("DISABLE_RERANK")):
-            return False
-        alias = (
-            str(self.models.get("rerank", {}).get("default_alias", "")).strip().lower()
-        )
-        return alias not in {"", "disabled", "none", "null"}
 
     @property
     def parsed_dir(self) -> Path:
@@ -339,7 +328,6 @@ def build_graph_store(config: AppConfig) -> GraphStore | None:
 @dataclass
 class AppContainer:
     config: AppConfig
-    rerank_client: RerankClient
     generation_client: GenerationClient
     document_parser: DocumentParserClient
     ingestion_pipeline: IngestionPipeline
@@ -356,7 +344,6 @@ class AppContainer:
     wiki_searcher: WikiSearcher | None = None
 
     async def close(self) -> None:
-        await self.rerank_client.close()
         await self.generation_client.close()
         await self.document_parser.close()
         if self.graph_store is not None:
@@ -366,7 +353,6 @@ class AppContainer:
     def from_env(cls) -> "AppContainer":
         config = load_config()
         graph_store = build_graph_store(config)
-        rerank_client = RerankClient(config)
         generation_client = GenerationClient(config)
         document_parser = DocumentParserClient(config)
         trace_store = TraceStore(persist_dir=config.trace_store_dir)
@@ -418,11 +404,9 @@ class AppContainer:
             tracing_manager=tracing_manager,
             graph_store=graph_store,
             wiki_searcher=wiki_searcher,
-            rerank_client=rerank_client,
         )
         return cls(
             config=config,
-            rerank_client=rerank_client,
             generation_client=generation_client,
             document_parser=document_parser,
             ingestion_pipeline=IngestionPipeline(

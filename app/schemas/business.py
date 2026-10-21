@@ -45,9 +45,9 @@ class BusinessRetrieveRequest(BaseModel):
 class BusinessRetrieveResponse(BaseModel):
     query: str
     contexts: list[dict]
-    # ``retrieved`` is what the discovery stage returned. This build has no
-    # rerank stage (and no embedding model), so a separate ``reranked`` field
-    # would be a verbatim copy implying a step that never ran.
+    # ``retrieved`` is what the discovery stage returned. This build runs a
+    # single model (generation): no embedding model and no rerank model, so a
+    # separate ``reranked`` field would imply a step that never ran.
     retrieved: list[dict]
     trace_id: str | None = None
     kb_id: str = "default"

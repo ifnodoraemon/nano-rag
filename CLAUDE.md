@@ -8,7 +8,7 @@ Enterprise RAG system with a real-data runtime: no frontend hardcoded business d
 - Runtime failures should be visible. Missing provider keys, invalid model credentials, parser errors, and PostgreSQL/graph-store errors must not be hidden behind mock or fallback behavior.
 - **No degradation paths.** There are no fallback, partial-result, or "continue without X" paths anywhere in the runtime: graph/wiki/store failures fail the request or the ingest job; LLM JSON that fails strict parsing raises `ModelOutputError`; corrupt parsed artifacts raise instead of being skipped; malformed config values raise at startup or first use instead of falling back to defaults. Optional auxiliary stages (page rendering, image extraction, graph extraction) either run and succeed or fail loudly when enabled.
 - Semantic RAG behavior must not depend on hardcoded keyword lists for business meaning, discourse roles, conflict detection, routing, or answer policy. Use model-produced structure, parser metadata, typed configuration, or trace-visible behavior instead.
-- Retrieval is document-level discovery, not dense-vector similarity: a document-scoped BM25 wiki is the retrieval engine's first hop, followed by deterministic version filtering and an LLM read plan. There is no dense-vector fallback.
+- Retrieval is document-level discovery, not dense-vector similarity: a document-scoped BM25 wiki is the retrieval engine's first hop, followed by deterministic version filtering and an LLM read plan. There is no dense-vector fallback, and no cross-encoder rerank stage: ranking quality comes from the lexical index and the model's reading plan, never from a second model.
 - The frontend does not store or submit business API keys. Browser requests go through the account system or the Docker nginx proxy, which injects the local backend key — for business routes only; operator routes are authenticated by the caller with the admin key and are never auto-authenticated by the proxy.
 - Every RAG answer should be traceable to retrieved context, citations, source documents, and trace IDs. This is checked, not just prompted: `app/generation/citation_check.py` deterministically verifies that every cited label resolves to a provided context and that the numbers a cited sentence states appear in the context it cites; the result lands on the trace (`citation_integrity`) and as a deterministic eval metric.
 - Deterministic ingest behavior: a configured multimodal document parser takes precedence over local extraction for every suffix it supports (local pypdf/office extraction runs only when no model parser is configured); provenance fields are honest (unknown page numbers stay `None`); source files must be valid UTF-8.
@@ -20,7 +20,7 @@ Enterprise RAG system with a real-data runtime: no frontend hardcoded business d
 - **Frontend**: React 19 + TypeScript + Vite, served by nginx in Docker
 - **Discovery index**: document-level BM25 over the compiled wiki (no vector DB, no embedding model)
 - **Graph store**: native PostgreSQL (document structure for optional graph expansion)
-- **Model Providers**: direct Gemini or Qwen provider configuration (generation + document parser + optional rerank); no Bifrost/LiteLLM runtime layer, no embedding endpoint
+- **Model Providers**: ONE generation model does everything (query understanding, reading plan, evidence audit, graph extraction, answers), plus the same provider's multimodal capability for document parsing when needed. No embedding model, no rerank model, no Bifrost/LiteLLM runtime layer.
 - **Tracing**: OpenTelemetry HTTP export to Langfuse
 - **Testing**: pytest + pytest-asyncio, TypeScript build/lint
 - **Evaluation**: deterministic eval plus optional deepeval metrics
@@ -34,7 +34,7 @@ app/
   core/         # Config, exceptions, logging, tracing
   generation/   # Prompt builder, answer formatter
   ingestion/    # Document parsing, chunking, metadata extraction
-  model_client/ # Generation, rerank, and document parser clients
+  model_client/ # Generation + document parser clients (single model; no rerank/embedding client)
   retrieval/    # BM25 index, graph store/index/expander, context builder, versioning
   schemas/      # Pydantic models
   wiki/         # Document-level wiki compiler (pages) + BM25 searcher (discovery layer)

@@ -2,12 +2,6 @@ model_gateway:
   base_url: ${MODEL_GATEWAY_BASE_URL:-https://generativelanguage.googleapis.com/v1beta/openai}
   api_key: ${MODEL_GATEWAY_API_KEY:-}
 
-rerank:
-  default_alias: ${RERANK_MODEL_ALIAS:-disabled}
-  base_url: ${RERANK_API_BASE_URL:-}
-  api_key: ${RERANK_API_KEY:-}
-  path: ${RERANK_API_PATH:-}
-
 generation:
   default_alias: ${GENERATION_MODEL_ALIAS:-gemini-flash-latest}
   base_url: ${GENERATION_API_BASE_URL:-https://generativelanguage.googleapis.com/v1beta/openai}

@@ -45,10 +45,6 @@ LEGACY_ALIASES = {
     "DOCUMENT_PARSER_API_KEY": "COMPOSE_DOCUMENT_PARSER_API_KEY",
     "DOCUMENT_PARSER_API_BASE_URL": "COMPOSE_DOCUMENT_PARSER_API_BASE_URL",
     "DOCUMENT_PARSER_MODEL": "COMPOSE_DOCUMENT_PARSER_MODEL",
-    "RERANK_MODEL_ALIAS": "COMPOSE_RERANK_MODEL_ALIAS",
-    "RERANK_API_BASE_URL": "COMPOSE_RERANK_API_BASE_URL",
-    "RERANK_API_KEY": "COMPOSE_RERANK_API_KEY",
-    "RERANK_API_PATH": "COMPOSE_RERANK_API_PATH",
     "POSTGRES_PASSWORD": "PG_PASSWORD",
 }
 
@@ -96,11 +92,6 @@ FRONTEND_BIND=127.0.0.1
 FRONTEND_PORT=3001
 
 # cross-encoder 重排（默认关闭）。开启需要同时给 BASE_URL 和 PATH。
-RERANK_MODEL_ALIAS=disabled
-# RERANK_API_BASE_URL=
-# RERANK_API_KEY=
-# RERANK_API_PATH=/reranks
-# DISABLE_RERANK=false
 
 # 摄入并发（Celery worker 数）
 RAG_WORKER_CONCURRENCY=32
@@ -273,7 +264,6 @@ def check(probe: bool = False) -> int:
         print(f"OK: {ENV_PATH} is ready.")
         if not probe:
             print("    add --probe to verify the provider keys actually work.")
-        print("    optional: cross-encoder rerank is disabled; see section 4.")
         return 0
     print(f"{ENV_PATH} needs attention:")
     for problem in problems:
