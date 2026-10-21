@@ -558,9 +558,12 @@ class AgenticDiscovery:
             metadata = as_dict(chunk.get("metadata"))
             # Section matching runs over the heading path and the chunk title.
             haystack = [*as_str_list(metadata.get("hierarchy_path")), as_str(chunk.get("title"))]
+            # A focus term selects a SECTION, not a single chunk: every chunk
+            # belonging to a matched section must be read. Consuming the term
+            # after its first hit dropped the rest of the section, so a document
+            # where one heading spans several chunks answered "not found" for
+            # evidence that existed in a sibling chunk.
             for term in focus:
-                if term in matched_terms:
-                    continue
                 if _section_matches(term, haystack):
                     matched.append(chunk)
                     matched_terms.add(term)

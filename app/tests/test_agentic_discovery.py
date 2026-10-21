@@ -521,6 +521,58 @@ async def test_unresolvable_focus_sections_fail_loud(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_focus_section_reads_every_chunk_of_that_section(tmp_path: Path) -> None:
+    """A focus section selects a SECTION, not one chunk.
+
+    The plan names a heading; a heading can span several chunks. Consuming the
+    focus term after the first matching chunk meant only one chunk per section
+    was ever read, so a question whose evidence sat in a sibling chunk of the
+    same section was answered "not found" - the evidence never reached the
+    model. Observed end-to-end: a 3-chunk document surfaced 1 context.
+    """
+    wiki_dir = tmp_path / "wiki"
+    parsed_dir = tmp_path / "parsed"
+    parsed_dir.mkdir()
+    compiler = WikiCompiler(wiki_dir)
+    document = _doc(
+        "handbook", "employee handbook", "v1", "2025-01-01", "# Handbook\n\nRules."
+    )
+    compiler.upsert_document(
+        document,
+        [
+            _chunk("handbook", "Reimbursement", "File expense claims within 15 days."),
+            _chunk("handbook", "Reimbursement", "Attach transport, hotel and meal receipts."),
+            _chunk("handbook", "Leave", "Sick leave beyond 3 days needs a doctor note."),
+        ],
+    )
+    _write_artifact(
+        parsed_dir,
+        "handbook",
+        document,
+        [
+            _chunk("handbook", "Reimbursement", "File expense claims within 15 days."),
+            _chunk("handbook", "Reimbursement", "Attach transport, hotel and meal receipts."),
+            _chunk("handbook", "Leave", "Sick leave beyond 3 days needs a doctor note."),
+        ],
+    )
+
+    config = _config(tmp_path)
+    config.parsed_dir = parsed_dir
+    discovery = _discovery(
+        config, WikiSearcher(wiki_dir), ReadingPlanClient(focus_sections=["Reimbursement"])
+    )
+
+    contexts, _trace = await discovery.retrieve(
+        ChatRequest(query="what receipts are needed"), "what receipts are needed"
+    )
+
+    texts = [str(context.get("text")) for context in contexts]
+    assert len(contexts) == 2, f"expected both section chunks, got {texts}"
+    assert any("15 days" in text for text in texts)
+    assert any("receipts" in text for text in texts)
+
+
+@pytest.mark.asyncio
 async def test_missing_parsed_artifact_fails_loud(tmp_path: Path) -> None:
     """A discovery page whose parsed artifact is gone is a data-integrity
     failure: raise instead of silently skipping the document."""
