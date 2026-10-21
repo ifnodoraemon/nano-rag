@@ -94,29 +94,64 @@ nano-rag/
 
 ## Docker 配置
 
-Docker 默认值：
+### 只有两项需要你填
 
 ```bash
-MODEL_GATEWAY_MODE=live
-GENERATION_API_BASE_URL=https://generativelanguage.googleapis.com/v1beta/openai
-RAG_GRAPH_BACKEND=postgres
-PG_URI=postgresql://nanorag:nano-rag@postgres:5432/nanorag
-RAG_WIKI_ENABLED=true
-RAG_DIAGNOSIS_ENABLED=true
-RAG_EVAL_ENABLED=true
-DOCUMENT_PARSER_ENABLED=true
-
-# 必须显式设置（compose 在缺失时拒绝启动）：
-RAG_API_KEYS=<openssl rand -hex 32>
-RAG_ADMIN_API_KEYS=<openssl rand -hex 32，且必须与业务 key 不同>
-RAG_PROXY_API_KEY=<通常等于 RAG_API_KEYS>
-RAG_ENV=prod            # local/dev/test 之外会拒绝已知弱默认密钥
-# FRONTEND_BIND=127.0.0.1   # 默认只绑本机；对外暴露请接自己的鉴权代理
+python scripts/init_env.py           # 一键生成 docker/.env（含随机密钥）
+python scripts/init_env.py --check   # 随时检查还缺什么
 ```
 
-完整清单见 `docker/.env.example`。
+生成后只需补两个值：
 
-后端启动时会检查 generation、document parser 等关键配置，并连接 PostgreSQL 图存储。缺少 `DOCUMENT_PARSER_API_KEY` 这类真实 provider 配置时，容器日志会输出 `Startup readiness` 警告，`/health/detail` 会继续显示对应能力不可用；前端只消费这些后端状态，不负责提示 Docker 配置方式。
+| 变量 | 用途 | 何时必需 |
+| --- | --- | --- |
+| `GENERATION_API_KEY` | 生成模型：对话、阅读计划、证据审计、**图抽取**都走它 | 总是（文本摄入也要图抽取） |
+| `DOCUMENT_PARSER_API_KEY` | 多模态文档解析 | 只在摄入 PDF / 图片 / Office 时；纯 md/txt 不需要 |
+
+其余全部自动生成或派生，**不需要你操心**：
+
+| 项 | 为什么不需要配 |
+| --- | --- |
+| `RAG_API_KEYS` / `RAG_ADMIN_API_KEYS` / `POSTGRES_PASSWORD` | `init_env.py` 用 `secrets.token_hex` 生成（等价 `openssl rand -hex 32`） |
+| `RAG_PROXY_API_KEY` | 由 `RAG_API_KEYS` 派生（nginx 注入的那一个 key） |
+| `PG_URI` | 由 `POSTGRES_USER` / `POSTGRES_PASSWORD` / `POSTGRES_DB` 派生，一处定义 |
+| `MODEL_GATEWAY_*` | 历史别名，`GENERATION_*` 是唯一来源（代码保留只读兼容） |
+| `COMPOSE_*` 前缀名 | 旧格式，迁移时自动转换并保留原值 |
+| `RAG_WIKI_ENABLED` | 必须为 `true`（`false` 会启动失败），无需配置 |
+| `MODEL_GATEWAY_MODE` | 只支持 `live`（`mock` 已被拒绝），无需配置 |
+| redis / postgres 的对外认证 | 两者都是 `expose`-only，不在宿主机暴露，属内部交换组件 |
+
+### 环境对照
+
+| 场景 | 需要什么 |
+| --- | --- |
+| 跑测试 / 检索评测 / dedup / 分词 A/B / 引用校验 | **什么都不需要**（无 LLM 调用） |
+| 真实问答（端到端） | `GENERATION_API_KEY` |
+| 摄入 PDF / 图片 / Office | 再加 `DOCUMENT_PARSER_API_KEY` |
+| 开启 cross-encoder 重排 | 再加 `RERANK_API_BASE_URL` + `RERANK_API_PATH`（`DISABLE_RERANK=false`） |
+
+### 启动
+
+```bash
+docker compose -f docker/docker-compose.yml up -d --build
+
+# 公开摘要（无鉴权）
+curl -sS http://127.0.0.1:3001/health
+# 运维详情（需要运维密钥；会逐项报告哪个能力不可达）
+curl -sS -H "X-Admin-API-Key: $(grep ^RAG_ADMIN_API_KEYS= docker/.env | cut -d= -f2)" \
+  http://127.0.0.1:3001/health/detail
+```
+
+`/health/detail` 是判断"配置是否真的可用"的地方：它会真实探测 provider 可达性并返回具体错误，
+比逐个猜环境变量快得多。
+
+### 安全默认
+
+- 前端默认只绑 `127.0.0.1`。改成 `0.0.0.0` 之前请在前面放鉴权代理——该端口会注入业务密钥，
+  能访问它的人等同业务调用者。
+- `RAG_ENV=local` 才允许弱默认密钥；其他取值会拒绝已知弱密钥。
+- `RAG_AUTH_DISABLED` 只在 local/dev/test 生效，生产环境会被忽略并记日志。
+- `/docs` 与 `/openapi.json` 默认关闭，需要时 `RAG_ENABLE_DOCS=true` 显式开启。
 
 ## Provider 配置
 
@@ -132,13 +167,13 @@ RAG_ENV=prod            # local/dev/test 之外会拒绝已知弱默认密钥
 Gemini 示例：
 
 ```bash
-COMPOSE_GENERATION_API_KEY=<your-gemini-key>
-COMPOSE_GENERATION_API_BASE_URL=https://generativelanguage.googleapis.com/v1beta/openai
-COMPOSE_GENERATION_MODEL_ALIAS=gemini-flash-latest
+GENERATION_API_KEY=<your-gemini-key>
+GENERATION_API_BASE_URL=https://generativelanguage.googleapis.com/v1beta/openai
+GENERATION_MODEL_ALIAS=gemini-flash-latest
 
-COMPOSE_DOCUMENT_PARSER_API_KEY=<your-parser-key>
-COMPOSE_DOCUMENT_PARSER_API_BASE_URL=https://generativelanguage.googleapis.com
-COMPOSE_DOCUMENT_PARSER_MODEL=gemini-flash-latest
+DOCUMENT_PARSER_API_KEY=<your-parser-key>
+DOCUMENT_PARSER_API_BASE_URL=https://generativelanguage.googleapis.com
+DOCUMENT_PARSER_MODEL=gemini-flash-latest
 ```
 
 ## 公开 RAG 评测
@@ -159,37 +194,37 @@ docker compose -f docker/docker-compose.yml exec app python scripts/run_eval.py 
 Qwen 示例：
 
 ```bash
-COMPOSE_GENERATION_API_KEY=<your-dashscope-key>
-COMPOSE_GENERATION_API_BASE_URL=https://dashscope-intl.aliyuncs.com/compatible-mode/v1
-COMPOSE_GENERATION_MODEL_ALIAS=qwen-plus
+GENERATION_API_KEY=<your-dashscope-key>
+GENERATION_API_BASE_URL=https://dashscope-intl.aliyuncs.com/compatible-mode/v1
+GENERATION_MODEL_ALIAS=qwen-plus
 
-COMPOSE_DOCUMENT_PARSER_PROVIDER=qwen
-COMPOSE_DOCUMENT_PARSER_API_KEY=<your-dashscope-key>
-COMPOSE_DOCUMENT_PARSER_API_BASE_URL=https://dashscope-intl.aliyuncs.com/compatible-mode/v1
-COMPOSE_DOCUMENT_PARSER_MODEL=qwen-vl-plus
+DOCUMENT_PARSER_PROVIDER=qwen
+DOCUMENT_PARSER_API_KEY=<your-dashscope-key>
+DOCUMENT_PARSER_API_BASE_URL=https://dashscope-intl.aliyuncs.com/compatible-mode/v1
+DOCUMENT_PARSER_MODEL=qwen-vl-plus
 ```
 
 Qwen vLLM 自托管示例：
 
 ```bash
-COMPOSE_GENERATION_API_KEY=EMPTY
-COMPOSE_GENERATION_API_BASE_URL=http://vllm:8000/v1
-COMPOSE_GENERATION_MODEL_ALIAS=Qwen/Qwen2.5-VL-7B-Instruct
+GENERATION_API_KEY=EMPTY
+GENERATION_API_BASE_URL=http://vllm:8000/v1
+GENERATION_MODEL_ALIAS=Qwen/Qwen2.5-VL-7B-Instruct
 
-COMPOSE_DOCUMENT_PARSER_PROVIDER=qwen
-COMPOSE_DOCUMENT_PARSER_API_KEY=EMPTY
-COMPOSE_DOCUMENT_PARSER_API_BASE_URL=http://vllm:8000/v1
-COMPOSE_DOCUMENT_PARSER_MODEL=Qwen/Qwen2.5-VL-7B-Instruct
+DOCUMENT_PARSER_PROVIDER=qwen
+DOCUMENT_PARSER_API_KEY=EMPTY
+DOCUMENT_PARSER_API_BASE_URL=http://vllm:8000/v1
+DOCUMENT_PARSER_MODEL=Qwen/Qwen2.5-VL-7B-Instruct
 ```
 
 可选 Qwen rerank（cross-encoder，重排发现阶段候选；非 embedding）：
 
 ```bash
-COMPOSE_RERANK_MODEL_ALIAS=qwen3-rerank
-COMPOSE_DISABLE_RERANK=false
-COMPOSE_RERANK_API_BASE_URL=https://dashscope-intl.aliyuncs.com/compatible-api/v1
-COMPOSE_RERANK_API_KEY=<your-dashscope-key>
-COMPOSE_RERANK_API_PATH=/reranks      # 启用后必填，缺失会直接启动报错
+RERANK_MODEL_ALIAS=qwen3-rerank
+DISABLE_RERANK=false
+RERANK_API_BASE_URL=https://dashscope-intl.aliyuncs.com/compatible-api/v1
+RERANK_API_KEY=<your-dashscope-key>
+RERANK_API_PATH=/reranks      # 启用后必填，缺失会直接启动报错
 ```
 
 启用后该阶段是硬依赖：provider 不可达、返回空结果、索引越界或缺 `relevance_score` 都会让请求失败，

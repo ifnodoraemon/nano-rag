@@ -96,7 +96,10 @@ Do not use non-Docker commands to start the app for runtime validation.
 - `RAG_WIKI_MAX_PAGES_PER_KB` - per-KB source page quota enforced at ingest (default 20000)
 - `GENERATION_MAX_TOKENS` - generation output cap (0 = unset; invalid values fail startup)
 - `RAG_INGEST_JOB_TTL_DAYS` - finished ingest-job record retention (default 7; 0 = keep forever)
-- `RAG_API_KEYS` - backend business API keys
+- `RAG_API_KEYS` - backend business API keys (single key: nginx injects exactly one; `RAG_ADMIN_API_KEYS` must differ)
+- `RAG_PROXY_API_KEY` - derived from `RAG_API_KEYS` by compose; override only if the browser-facing key must differ
+
+Configuration surface is deliberately two-tier: exactly two *external* credentials (generation, and document parser when needed) plus `scripts/init_env.py`, which generates every internal secret (business/admin keys, postgres password) with `secrets.token_hex`. Derived values are never configured twice: `PG_URI` comes from `POSTGRES_*`, `RAG_PROXY_API_KEY` from `RAG_API_KEYS`. Legacy names (`COMPOSE_*`, `MODEL_GATEWAY_*`, `PG_PASSWORD`) are still recognised and migrated in place. Internal components (redis, postgres) are `expose`-only, so they need no operator-managed credentials.
 
 ## Code Conventions
 
