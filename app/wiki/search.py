@@ -12,6 +12,7 @@ from app.retrieval.bm25 import BM25Config, BM25Index
 from app.retrieval.filters import match_metadata_filters
 from app.schemas.chunk import Chunk
 from app.retrieval.hits import SearchHit
+from app.retrieval.tokenizer import resolve_tokenizer_mode
 from app.wiki.compiler import WikiCompiler
 
 logger = logging.getLogger(__name__)
@@ -56,7 +57,12 @@ class WikiSearcher:
         self.sources_dir = self.root_dir / "sources"
         self.topics_dir = self.root_dir / "topics"
         self.indexes_dir = self.root_dir / "indexes"
-        self.index = BM25Index(BM25Config(max_documents=self._max_documents()))
+        self.index = BM25Index(
+            BM25Config(
+                max_documents=self._max_documents(),
+                tokenizer=self._tokenizer_mode(),
+            )
+        )
         self.documents: dict[str, WikiDocument] = {}
         self._page_mtimes: dict[str, int] = {}
         self._path_doc_ids: dict[str, str] = {}
@@ -98,6 +104,10 @@ class WikiSearcher:
             raise RetrievalError(
                 f"RAG_BM25_MAX_DOCUMENTS must be an integer: {exc}"
             ) from exc
+
+    @staticmethod
+    def _tokenizer_mode() -> str:
+        return resolve_tokenizer_mode(os.getenv("RAG_BM25_TOKENIZER"))
 
     @staticmethod
     def _max_pages_per_kb_config() -> int:
@@ -232,6 +242,7 @@ class WikiSearcher:
                 "index_pages": kinds.get("index", 0),
                 "max_documents": self.index.config.max_documents,
                 "max_pages_per_kb": self._max_pages_per_kb,
+                "tokenizer": self.index.config.tokenizer,
             }
 
     def search(

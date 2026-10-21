@@ -166,6 +166,40 @@ class _RowScore:
     first_relevant_rank: int | None = None
     recall_at_k: dict[str, float] = field(default_factory=dict)
     hit_at_k: dict[str, float] = field(default_factory=dict)
+    # How clearly the right document beat the best wrong one. Recall cannot see
+    # this: two configurations can both rank the answer first while one leaves
+    # the runner-up almost tied (which is one query wording away from a miss).
+    # The ratio is scale-free, so it is comparable across tokenizers whose raw
+    # BM25 scores live on different scales (a tokenizer that emits more tokens
+    # per character necessarily produces larger absolute scores).
+    separation_margin: float | None = None
+    separation_ratio: float | None = None
+
+
+def _separation(
+    documents: list[RetrievedDocument], record: RetrievalRecord
+) -> tuple[float | None, float | None]:
+    """(margin, ratio) describing how far the right document beat the best wrong one.
+
+    margin = score(relevant) - score(best irrelevant), raw BM25 units: only
+    comparable between runs of the *same* configuration.
+
+    ratio  = 1 - score(best irrelevant) / score(relevant): scale-free, 0 means a
+    tie and 1 means the right document completely dominates. This is the figure
+    to compare across tokenizers, whose absolute scores are not on the same
+    scale.
+    """
+    relevant = [d.score for d in documents if _is_relevant(d, record)]
+    irrelevant = [d.score for d in documents if not _is_relevant(d, record)]
+    if not relevant:
+        return None, None
+    best_relevant = max(relevant)
+    best_irrelevant = max(irrelevant) if irrelevant else 0.0
+    margin = round(best_relevant - best_irrelevant, 6)
+    if best_relevant <= 0:
+        return margin, None
+    ratio = round(1.0 - (best_irrelevant / best_relevant), 6)
+    return margin, ratio
 
 
 def _score_row(
@@ -175,6 +209,7 @@ def _score_row(
 ) -> _RowScore:
     row = _RowScore(record=record, ranking=[document.doc_id for document in documents])
     row.first_relevant_rank = _first_relevant_rank(documents, record)
+    row.separation_margin, row.separation_ratio = _separation(documents, record)
     expected = set(record.expectations)
     for cutoff in cutoffs:
         covered: set[tuple[str, str]] = set()
@@ -224,6 +259,17 @@ async def evaluate_retrieval(
         "candidate_count_avg": round(
             sum(len(row.ranking) for row in rows) / len(rows), 4
         ),
+        # Higher is more robust; see _separation. The ratio is the one to
+        # compare across configurations, the margin only across runs of one.
+        "separation_ratio_avg": _mean_optional(
+            [row.separation_ratio for row in rows]
+        ),
+        "separation_margin_avg": _mean_optional(
+            [row.separation_margin for row in rows]
+        ),
+        "rows_without_scored_relevant": sum(
+            1 for row in rows if row.separation_margin is None
+        ),
     }
     for cutoff in ordered_cutoffs:
         key = str(cutoff)
@@ -253,10 +299,19 @@ async def evaluate_retrieval(
                 "recall_at_k": row.recall_at_k,
                 "hit_at_k": row.hit_at_k,
                 "ranking": row.ranking,
+                "separation_margin": row.separation_margin,
+                "separation_ratio": row.separation_ratio,
             }
             for row in rows
         ],
     }
+
+
+def _mean_optional(values: list[float | None]) -> float | None:
+    present = [value for value in values if value is not None]
+    if not present:
+        return None
+    return round(sum(present) / len(present), 4)
 
 
 def failed_retrieval_gates(

@@ -1,12 +1,12 @@
 from __future__ import annotations
 
 import math
-import re
 import threading
 from collections import Counter
 from dataclasses import dataclass
 
 from app.core.exceptions import RetrievalError
+from app.retrieval.tokenizer import DEFAULT_TOKENIZER, tokenize
 
 
 @dataclass
@@ -14,6 +14,10 @@ class BM25Config:
     k1: float = 1.5
     b: float = 0.75
     max_documents: int = 50000
+    # See app/retrieval/tokenizer.py: the CJK segmentation strategy decides
+    # what a "term" is, which is the single biggest relevance lever for a
+    # lexical index over Chinese text.
+    tokenizer: str = DEFAULT_TOKENIZER
 
 
 class BM25Index:
@@ -43,31 +47,8 @@ class BM25Index:
         self._total_length = 0
         self._lock = threading.RLock()
 
-    _CJK_RE = re.compile(r"[\u4e00-\u9fff\u3400-\u4dbf\uf900-\ufaff]+")
-
     def _tokenize(self, text: str) -> list[str]:
-        text = text.lower()
-        tokens: list[str] = []
-        last = 0
-        for match in self._CJK_RE.finditer(text):
-            if match.start() > last:
-                segment = text[last : match.start()]
-                word_tokens = re.findall(r"\b\w+\b|[^\w\s]", segment)
-                tokens.extend(
-                    t for t in word_tokens if len(t) > 1 or t.isalpha() or t.isdigit()
-                )
-            cjk_chars = [c for c in match.group() if c.strip()]
-            tokens.extend(cjk_chars)
-            for i in range(len(cjk_chars) - 1):
-                tokens.append(cjk_chars[i] + cjk_chars[i + 1])
-            last = match.end()
-        if last < len(text):
-            segment = text[last:]
-            word_tokens = re.findall(r"\b\w+\b|[^\w\s]", segment)
-            tokens.extend(
-                t for t in word_tokens if len(t) > 1 or t.isalpha() or t.isdigit()
-            )
-        return tokens
+        return tokenize(text, self.config.tokenizer)
 
     @property
     def document_count(self) -> int:

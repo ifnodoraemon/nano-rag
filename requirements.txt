@@ -23,6 +23,9 @@ uvicorn==0.35.0
 # deepeval: fully pinned — the runner (app/eval/deepeval_runner.py) is verified
 # against this exact 2.x API surface; bump deliberately, not via a float.
 deepeval==2.9.7
+# CJK segmentation for RAG_BM25_TOKENIZER=jieba (optional mode; the default
+# cjk_ngram/cjk_bigram modes are pure-python and need nothing extra).
+jieba==0.42.1
 # Required by the deepeval judge bridge (app/eval/deepeval_runner.py): it runs an
 # async metric from a sync context, which needs an existing event loop patched.
 nest-asyncio==1.6.0
