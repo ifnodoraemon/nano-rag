@@ -61,7 +61,26 @@ class CitationIntegrityReport:
     grounded_sentences: int = 0
     ungrounded_number_count: int = 0
     ungrounded_quote_count: int = 0
+    # Relevance of the cited evidence to the sentence, independent of label
+    # resolution. A sentence can cite a label that resolves and whose numbers
+    # appear - while the context is about a different subject. Integrity alone
+    # cannot see that, so precision is measured separately.
+    sentences_lexically_supported: int = 0
     issues: tuple[CitationIssue, ...] = ()
+
+    @property
+    def citation_precision(self) -> float | None:
+        """Fraction of cited sentences whose cited evidence is lexically related.
+
+        A deterministic proxy: it cannot judge paraphrase, but it does catch a
+        citation pointing at an unrelated passage, which label-and-number
+        grounding alone reports as perfectly fine.
+        """
+        if self.sentences_with_citations == 0:
+            return None
+        return round(
+            self.sentences_lexically_supported / self.sentences_with_citations, 4
+        )
 
     @property
     def integrity_score(self) -> float | None:
@@ -87,6 +106,8 @@ class CitationIntegrityReport:
             "grounded_sentences": self.grounded_sentences,
             "ungrounded_number_count": self.ungrounded_number_count,
             "ungrounded_quote_count": self.ungrounded_quote_count,
+            "citation_precision": self.citation_precision,
+            "sentences_lexically_supported": self.sentences_lexically_supported,
             "issues": [
                 {
                     "kind": issue.kind,
@@ -97,6 +118,37 @@ class CitationIntegrityReport:
                 for issue in self.issues
             ],
         }
+
+
+MIN_CITATION_SUPPORT = 0.34
+
+
+def _content_tokens(text: str) -> set[str]:
+    """Tokens that carry meaning: CJK characters and alphanumeric runs.
+
+    Uses the same CJK tokenizer as the discovery index so the check does not
+    grow a second, private notion of what a term is.
+    """
+    from app.retrieval.tokenizer import tokenize
+
+    return {token for token in tokenize(text.lower()) if token.strip()}
+
+
+def _lexically_supported(sentence: str, evidence: str) -> bool:
+    """Does the cited evidence share enough substance with the claim?
+
+    Deliberately lenient (a third of the sentence's tokens): the point is to catch
+    a citation pointing at an unrelated passage, not to grade paraphrase quality -
+    that is what the LLM-assisted metrics are for.
+    """
+    claim_tokens = _content_tokens(CITATION_GROUP_RE.sub(" ", sentence))
+    if not claim_tokens:
+        return True
+    evidence_tokens = _content_tokens(evidence)
+    if not evidence_tokens:
+        return False
+    overlap = len(claim_tokens & evidence_tokens) / len(claim_tokens)
+    return overlap >= MIN_CITATION_SUPPORT
 
 
 def _context_texts_by_label(
@@ -170,6 +222,7 @@ def check_citations(
     grounded = 0
     ungrounded_numbers = 0
     ungrounded_quotes = 0
+    lexically_supported = 0
 
     for sentence in SENTENCE_SPLIT_RE.split(str(answer or "")):
         sentence = sentence.strip()
@@ -239,6 +292,8 @@ def check_citations(
                         )
                     )
 
+        if _lexically_supported(sentence, haystack):
+            lexically_supported += 1
         if sentence_ok:
             grounded += 1
 
@@ -251,5 +306,6 @@ def check_citations(
         grounded_sentences=grounded,
         ungrounded_number_count=ungrounded_numbers,
         ungrounded_quote_count=ungrounded_quotes,
+        sentences_lexically_supported=lexically_supported,
         issues=tuple(issues),
     )

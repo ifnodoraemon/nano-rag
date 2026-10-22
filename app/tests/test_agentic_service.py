@@ -162,7 +162,7 @@ async def test_agent_verify_without_contexts_is_deterministically_insufficient()
 
 def test_render_structured_answer_answerable() -> None:
     service = _service(FakeGenerationClient())
-    answer = service._render_structured_answer(
+    answer, answerable = service._render_structured_answer(
         '{"is_answerable":true,"missing_entities":[],'
         '"extracted_answer":"答案 [C1]",'
         '"supporting_claims":["[factual] 支撑点 [C1]"]}'
@@ -173,7 +173,7 @@ def test_render_structured_answer_answerable() -> None:
 
 def test_render_structured_answer_unanswerable() -> None:
     service = _service(FakeGenerationClient())
-    answer = service._render_structured_answer(
+    answer, answerable = service._render_structured_answer(
         '{"is_answerable":false,"missing_entities":["术语X"],'
         '"extracted_answer":"","supporting_claims":[]}'
     )

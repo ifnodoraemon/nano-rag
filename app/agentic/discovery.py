@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 from pathlib import Path
+from collections.abc import Sequence
 from dataclasses import dataclass
 from time import perf_counter
 from typing import TYPE_CHECKING
@@ -485,36 +486,12 @@ class AgenticDiscovery:
     def _select_chunks(
         self, raw_chunks: list[object], focus: set[str], doc_id: str
     ) -> list[dict[str, object]]:
-        chunks: list[dict[str, object]] = [
-            chunk for chunk in raw_chunks if isinstance(chunk, dict)
-        ]
-        if not focus:
-            return chunks[: self.max_read_chunks_per_doc]
-        matched: list[dict[str, object]] = []
-        matched_terms: set[str] = set()
-        for chunk in chunks:
-            metadata = as_dict(chunk.get("metadata"))
-            # Section matching runs over the heading path and the chunk title.
-            haystack = [*as_str_list(metadata.get("hierarchy_path")), as_str(chunk.get("title"))]
-            # A focus term selects a SECTION, not a single chunk: every chunk
-            # belonging to a matched section must be read. Consuming the term
-            # after its first hit dropped the rest of the section, so a document
-            # where one heading spans several chunks answered "not found" for
-            # evidence that existed in a sibling chunk.
-            for term in focus:
-                if _section_matches(term, haystack):
-                    matched.append(chunk)
-                    matched_terms.add(term)
-                    break
-        if not matched:
-            # No fallback to a whole-document read: the plan named sections
-            # that do not resolve, which is a contract violation between the
-            # planner LLM and the artifact's heading structure. Fail visibly.
-            raise ModelOutputError(
-                f"reading plan focus sections {sorted(focus)} do not match any "
-                f"section of document {doc_id}"
-            )
-        return matched[: self.max_read_chunks_per_doc]
+        return select_chunks_for_focus(
+            raw_chunks,
+            focus,
+            doc_id=doc_id,
+            max_chunks=self.max_read_chunks_per_doc,
+        )
 
     def _load_artifact(self, doc_id: str) -> dict[str, object]:
         path = self.parsed_dir / f"{doc_id}.json"
@@ -531,6 +508,49 @@ class AgenticDiscovery:
                 f"JSON object ({path})"
             )
         return payload
+
+
+def select_chunks_for_focus(
+    raw_chunks: Sequence[object],
+    focus: set[str],
+    *,
+    doc_id: str,
+    max_chunks: int,
+) -> list[dict[str, object]]:
+    """Choose the chunks to deep-read for a reading plan's focus sections.
+
+    Extracted from ``AgenticDiscovery`` so the deterministic part of the read
+    plan is directly evaluable (``app/eval/read_plan.py``) without constructing a
+    pipeline or calling a model.
+
+    A focus term selects a **section**, not a single chunk: every chunk belonging
+    to that section is read. Consuming a term after its first hit used to drop the
+    rest of the section, so a document whose heading spanned several chunks
+    answered "not found" for evidence that existed in a sibling chunk.
+    """
+    chunks: list[dict[str, object]] = [
+        chunk for chunk in raw_chunks if isinstance(chunk, dict)
+    ]
+    if not focus:
+        return chunks[:max_chunks]
+    matched: list[dict[str, object]] = []
+    for chunk in chunks:
+        metadata = as_dict(chunk.get("metadata"))
+        # Section matching runs over the heading path and the chunk title.
+        haystack = [*as_str_list(metadata.get("hierarchy_path")), as_str(chunk.get("title"))]
+        for term in focus:
+            if _section_matches(term, haystack):
+                matched.append(chunk)
+                break
+    if not matched:
+        # No fallback to a whole-document read: the plan named sections that do
+        # not resolve, a contract violation between the planner and the artifact's
+        # heading structure. Fail visibly.
+        raise ModelOutputError(
+            f"reading plan focus sections {sorted(focus)} do not match any "
+            f"section of document {doc_id}"
+        )
+    return matched[:max_chunks]
 
 
 def _section_matches(focus_term: str, haystack: list[str]) -> bool:

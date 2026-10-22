@@ -409,6 +409,29 @@ python scripts/ab_retrieval.py tokenizer --benchmark /tmp/t2r-bench
 | `reference_context_recall` | 参考答案所需上下文是否检索到 | 确定性 |
 | `citation_integrity` | 引用标签能否解析、引用句数字是否有依据 | 确定性 |
 | `faithfulness` / `answer_relevancy` / `context_precision` / `context_recall` | 语义质量 | LLM（deepeval） |
+| `chunk_recall` / `section_coverage_avg` | 该读的 chunk 真的读了吗？ | 确定性（阅读计划） |
+| `false_refusal_rate` / `correct_abstention_rate` / `unsupported_answer_rate` | 知道自己不知道吗？ | 确定性（读模型结构化判定） |
+| `citation_precision` | 引用指向的证据真的相关吗？ | 确定性（词法支持度） |
+| `latency_p50/p95_seconds` | 尾延迟有多差？ | 确定性 |
+| `tokens_per_query_avg` | 每次查询花多少 token？ | 确定性 |
+
+**`section_coverage_avg` 存在的理由**：我们曾有一个真实缺陷——阅读计划点名"差旅报销"章节，
+而该章节跨两个 chunk，代码只读了第一个，第二个里的证据从未进入模型，于是答案报"文档中未包含"。
+当时**没有任何指标能发现它**：文档召回是对的（文档确实找到了），答案指标只显示答错了。
+`chunk_recall` 问"含目标文本的 chunk 被读了吗"，`section_coverage_avg` 问"该章节的 chunk 读了几个"，
+后者能把 1/3 的覆盖度暴露出来。已用"故意重新引入该 bug"验证过指标确实会失败。
+
+```bash
+python scripts/run_read_plan_eval.py --dataset data/eval/read_plan.jsonl \
+    --min-chunk-recall 0.9 --min-section-coverage 1.0
+```
+
+**拒答指标不靠关键词**：`answerable` 来自合成模型的**结构化输出**（我们已经在输出契约里要求这个布尔字段），
+不是匹配"未包含""无法回答"这类措辞——那会是用关键词列表替代语义判断。两个方向的错误分开统计：
+`false_refusal_rate`（可回答问题被误拒）和 `unsupported_answer_rate`（不可回答问题被硬答）。
+
+**`citation_precision` 与 `citation_integrity` 的区别**：integrity 只验证"标签能解析 + 数字能在被引上下文里找到"。
+一个**指向无关段落**的引用同样能得 1.0。precision 用词法支持度（与检索索引同一套 CJK 分词）补上这个盲区。
 
 **为什么必须有显著性检验**：两个 200 条查询的样本，任何配置都会差那么零点几。我们曾经差点因此改掉 BM25 默认值：
 

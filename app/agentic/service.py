@@ -308,7 +308,9 @@ class AgenticReasoningService:
                 messages, response_format=ANSWER_SCHEMA
             )
         generation_seconds = round(perf_counter() - generation_started, 4)
-        answer = self._render_structured_answer(str(result.get("content") or ""))
+        answer, answerable = self._render_structured_answer(
+            str(result.get("content") or "")
+        )
 
         response = self.answer_formatter.format(
             answer=answer,
@@ -326,6 +328,7 @@ class AgenticReasoningService:
             agent_state=agent_state,
             generation_seconds=generation_seconds,
             end_to_end_seconds=round(perf_counter() - state["started_at"], 4),
+            answerable=answerable,
         )
         return {
             "messages": messages,
@@ -334,8 +337,13 @@ class AgenticReasoningService:
             "response": response,
         }
 
-    def _render_structured_answer(self, content: str) -> str:
+    def _render_structured_answer(self, content: str) -> tuple[str, bool]:
         """Convert the structured synthesis JSON into the formatter's text plan.
+
+        Returns the text plus the model's own answerability verdict. That verdict
+        is the structured signal the abstention metrics read: deciding "this was a
+        refusal" by matching refusal wording would be a keyword list standing in
+        for a semantic decision.
 
         No fallback: an unparseable or contract-violating payload raises
         ModelOutputError and fails the request visibly.
@@ -359,7 +367,8 @@ class AgenticReasoningService:
                 ans = "文档中未包含相关信息。"
             return (
                 f"Final Answer:\n{ans}\n\n"
-                "Supporting Claims:\n- [insufficiency] 上下文未覆盖问题核心实体。"
+                "Supporting Claims:\n- [insufficiency] 上下文未覆盖问题核心实体。",
+                False,
             )
         extracted = parsed.get("extracted_answer")
         if not isinstance(extracted, str) or not extracted.strip():
@@ -376,7 +385,8 @@ class AgenticReasoningService:
         )
         return (
             f"Final Answer:\n{extracted}\n\n"
-            f"Supporting Claims:\n{claims if claims else '- None'}"
+            f"Supporting Claims:\n{claims if claims else '- None'}",
+            True,
         )
 
     def _route_after_verification(self, state: AgentState) -> str:
@@ -732,6 +742,7 @@ class AgenticReasoningService:
         agent_state: dict[str, object],
         generation_seconds: float,
         end_to_end_seconds: float,
+        answerable: bool | None = None,
     ) -> None:
         record = self.trace_store.get(trace_id)
         if record is None:
@@ -769,6 +780,7 @@ class AgenticReasoningService:
                     "agent_end_to_end_seconds": end_to_end_seconds,
                 },
                 "citation_integrity": citation_integrity,
+                "answerable": answerable,
             }
         )
         self.trace_store.update(updated)

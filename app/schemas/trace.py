@@ -46,6 +46,10 @@ class TraceRecord(BaseModel):
     # cited label exist, and do the numbers a cited sentence states appear in the
     # context it cites. None on traces recorded before this check existed.
     citation_integrity: dict[str, object] | None = None
+    # The synthesis model's own verdict on whether the contexts answer the
+    # question. Structured on purpose: the abstention metrics read this instead of
+    # pattern-matching refusal wording.
+    answerable: bool | None = None
 
 
 class RetrievalDebugResponse(BaseModel):

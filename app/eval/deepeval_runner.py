@@ -140,6 +140,10 @@ def _builtin_metrics(record: dict) -> dict:
         # nothing at all (not evaluable, not perfect) - the coverage gate then
         # reports the rows it could not evaluate.
         "citation_integrity": report.integrity_score,
+        # Does the cited evidence actually relate to the claim? Integrity checks
+        # labels and numbers; a citation pointing at an unrelated passage passes
+        # integrity and fails this.
+        "citation_precision": report.citation_precision,
     }
 
 
@@ -344,6 +348,7 @@ class DeepevalRunner:
             "context_precision",
             "context_recall",
             "citation_integrity",
+            "citation_precision",
         ]:
             scores = [
                 value
@@ -375,6 +380,9 @@ class DeepevalRunner:
         agg["conflicting_hit_rate"] = round(
             sum(1 for value in conflicting_counts if _as_int(value) > 0) / total, 4
         )
+        agg.update(_abstention_metrics(results))
+        agg.update(_latency_metrics(results))
+        agg.update(_cost_metrics(results))
         return agg
 
     def _empty_result(self) -> dict:
@@ -385,3 +393,118 @@ class DeepevalRunner:
             "aggregate": {},
             "results": [],
         }
+
+
+def _abstention_metrics(results: list[dict]) -> dict[str, object]:
+    """How well does the system know when it does not know?
+
+    A RAG system has two symmetric refusal failures and they hurt differently:
+    refusing an answerable question (user gets nothing) and answering an
+    unanswerable one (user gets a fabricated answer). Both are derived from the
+    model's structured ``answerable`` verdict - refusals are not detected by
+    matching refusal wording, which would be a keyword list standing in for a
+    semantic decision.
+
+    Rows without an ``answerable`` verdict are excluded and counted, never
+    treated as correct answers.
+    """
+    answerable_rows = [r for r in results if isinstance(r.get("answerable"), bool)]
+    if not answerable_rows:
+        return {}
+
+    false_refusals = 0
+    false_answers = 0
+    correct_refusals = 0
+    correct_answers = 0
+    expected_answerable = 0
+    expected_unanswerable = 0
+    unlabelled = 0
+    for row in answerable_rows:
+        expected = row.get("expected_answerable")
+        if not isinstance(expected, bool):
+            unlabelled += 1
+            continue
+        model_says_answerable = bool(row["answerable"])
+        if expected:
+            expected_answerable += 1
+            if model_says_answerable:
+                correct_answers += 1
+            else:
+                false_refusals += 1
+        else:
+            expected_unanswerable += 1
+            if model_says_answerable:
+                false_answers += 1
+            else:
+                correct_refusals += 1
+
+    labelled = expected_answerable + expected_unanswerable
+    metrics: dict[str, object] = {
+        "abstention_rows": len(answerable_rows),
+        "abstention_rows_unlabelled": unlabelled,
+    }
+    if expected_answerable:
+        metrics["false_refusal_rate"] = round(false_refusals / expected_answerable, 4)
+    if expected_unanswerable:
+        metrics["correct_abstention_rate"] = round(
+            correct_refusals / expected_unanswerable, 4
+        )
+        # The dangerous direction: an unanswerable question answered anyway.
+        metrics["unsupported_answer_rate"] = round(
+            false_answers / expected_unanswerable, 4
+        )
+    if labelled:
+        metrics["abstention_accuracy"] = round(
+            (correct_answers + correct_refusals) / labelled, 4
+        )
+    return metrics
+
+
+def _latency_metrics(results: list[dict]) -> dict[str, object]:
+    """p50/p95 end-to-end latency.
+
+    A mean alone hides the tail, and the tail is what users complain about. p95 is
+    the number to gate on.
+    """
+    values = [
+        _as_float(r.get("latency_seconds") or r.get("latency"))
+        for r in results
+        if r.get("latency_seconds") is not None or r.get("latency") is not None
+    ]
+    values = [value for value in values if value is not None and value > 0]
+    if not values:
+        return {}
+    values.sort()
+    return {
+        "latency_p50_seconds": round(values[len(values) // 2], 4),
+        "latency_p95_seconds": round(
+            values[min(len(values) - 1, int(round(0.95 * (len(values) - 1))))], 4
+        ),
+        "latency_max_seconds": round(values[-1], 4),
+    }
+
+
+def _cost_metrics(results: list[dict]) -> dict[str, object]:
+    """Token spend per query, from the per-record generation usage.
+
+    Recorded because parse and answer both cost model tokens now; a report that
+    says "quality went up" without the price is half an answer for an operator.
+    """
+    totals: list[int] = []
+    for row in results:
+        usage = row.get("generation_usage")
+        if not isinstance(usage, dict):
+            continue
+        total_tokens = _as_int(usage.get("total_tokens"))
+        if not total_tokens:
+            total_tokens = _as_int(usage.get("prompt_tokens")) + _as_int(
+                usage.get("completion_tokens")
+            )
+        if total_tokens:
+            totals.append(total_tokens)
+    if not totals:
+        return {}
+    return {
+        "tokens_per_query_avg": round(sum(totals) / len(totals), 4),
+        "tokens_per_query_total": sum(totals),
+    }
