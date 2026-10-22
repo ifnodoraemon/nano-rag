@@ -1,0 +1,12 @@
+{"sample_id": "tp-1", "kb_id": "default", "query": "逾期三十日以上提交报销需要谁审批？", "reference_answer": "逾期超过三十日的，需经财务总监审批并说明原因。"}
+{"sample_id": "tp-2", "kb_id": "default", "query": "二线城市住宿费每晚上限是多少？", "reference_answer": "二线城市每晚上限为四百五十元。"}
+{"sample_id": "tp-3", "kb_id": "default", "query": "紧急出差事后补办手续的期限是多久？", "reference_answer": "申请人应当在出差结束后三个工作日内补办书面手续。"}
+{"sample_id": "tp-4", "kb_id": "default", "query": "未经批准乘坐飞机如何报销？", "reference_answer": "未经批准乘坐飞机的按高铁二等座标准报销。"}
+{"sample_id": "tp-5", "kb_id": "default", "query": "伙食补助费每天多少钱？", "reference_answer": "伙食补助费按出差自然日计算，每人每日一百元。"}
+{"sample_id": "tp-6", "kb_id": "default", "query": "报销必须提供哪些凭证？", "reference_answer": "交通票据原件、住宿发票、餐饮票据以及其他与出差事项相关的证明材料。"}
+{"sample_id": "tp-7", "kb_id": "default", "query": "市内交通费每日上限是多少？", "reference_answer": "市内交通费凭据报销，每日上限八十元。"}
+{"sample_id": "tp-8", "kb_id": "default", "query": "出差期间擅自脱岗办理私事会怎么处理？", "reference_answer": "不予报销相关费用并视情节轻重给予通报批评、扣减绩效直至解除劳动合同的处理。"}
+{"sample_id": "tp-9", "kb_id": "default", "query": "未及时补办书面手续会有什么后果？", "reference_answer": "逾期未补办的，视为未经批准出差，相关费用不予报销。"}
+{"sample_id": "tp-10", "kb_id": "default", "query": "联合出差由哪个部门负责申请？", "reference_answer": "跨部门联合出差的，由牵头部门负责统一申请。"}
+{"sample_id": "tp-11", "kb_id": "default", "query": "出差期间延长停留时间该怎么办？", "reference_answer": "应当提前向直属主管报告并取得同意，未经同意的超出部分费用由个人承担。"}
+{"sample_id": "tp-12", "kb_id": "default", "query": "本办法由哪个部门负责解释？", "reference_answer": "本办法由财务部负责解释。"}
