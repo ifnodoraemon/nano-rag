@@ -8,6 +8,7 @@ import logging
 import os
 import re
 import shutil
+import tempfile
 import subprocess
 import zipfile
 from dataclasses import dataclass
@@ -197,6 +198,21 @@ class IngestionPipeline:
             # version while deep-read read the new artifact. Track what this
             # batch committed and undo it on failure so the three stay aligned.
             committed: list[str] = []
+            # Anything this batch overwrites is captured first: a rollback that
+            # simply unlinks the artifact destroys the PREVIOUS good version on a
+            # re-ingest, which is data loss, not a rollback.
+            backup_dir = Path(
+                tempfile.mkdtemp(prefix=".rollback-", dir=str(self.config.parsed_dir))
+            )
+            preexisting: set[str] = set()
+            for prepared in prepared_documents:
+                doc_id = prepared.document.doc_id
+                artifact_path = self.config.parsed_dir / f"{doc_id}.json"
+                if artifact_path.exists():
+                    preexisting.add(doc_id)
+                    await asyncio.to_thread(
+                        shutil.copy2, artifact_path, backup_dir / f"{doc_id}.json"
+                    )
             try:
                 for prepared in prepared_documents:
                     doc_id = prepared.document.doc_id
@@ -234,8 +250,15 @@ class IngestionPipeline:
                     # per-document hot path).
                     await asyncio.to_thread(self.graph_store.collect_orphan_entities)
             except BaseException:
-                await self._rollback_commit(prepared_documents, committed)
+                await self._rollback_commit(
+                    prepared_documents,
+                    committed,
+                    backup_dir=backup_dir,
+                    preexisting=preexisting,
+                )
                 raise
+            finally:
+                await asyncio.to_thread(shutil.rmtree, backup_dir, True)
             # Only once the new copies are durably stored: deleting the old
             # document before that would lose the content entirely if the
             # commit failed. A failure here leaves a visible duplicate instead.
@@ -276,6 +299,52 @@ class IngestionPipeline:
                 unchanged_doc_ids=unchanged_doc_ids,
                 usage=usage.as_dict() if usage.total_tokens else {},
             )
+
+    async def _restore_from_backup(
+        self, doc_id: str, *, kb_id: str, backup_dir: Path
+    ) -> None:
+        """Put a pre-existing document back exactly as the batch found it.
+
+        The artifact bytes are restored first, then the restored payload is
+        re-projected into the graph store and the wiki, so all three stores agree
+        again. A failure here is logged at ERROR: the stores are then divergent and
+        an operator has to know.
+        """
+        backup_path = backup_dir / f"{doc_id}.json"
+        target = self.config.parsed_dir / f"{doc_id}.json"
+        try:
+            payload = json.loads(backup_path.read_text(encoding="utf-8"))
+            await asyncio.to_thread(shutil.copy2, backup_path, target)
+        except (OSError, json.JSONDecodeError):
+            logger.exception(
+                "rollback: could not restore artifact for %s from %s", doc_id, backup_path
+            )
+            return
+        logger.info("rollback: restored previous artifact for %s", doc_id)
+        try:
+            document = Document.model_validate(payload["document"])
+            chunks = [Chunk.model_validate(item) for item in payload.get("chunks") or []]
+            raw_structured = payload.get("structured_document")
+            structured = (
+                StructuredDocument.model_validate(raw_structured)
+                if raw_structured
+                else None
+            )
+        except Exception:  # noqa: BLE001 - reported, never re-raised
+            logger.exception("rollback: restored artifact for %s is unparseable", doc_id)
+            return
+        if self.graph_store and structured is not None:
+            try:
+                await asyncio.to_thread(self.graph_store.upsert_document, structured)
+            except Exception:  # noqa: BLE001
+                logger.exception("rollback: could not restore graph rows for %s", doc_id)
+        if self.wiki_compiler:
+            try:
+                await asyncio.to_thread(
+                    self.wiki_compiler.upsert_documents, [(document, chunks)]
+                )
+            except Exception:  # noqa: BLE001
+                logger.exception("rollback: could not restore wiki page for %s", doc_id)
 
     async def _supersede_same_content(
         self, prepared_documents: list[PreparedDocument]
@@ -325,30 +394,51 @@ class IngestionPipeline:
         return superseded
 
     async def _rollback_commit(
-        self, prepared_documents: list[PreparedDocument], committed: list[str]
+        self,
+        prepared_documents: list[PreparedDocument],
+        committed: list[str],
+        *,
+        backup_dir: Path | None = None,
+        preexisting: set[str] | None = None,
     ) -> None:
-        """Undo this batch's partial writes so the stores stay consistent.
+        """Undo this batch's writes without destroying what was already there.
 
-        Best-effort by design: a rollback failure must not mask the original
-        error, but it is logged loudly because the stores are then divergent.
+        Only documents this batch actually committed are touched: documents that
+        were merely prepared (or that belong to someone else's earlier batch) were
+        never written, and deleting them destroyed live data. A committed document
+        that already existed is RESTORED from the pre-batch backup, together with
+        its graph rows and wiki page, instead of being deleted - on a re-ingest the
+        artifact being overwritten is the good previous version.
+
+        Best-effort by design: a rollback failure must not mask the original error,
+        but it is logged loudly because the stores are then divergent.
         """
         committed_ids = set(committed)
+        known_before = preexisting or set()
         for prepared in prepared_documents:
             doc_id = prepared.document.doc_id
-            if doc_id in committed_ids:
-                try:
-                    await asyncio.to_thread(
-                        (self.config.parsed_dir / f"{doc_id}.json").unlink,
-                        missing_ok=True,
-                    )
-                except OSError:
-                    logger.exception("rollback: could not remove artifact for %s", doc_id)
-            if self.graph_store and prepared.structured_document:
+            if doc_id not in committed_ids:
+                # Never written by this batch; leave it completely alone.
+                continue
+            kb_id = str(prepared.document.metadata.get("kb_id", "default"))
+            if doc_id in known_before and backup_dir is not None:
+                await self._restore_from_backup(
+                    doc_id, kb_id=kb_id, backup_dir=backup_dir
+                )
+                continue
+            try:
+                await asyncio.to_thread(
+                    (self.config.parsed_dir / f"{doc_id}.json").unlink,
+                    missing_ok=True,
+                )
+            except OSError:
+                logger.exception("rollback: could not remove artifact for %s", doc_id)
+            if self.graph_store:
                 try:
                     await asyncio.to_thread(
                         self.graph_store.delete_document,
                         doc_id=doc_id,
-                        kb_id=prepared.document.metadata.get("kb_id", "default"),
+                        kb_id=kb_id,
                     )
                 except Exception:  # noqa: BLE001 - reported, never re-raised
                     logger.exception("rollback: could not delete graph rows for %s", doc_id)

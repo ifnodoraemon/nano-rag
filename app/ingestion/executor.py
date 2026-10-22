@@ -42,7 +42,8 @@ async def run_ingest_paths(
             usage = response.usage or {}
             prompt_tokens += int(usage.get("prompt_tokens") or 0)
             completion_tokens += int(usage.get("completion_tokens") or 0)
-        container.ingest_job_store.mark_completed(
+        _record_completion(
+            container,
             job_id,
             documents=documents,
             chunks=chunks,
@@ -51,21 +52,65 @@ async def run_ingest_paths(
             completion_tokens=completion_tokens,
         )
     except Exception as exc:
-        container.ingest_job_store.mark_failed(
-            job_id,
-            stage="failed",
-            error=str(exc),
-        )
+        _record_failure(container, job_id, stage="failed", error=str(exc))
         raise
     except BaseException as exc:
         # Cancellation (client disconnect, worker abort, asyncio.run teardown)
         # must not leave the record RUNNING with no owner.
-        container.ingest_job_store.mark_failed(
+        _record_failure(
+            container,
             job_id,
             stage="failed",
             error=f"ingest job was cancelled or aborted: {type(exc).__name__}",
         )
         raise
+
+
+def _record_completion(
+    container,
+    job_id: str,
+    *,
+    documents: int,
+    chunks: int,
+    unchanged_documents: int,
+    prompt_tokens: int,
+    completion_tokens: int,
+) -> None:
+    """Write the terminal record, without ever masking the caller's outcome."""
+    try:
+        container.ingest_job_store.mark_completed(
+            job_id,
+            documents=documents,
+            chunks=chunks,
+            unchanged_documents=unchanged_documents,
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+        )
+    except Exception:  # noqa: BLE001 - the work is already done and durably stored
+        logger.exception(
+            "ingest job %s finished but its completion record could not be written",
+            job_id,
+        )
+
+
+def _record_failure(container, job_id: str, *, stage: str, error: str) -> None:
+    """Record a failed job without replacing the exception being propagated.
+
+    ``mark_failed`` used to be called inline inside the ``except`` block. When the
+    store itself was unwritable - or the record had been purged, so ``_require``
+    raised ``KeyError`` - that new exception REPLACED the real cause, and the
+    operator saw "ingest job not found" instead of the provider failure. The
+    original error must always win; the store problem is logged instead.
+    """
+    try:
+        container.ingest_job_store.mark_failed(job_id, stage=stage, error=error)
+    except Exception:  # noqa: BLE001 - deliberately never re-raised
+        logger.exception(
+            "ingest job %s failed (%s) and its failure record could not be "
+            "written; the record may still show RUNNING",
+            job_id,
+            error,
+        )
 
 
 def submit_ingest_paths(

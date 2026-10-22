@@ -118,13 +118,19 @@ def build_source_key(source_path: str, title: str) -> str:
     superseded version of the other, and the version filter silently dropped
     it from retrieval — a document that was ingested and indexed but could
     never be found.
+
+    The WHOLE parent path is used, not just its last segment: with only the leaf
+    directory, ``teamA/reports/spec.pdf`` and ``teamB/reports/spec.pdf`` both
+    became ``reports spec`` and collided exactly as above. ``source_path`` is
+    already relative to the project root, so the full path is stable against the
+    file system layout rather than brittle against it.
     """
     title_part = _strip_version_tokens(title.strip() or source_path.rsplit("/", 1)[-1])
     parent = source_path.replace("\\", "/").rsplit("/", 1)[0] if "/" in source_path else ""
     if parent:
-        # The leaf directory is enough to disambiguate; the full path would be
-        # brittle against re-rooted ingest roots.
-        parent_part = parent.rstrip("/").rsplit("/", 1)[-1]
+        # Every segment, not just the leaf: two different subtrees can share a
+        # leaf directory name, and collapsing them silently drops a document.
+        parent_part = re.sub(r"^(?:\./)+", "", parent.rstrip("/"))
         candidate = f"{parent_part} {title_part}"
     else:
         candidate = title_part
