@@ -68,9 +68,20 @@ def _provider_env(benchmark: Path, report_dir: Path) -> dict[str, str]:
 
 
 def _run_point(
-    benchmark: Path, dataset: Path, k1: float, b: float, env: dict[str, str], report_dir: Path
+    benchmark: Path,
+    dataset: Path,
+    k1: float,
+    b: float,
+    env: dict[str, str],
+    report_dir: Path,
+    title_weight: float = 0.0,
 ) -> dict[str, float] | None:
-    point_env = {**env, "RAG_BM25_K1": str(k1), "RAG_BM25_B": str(b)}
+    point_env = {
+        **env,
+        "RAG_BM25_K1": str(k1),
+        "RAG_BM25_B": str(b),
+        "RAG_BM25_TITLE_WEIGHT": str(title_weight),
+    }
     result = subprocess.run(
         [
             sys.executable,
@@ -101,6 +112,11 @@ def main() -> int:
     parser.add_argument("--k1", default="0.9,1.2,1.5,1.8,2.2")
     parser.add_argument("--b", default="0.4,0.6,0.75,0.9")
     parser.add_argument(
+        "--title-weight",
+        default="0",
+        help="title field weight: 0 disables it (the historical behaviour)",
+    )
+    parser.add_argument(
         "--baseline",
         default="1.5,0.75",
         help="k1,b of the shipped default, reported for comparison",
@@ -120,17 +136,26 @@ def main() -> int:
     k1_values = [float(value) for value in args.k1.split(",") if value]
     b_values = [float(value) for value in args.b.split(",") if value]
 
-    results: dict[tuple[float, float], dict[str, float]] = {}
-    print(f"sweeping {len(k1_values) * len(b_values)} points on {dataset.name}", flush=True)
-    for k1, b in itertools.product(k1_values, b_values):
-        metrics = _run_point(benchmark, dataset, k1, b, env, report_dir)
+    title_weights = [float(value) for value in args.title_weight.split(",") if value]
+    results: dict[tuple[float, float, float], dict[str, float]] = {}
+    print(
+        f"sweeping {len(k1_values) * len(b_values) * len(title_weights)} points "
+        f"on {dataset.name}",
+        flush=True,
+    )
+    for k1, b, title_weight in itertools.product(k1_values, b_values, title_weights):
+        metrics = _run_point(benchmark, dataset, k1, b, env, report_dir, title_weight)
         if metrics is None:
-            print(f"  k1={k1} b={b}: FAILED", flush=True)
+            print(f"  k1={k1} b={b} tw={title_weight}: FAILED", flush=True)
             continue
-        results[(k1, b)] = metrics
-        marker = " (shipped)" if (k1, b) == (baseline_k1, baseline_b) else ""
+        results[(k1, b, title_weight)] = metrics
+        marker = (
+            " (shipped)"
+            if (k1, b) == (baseline_k1, baseline_b) and title_weight == 0.0
+            else ""
+        )
         print(
-            f"  k1={k1:<4} b={b:<5} "
+            f"  k1={k1:<4} b={b:<5} tw={title_weight:<4} "
             + " ".join(f"{metric}={metrics[metric]:.4f}" for metric in METRICS if metrics[metric] is not None)
             + marker,
             flush=True,
@@ -140,7 +165,7 @@ def main() -> int:
         print("no successful points", file=sys.stderr)
         return 1
 
-    baseline = results.get((baseline_k1, baseline_b))
+    baseline = results.get((baseline_k1, baseline_b, 0.0))
     print("\n" + "=" * 90)
     print("ranked by MRR (then recall@4)")
     print("=" * 90)
@@ -152,20 +177,20 @@ def main() -> int:
         ),
         reverse=True,
     )
-    for (k1, b), metrics in ranked[:8]:
+    for (k1, b, title_weight), metrics in ranked[:8]:
         delta = ""
         if baseline and baseline.get("mrr") is not None and metrics.get("mrr") is not None:
             delta = f"  mrr_delta={metrics['mrr'] - baseline['mrr']:+.4f}"
         print(
-            f"  k1={k1:<4} b={b:<5} "
+            f"  k1={k1:<4} b={b:<5} tw={title_weight:<4} "
             + " ".join(f"{metric}={metrics[metric]:.4f}" for metric in METRICS if metrics[metric] is not None)
             + delta
         )
 
     best_key = ranked[0][0]
     print(
-        f"\nbest on this sample: k1={best_key[0]} b={best_key[1]}"
-        f"{' (already the shipped default)' if best_key == (baseline_k1, baseline_b) else ''}"
+        f"\nbest on this sample: k1={best_key[0]} b={best_key[1]} tw={best_key[2]}"
+        f"{' (already the shipped default)' if best_key == (baseline_k1, baseline_b, 0.0) else ''}"
     )
     print("Adopt only if it also wins on a second, independently sampled benchmark.")
     return 0

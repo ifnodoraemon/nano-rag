@@ -129,14 +129,23 @@ class IngestionPipeline:
         self.wiki_searcher = wiki_searcher
         self.structured_parser = StructuredDocumentParser(document_parser)
         self.graph_extractor = GraphExtractor(generation_client)
-        chunk_settings = config.settings.get("chunk", {}) or {}
         self.parse_cache = ParseCache(
             config.parsed_dir,
             build_fingerprint(
                 parser_provider=getattr(document_parser, "provider", None),
                 parser_model=getattr(document_parser, "alias", None),
-                chunk_size=chunk_settings.get("size"),
-                chunk_overlap=chunk_settings.get("overlap"),
+                # The chunk knobs live in environment variables, not in
+                # settings.yaml; reading a non-existent settings key made the
+                # fingerprint constant, so changing chunking silently reused both
+                # the cached parse and the "unchanged document" skip.
+                chunk_size="|".join(
+                    str(_chunk_config_value(strategy, "max"))
+                    for strategy in ("text_window", "code_window", "log_window")
+                ),
+                chunk_overlap="|".join(
+                    str(_chunk_config_value(strategy, "overlap"))
+                    for strategy in ("text_window", "code_window", "log_window")
+                ),
             ),
             enabled=_parse_cache_enabled(),
         )
@@ -271,12 +280,19 @@ class IngestionPipeline:
     async def _supersede_same_content(
         self, prepared_documents: list[PreparedDocument]
     ) -> list[str]:
-        """Remove existing documents whose content equals an incoming one.
+        """Remove *pre-existing* documents whose content equals an incoming one.
 
         Runs after the batch is committed and the wiki written, so a failure
         here leaves a duplicate (visible, harmless) rather than deleting the
         old copy while the new one is not yet stored.
+
+        Every document in this batch is excluded, not just the one being
+        processed. Excluding only the current document let two same-content files
+        in one batch see each other's freshly committed artifact as a duplicate
+        and delete it - both files lost their artifact, wiki page and graph rows,
+        while the job reported success.
         """
+        batch_doc_ids = {prepared.document.doc_id for prepared in prepared_documents}
         superseded: list[str] = []
         for prepared in prepared_documents:
             kb_id = str(prepared.document.metadata.get("kb_id") or "default")
@@ -286,6 +302,9 @@ class IngestionPipeline:
                 kb_id=kb_id,
                 content=prepared.document.content,
                 exclude_doc_id=prepared.document.doc_id,
+                # A document committed moments ago by this same batch is not a
+                # pre-existing duplicate; superseding it would delete live data.
+                exclude_doc_ids=batch_doc_ids,
             )
             for duplicate in duplicates:
                 touched = await asyncio.to_thread(
@@ -1278,6 +1297,18 @@ def _chunk_size_setting(strategy: str, kind: str) -> tuple[str, int]:
         "RAG_TEXT_CHUNK_MAX_CHARS" if kind == "max" else "RAG_TEXT_CHUNK_OVERLAP_CHARS",
         DEFAULT_TEXT_CHUNK_MAX_CHARS if kind == "max" else DEFAULT_TEXT_CHUNK_OVERLAP_CHARS,
     )
+
+
+def _chunk_config_value(strategy: str, kind: str) -> int:
+    """Effective chunk setting for a strategy: environment first, then default."""
+    env_name, default = _chunk_size_setting(strategy, kind)
+    raw = os.getenv(env_name)
+    if raw is None or not raw.strip():
+        return default
+    try:
+        return int(raw)
+    except ValueError as exc:
+        raise ConfigurationError(f"{env_name} must be an integer, got {raw!r}") from exc
 
 
 def _chunk_strategy_for_node(node_type: str, metadata: dict[str, object]) -> str:

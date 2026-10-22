@@ -275,12 +275,16 @@ def find_duplicates_for_content(
     kb_id: str,
     content: str,
     exclude_doc_id: str | None = None,
+    exclude_doc_ids: set[str] | frozenset[str] | None = None,
 ) -> list[DocumentFingerprint]:
     """Existing documents in ``kb_id`` with the same content as ``content``.
 
     Used by the ingest path so a file that arrives under a new path supersedes
     the old copy instead of adding a second one.
     """
+    excluded = set(exclude_doc_ids or ())
+    if exclude_doc_id:
+        excluded.add(exclude_doc_id)
     if not content:
         return []
     wanted = content_fingerprint(content)
@@ -289,7 +293,7 @@ def find_duplicates_for_content(
         for fingerprint in iter_fingerprints(parsed_dir)
         if fingerprint.kb_id == kb_id
         and fingerprint.content_fingerprint == wanted
-        and fingerprint.doc_id != exclude_doc_id
+        and fingerprint.doc_id not in excluded
     ]
     return sorted(matches, key=_keep_priority, reverse=True)
 

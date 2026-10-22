@@ -63,6 +63,8 @@ class WikiSearcher:
                 tokenizer=self._tokenizer_mode(),
                 k1=self._k1_config(),
                 b=self._b_config(),
+                title_weight=self._title_weight_config(),
+                variant=self._scoring_variant_config(),
             )
         )
         self.documents: dict[str, WikiDocument] = {}
@@ -110,6 +112,30 @@ class WikiSearcher:
     @staticmethod
     def _tokenizer_mode() -> str:
         return resolve_tokenizer_mode(os.getenv("RAG_BM25_TOKENIZER"))
+
+    @staticmethod
+    def _scoring_variant_config() -> str:
+        """Scoring formula: ``bm25`` (default) or ``bm25x``.
+
+        ``bm25x`` adds the entropy weight and query/document overlap terms from
+        arXiv:2408.06643; both are lexical, so this stays embedding-free. Unknown
+        values fail loudly rather than silently falling back to BM25.
+        """
+        raw = (os.getenv("RAG_BM25_VARIANT") or "bm25").strip().lower()
+        if raw not in {"bm25", "bm25x"}:
+            raise ConfigurationError(
+                f"RAG_BM25_VARIANT must be 'bm25' or 'bm25x', got {raw!r}"
+            )
+        return raw
+
+    @staticmethod
+    def _title_weight_config() -> float:
+        """Weight of the title field relative to the body (0 disables it).
+
+        Measured with scripts/sweep_bm25_params.py; a title-only match used to be
+        invisible because the index only ever saw the page body.
+        """
+        return _float_env("RAG_BM25_TITLE_WEIGHT", 0.0, minimum=0.0)
 
     @staticmethod
     def _k1_config() -> float:
@@ -392,7 +418,10 @@ class WikiSearcher:
         self._path_doc_ids[str(path)] = doc_id
         self.documents[doc_id] = document
         self._kb_doc_ids.setdefault(document.kb_id, set()).add(doc_id)
-        self.index.add_document(doc_id, document.body)
+        # The page title carries the document's own summary, which is a much
+        # denser signal per token than body text; it is indexed as a separate
+        # field so it can be weighted without duplicating it into the body.
+        self.index.add_document(doc_id, document.body, document.title)
 
     def _index_source_page(self, page_path: Path) -> None:
         metadata, body = WikiCompiler.read_frontmatter(page_path)

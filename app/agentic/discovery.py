@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+
 import asyncio
 import json
 import logging
@@ -9,7 +11,7 @@ from dataclasses import dataclass
 from time import perf_counter
 from typing import TYPE_CHECKING
 
-from app.core.exceptions import ModelOutputError, RetrievalError
+from app.core.exceptions import ConfigurationError, ModelOutputError, RetrievalError
 from app.core.tracing import TraceSession
 from app.retrieval.context_builder import build_contexts
 from app.retrieval.filters import (
@@ -21,6 +23,7 @@ from app.retrieval.versioning import version_sort_key
 from app.schemas.chat import ChatRequest
 from app.schemas.chunk import Chunk
 from app.retrieval.hits import SearchHit
+from app.agentic.query_expansion import expand_query, fuse_rankings
 from app.utils.coerce import as_dict, as_list, as_str, as_str_list
 from app.utils.json_utils import parse_json_object
 from pydantic import ValidationError
@@ -106,6 +109,12 @@ class AgenticDiscovery:
         self.include_stale_default = bool(
             agent_settings.get("freshness_policy", {}).get("include_stale", False)
         )
+        # Let the model take part in the FIRST hop. Off by default so the lexical
+        # baseline stays reproducible; enabled per-deployment (and per-experiment).
+        self.query_expansion_enabled = _flag("RAG_QUERY_EXPANSION_ENABLED", False)
+        self.query_expansion_variants = _positive_int(
+            "RAG_QUERY_EXPANSION_VARIANTS", 3
+        )
 
     async def discovery_candidates(
         self,
@@ -113,7 +122,7 @@ class AgenticDiscovery:
         kb_id: str = "default",
         filters: dict[str, object] | None = None,
     ) -> "DiscoveryCandidates":
-        """Run the deterministic discovery stages (no LLM).
+        """Run the discovery stages (LLM-free unless query expansion is enabled).
 
         Exposed so retrieval quality can be measured on its own: "did the wiki
         BM25 index surface the right document?" is a different question from
@@ -201,15 +210,20 @@ class AgenticDiscovery:
         self, query: str, kb_id: str, filters: dict[str, object] | None
     ) -> list[SearchHit]:
         fetch_k = self.discovery_top_k * DISCOVERY_OVERFETCH_MULTIPLIER
-        # BM25 scoring (and a possible incremental sync) is CPU-bound; keep it
-        # off the event loop so concurrent requests stay responsive.
-        hits = await asyncio.to_thread(
-            self.wiki_searcher.search,
-            query,
-            top_k=fetch_k,
-            kb_id=kb_id,
-            metadata_filters=filters,
-        )
+        if not self.query_expansion_enabled:
+            # BM25 scoring (and a possible incremental sync) is CPU-bound; keep it
+            # off the event loop so concurrent requests stay responsive.
+            hits = await asyncio.to_thread(
+                self.wiki_searcher.search,
+                query,
+                top_k=fetch_k,
+                kb_id=kb_id,
+                metadata_filters=filters,
+            )
+        else:
+            hits = await self._discover_with_expansion(
+                query, kb_id=kb_id, filters=filters, fetch_k=fetch_k
+            )
         # Only source pages map to a deep-readable parsed artifact; topic/index
         # pages are aggregates with no artifact of their own.
         return [
@@ -217,6 +231,66 @@ class AgenticDiscovery:
             for hit in hits
             if (hit.chunk.metadata or {}).get("wiki_kind") == "source"
         ]
+
+    async def _discover_with_expansion(
+        self,
+        query: str,
+        *,
+        kb_id: str,
+        filters: dict[str, object] | None,
+        fetch_k: int,
+    ) -> list[SearchHit]:
+        """Search the original query plus model-generated keyword variants, fused.
+
+        The original query always participates: expansion can only add candidates,
+        never remove the documents BM25 already found for what the user typed.
+        A gateway or contract failure propagates - a request that silently lost its
+        expansion would be a different request than the one that was configured.
+        """
+        with self.tracing_manager.span(
+            "agent.query_expansion", {"agent.query": query}
+        ):
+            variants = await expand_query(
+                query,
+                self.generation_client,
+                max_variants=self.query_expansion_variants,
+            )
+        queries = [query, *variants]
+        rankings: list[list[str]] = []
+        hits_by_id: dict[str, SearchHit] = {}
+        for candidate_query in queries:
+            # BM25 scoring (and a possible incremental sync) is CPU-bound; keep it
+            # off the event loop so concurrent requests stay responsive.
+            hits = await asyncio.to_thread(
+                self.wiki_searcher.search,
+                candidate_query,
+                top_k=fetch_k,
+                kb_id=kb_id,
+                metadata_filters=filters,
+            )
+            # Only source pages map to a deep-readable parsed artifact; topic and
+            # index pages are aggregates with no artifact of their own.
+            source_hits = [
+                hit
+                for hit in hits
+                if (hit.chunk.metadata or {}).get("wiki_kind") == "source"
+            ]
+            for hit in source_hits:
+                hits_by_id.setdefault(hit.chunk.doc_id, hit)
+            rankings.append([hit.chunk.doc_id for hit in source_hits])
+        fused = fuse_rankings(rankings)
+        logger.info(
+            "query expansion: %d variants, fused %d documents",
+            len(variants),
+            len(fused),
+        )
+        merged: list[SearchHit] = []
+        for doc_id, score in fused:
+            hit = hits_by_id[doc_id]
+            merged.append(
+                SearchHit(chunk=hit.chunk, score=score)
+            )
+        return merged[:fetch_k]
 
     def _select_versions(
         self, discovered: list[SearchHit]
@@ -597,3 +671,35 @@ def _section_matches(focus_term: str, haystack: list[str]) -> bool:
         if term == lowered or term in lowered or lowered in term:
             return True
     return False
+
+
+_TRUE_TOKENS = frozenset({"1", "true", "yes", "on"})
+_FALSE_TOKENS = frozenset({"0", "false", "no", "off"})
+
+
+def _flag(name: str, default: bool) -> bool:
+    """Boolean env parsing that refuses to guess (a typo must not disable a stage)."""
+    raw = os.getenv(name)
+    if raw is None or not raw.strip():
+        return default
+    token = raw.strip().lower()
+    if token in _TRUE_TOKENS:
+        return True
+    if token in _FALSE_TOKENS:
+        return False
+    raise ConfigurationError(
+        f"{name} must be a boolean, got {raw!r}"
+    )
+
+
+def _positive_int(name: str, default: int) -> int:
+    raw = os.getenv(name)
+    if raw is None or not raw.strip():
+        return default
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise ConfigurationError(f"{name} must be an integer, got {raw!r}") from exc
+    if value < 1:
+        raise ConfigurationError(f"{name} must be >= 1, got {value}")
+    return value
