@@ -142,7 +142,10 @@ class IngestJobStore:
                 record = self.get(path.stem)
             except StoreError:
                 continue
-            if record is None or record.status != IngestJobStatus.RUNNING:
+            if record is None or record.status not in {
+                IngestJobStatus.RUNNING,
+                IngestJobStatus.QUEUED,
+            }:
                 continue
             # Explicit None checks: 0.0 is a valid (very old) timestamp, and
             # treating it as falsy made a stale record look fresh.
@@ -160,7 +163,13 @@ class IngestJobStore:
                 f"{int(time() - last_seen)}s (worker was killed or restarted)"
             )
             record.completed_at = time()
-            self.save(record)
+            try:
+                self.save(record)
+            except StoreError:
+                # Someone else transitioned the record while we were deciding;
+                # their terminal state stands.
+                logger.warning("reap: %s changed concurrently; leaving it", record.job_id)
+                continue
             reaped.append(record.job_id)
         return reaped
 
@@ -175,6 +184,7 @@ class IngestJobStore:
         completion_tokens: int = 0,
     ) -> IngestJobRecord:
         record = self._require(job_id)
+        self._refuse_terminal_overwrite(record, "completed")
         record.status = IngestJobStatus.COMPLETED
         record.stage = "completed"
         record.documents = documents
@@ -189,6 +199,7 @@ class IngestJobStore:
 
     def mark_failed(self, job_id: str, *, stage: str, error: str) -> IngestJobRecord:
         record = self._require(job_id)
+        self._refuse_terminal_overwrite(record, "failed")
         record.status = IngestJobStatus.FAILED
         record.stage = stage
         record.error = error
@@ -206,6 +217,20 @@ class IngestJobStore:
                     encoding="utf-8",
                 )
                 os.replace(str(tmp_path), str(path))
+
+    def _refuse_terminal_overwrite(self, record: IngestJobRecord, wanted: str) -> None:
+        """Keep the first terminal state: a completed job must not later read FAILED.
+
+        A record reaped as FAILED while its worker was merely slow used to be
+        flipped to COMPLETED when the worker finally finished (and the reverse),
+        so the terminal state depended on who wrote last rather than on what
+        happened.
+        """
+        if record.status in {IngestJobStatus.COMPLETED, IngestJobStatus.FAILED}:
+            raise StoreError(
+                f"ingest job {record.job_id} is already {record.status.value}; "
+                f"refusing to overwrite it with {wanted}"
+            )
 
     def _require(self, job_id: str) -> IngestJobRecord:
         record = self.get(job_id)
@@ -229,8 +254,21 @@ class IngestJobStore:
             return
         for record_path in entries:
             try:
-                if record_path.stat().st_mtime < cutoff:
-                    record_path.unlink(missing_ok=True)
+                if record_path.stat().st_mtime >= cutoff:
+                    continue
+                # Never delete a QUEUED or RUNNING record: its worker is still
+                # going to write to it, and removing it turns a live job into a
+                # 404 and makes the worker's terminal write fail.
+                record = self.get(record_path.stem)
+            except (OSError, StoreError):
+                continue
+            if record is None or record.status not in {
+                IngestJobStatus.COMPLETED,
+                IngestJobStatus.FAILED,
+            }:
+                continue
+            try:
+                record_path.unlink(missing_ok=True)
             except OSError:
                 continue
 

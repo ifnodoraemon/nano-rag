@@ -393,7 +393,11 @@ class AgenticReasoningService:
         check = state["check"]
         if check.sufficient:
             return "answer_synthesis"
-        if len(state.get("retrieval_queries", [])) > self.max_retrieval_loops:
+        # `retrieval_queries` already contains the initial retrieval, so it must
+        # be compared with >= : with ">" a configured budget of 2 performed 3
+        # retrievals. The setting means "how many retrievals may run", not "how
+        # many corrections after the first".
+        if len(state.get("retrieval_queries", [])) >= self.max_retrieval_loops:
             return "answer_synthesis"
         if self._next_query(state) is None:
             return "answer_synthesis"

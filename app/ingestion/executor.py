@@ -25,11 +25,13 @@ async def run_ingest_paths(
     try:
         container.ingest_job_store.mark_running(job_id, stage="ingesting")
         for index, path in enumerate(paths):
-            if index:
-                # Per-path liveness marker: a long batch is not "stale".
-                container.ingest_job_store.heartbeat(
-                    job_id, stage=f"ingesting {index + 1}/{len(paths)}"
-                )
+            # Heartbeat on EVERY path, including the first: a single large
+            # document used to run for its whole duration without ever refreshing
+            # the marker, so a slow but healthy ingest was reaped as abandoned
+            # once it exceeded the stale threshold.
+            container.ingest_job_store.heartbeat(
+                job_id, stage=f"ingesting {index + 1}/{len(paths)}"
+            )
             response = await container.ingestion_pipeline.run(
                 path,
                 kb_id=kb_id,
@@ -126,9 +128,21 @@ def submit_ingest_paths(
     if os.getenv("RAG_INGEST_EXECUTOR", "background").lower() == "celery":
         from app.ingestion.tasks import ingest_paths_task
 
-        ingest_paths_task.delay(
-            job_id, list(paths), kb_id, source_path_overrides or {}, force
-        )
+        try:
+            ingest_paths_task.delay(
+                job_id, list(paths), kb_id, source_path_overrides or {}, force
+            )
+        except Exception as exc:
+            # The record was created before submitting. If the broker is down the
+            # job would sit QUEUED forever: nothing reaps QUEUED work and no client
+            # can distinguish "waiting" from "never scheduled".
+            _record_failure(
+                container,
+                job_id,
+                stage="submit-failed",
+                error=f"could not enqueue the ingest job: {exc}",
+            )
+            raise
         return
 
     background_tasks.add_task(
