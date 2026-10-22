@@ -58,6 +58,40 @@ def main() -> int:
         default=None,
         help="Fail with exit code 2 if aggregate conflicting_hit_rate is above this value.",
     )
+    parser.add_argument(
+        "--min-exact-match",
+        type=float,
+        default=None,
+        help="Fail when aggregate answer_exact_match is below this value.",
+    )
+    parser.add_argument(
+        "--min-citation-integrity",
+        type=float,
+        default=None,
+        help=(
+            "Fail when aggregate citation_integrity is below this value. Rows that "
+            "cite nothing are not evaluable and are excluded from the mean, which "
+            "is why citation coverage is reported alongside it."
+        ),
+    )
+    parser.add_argument(
+        "--min-citation-precision",
+        type=float,
+        default=None,
+        help=(
+            "Fail when aggregate citation_precision is below this value: the cited "
+            "evidence must be topically related to the claim it supports."
+        ),
+    )
+    parser.add_argument(
+        "--mode",
+        choices=("deterministic", "deepeval"),
+        default=None,
+        help=(
+            "deterministic = builtin LLM-free metrics only (safe for every commit); "
+            "deepeval = builtin plus LLM-assisted metrics."
+        ),
+    )
     args = parser.parse_args()
     if args.no_ragas_lib and args.min_answer_relevancy is not None:
         parser.error(
@@ -86,9 +120,10 @@ def main() -> int:
         runner = DeepevalRunner(generation_client=container.generation_client)
         
     evaluated_records = asyncio.run(materialize_eval_records(container, dataset))
+    deterministic_only = args.no_ragas_lib or args.mode == "deterministic"
     report = (
         runner.run(evaluated_records)
-        if args.no_ragas_lib
+        if deterministic_only
         else asyncio.run(runner.run_async(evaluated_records))
     )
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -108,9 +143,12 @@ def main() -> int:
 
 def _failed_thresholds(aggregate: dict, args: argparse.Namespace) -> list[str]:
     checks = [
-        ("reference_context_recall", args.min_context_recall, "min"),
-        ("answer_relevancy", args.min_answer_relevancy, "min"),
-        ("conflicting_hit_rate", args.max_conflicting_hit_rate, "max"),
+        ("reference_context_recall", getattr(args, "min_context_recall", None), "min"),
+        ("answer_relevancy", getattr(args, "min_answer_relevancy", None), "min"),
+        ("conflicting_hit_rate", getattr(args, "max_conflicting_hit_rate", None), "max"),
+        ("answer_exact_match", getattr(args, "min_exact_match", None), "min"),
+        ("citation_integrity", getattr(args, "min_citation_integrity", None), "min"),
+        ("citation_precision", getattr(args, "min_citation_precision", None), "min"),
     ]
     failures: list[str] = []
     for metric, threshold, mode in checks:

@@ -85,6 +85,14 @@ def _build_parser() -> argparse.ArgumentParser:
         metavar="CUTOFF=THRESHOLD",
         help="gate on recall@k (repeatable), e.g. --min-recall-at 12=0.9",
     )
+    parser.add_argument(
+        "--min-ndcg-at",
+        action="append",
+        type=_parse_cutoff_gate,
+        default=None,
+        metavar="CUTOFF=THRESHOLD",
+        help="fail when nDCG@cutoff is below threshold (repeatable)",
+    )
     parser.add_argument("--min-mrr", type=float, default=None, help="gate on MRR")
     return parser
 
@@ -145,6 +153,7 @@ async def _run(args: argparse.Namespace) -> int:
         aggregate,  # type: ignore[arg-type]
         min_recall_at=dict(args.min_recall_at or []),
         min_mrr=args.min_mrr,
+        min_ndcg_at=dict(args.min_ndcg_at or []),
     )
     for failure in gates:
         logger.error("%s", failure)

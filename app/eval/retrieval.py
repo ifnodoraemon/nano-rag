@@ -413,6 +413,7 @@ def failed_retrieval_gates(
     *,
     min_recall_at: dict[int, float] | None = None,
     min_mrr: float | None = None,
+    min_ndcg_at: dict[int, float] | None = None,
 ) -> list[str]:
     """Gate a retrieval report; a missing metric fails instead of passing.
 
@@ -421,6 +422,14 @@ def failed_retrieval_gates(
     slips through.
     """
     failures: list[str] = []
+    for cutoff, threshold in (min_ndcg_at or {}).items():
+        key = f"ndcg@{cutoff}"
+        value = aggregate.get(key)
+        if value is None:
+            failures.append(f"{key} is missing from the report; gate cannot be evaluated")
+            continue
+        if float(value) < threshold:  # type: ignore[arg-type]
+            failures.append(f"{key}={float(value):.4f} is below threshold {threshold:.4f}")  # type: ignore[arg-type]
     for cutoff, threshold in (min_recall_at or {}).items():
         key = f"recall@{cutoff}"
         value = aggregate.get(key)

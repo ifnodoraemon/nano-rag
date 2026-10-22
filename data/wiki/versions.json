@@ -1,0 +1,20 @@
+{
+  "docs": {
+    "doc-7c690a577ed8917522513581": "default\temployee handbook"
+  },
+  "format": 1,
+  "groups": {
+    "default\temployee handbook": {
+      "members": {
+        "doc-7c690a577ed8917522513581": {
+          "effective_date": null,
+          "is_latest_version": true,
+          "source_modified_at": null,
+          "superseded_by": null,
+          "updated_at": "2026-10-22T02:44:32.027976+00:00",
+          "version": null
+        }
+      }
+    }
+  }
+}
