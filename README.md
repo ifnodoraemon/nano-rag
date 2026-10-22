@@ -395,6 +395,41 @@ python scripts/ab_retrieval.py tokenizer --benchmark /tmp/t2r-bench
 但 recall@4/@12 更低、未召回更多。发现层是喂给 LLM 阅读计划的第一跳——阅读计划能丢弃噪声，
 但无法找回从未发现的文档，所以这里召回优先。
 
+### 评测指标一览与显著性
+
+我们区分两种指标，"有没有找到"和"排得好不好"是不同的问题：
+
+| 指标 | 回答的问题 | 类型 |
+| --- | --- | --- |
+| `recall@k` / `hit@k` | 找到了没有？ | 确定性 |
+| `MRR` | 第一个正确答案来得早不早？ | 确定性 |
+| `nDCG@k` | 整体排序好不好、高价值结果是否靠前？ | 确定性（支持分级相关度） |
+| `ndcg@k` vs `mrr` | MRR 只看第一个命中；nDCG 按位置折损整个排序 | — |
+| `answer_exact_match` | 答案与参考答案是否严格一致 | 确定性 |
+| `reference_context_recall` | 参考答案所需上下文是否检索到 | 确定性 |
+| `citation_integrity` | 引用标签能否解析、引用句数字是否有依据 | 确定性 |
+| `faithfulness` / `answer_relevancy` / `context_precision` / `context_recall` | 语义质量 | LLM（deepeval） |
+
+**为什么必须有显著性检验**：两个 200 条查询的样本，任何配置都会差那么零点几。我们曾经差点因此改掉 BM25 默认值：
+
+| 指标 | 样本 A | 样本 B |
+| --- | --- | --- |
+| recall@4 | +0.0150（显著，p=0.017） | +0.0075（不显著，p=0.40） |
+| ndcg@4 | +0.0110（显著，p=0.030） | +0.0082（不显著，p=0.17） |
+| ndcg@12 | +0.0067（不显著） | +0.0083（显著，p=0.028） |
+
+方向在两个样本上都是正的，但**显著性在样本间翻转**——这说明差异没有稳健到可以据此改默认值。
+所以 `k1=1.5 / b=0.75` 保持不动，等有足够样本量时再定。
+
+```bash
+# 比较两份报告：配对 bootstrap + 逐查询胜负
+python scripts/compare_eval_reports.py --baseline a.json --candidate b.json \
+    --metrics recall@4,ndcg@4,ndcg@12,mrr
+```
+
+输出包含均值、95% 置信区间、p 值、逐查询 win/loss/tie，并明确指出差异是否超出噪声。
+`--require-significant` 可以当 CI 门槛用。
+
 ### 为什么没有 rerank（以及这个选择的代价）
 
 本项目的目标是**一个模型走天下**：不引入 embedding 模型，也不引入 rerank 模型。因此重排阶段已从

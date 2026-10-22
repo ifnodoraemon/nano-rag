@@ -7,7 +7,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
-from app.core.exceptions import RetrievalError
+from app.core.exceptions import ConfigurationError, RetrievalError
 from app.retrieval.bm25 import BM25Config, BM25Index
 from app.retrieval.filters import match_metadata_filters
 from app.schemas.chunk import Chunk
@@ -61,6 +61,8 @@ class WikiSearcher:
             BM25Config(
                 max_documents=self._max_documents(),
                 tokenizer=self._tokenizer_mode(),
+                k1=self._k1_config(),
+                b=self._b_config(),
             )
         )
         self.documents: dict[str, WikiDocument] = {}
@@ -108,6 +110,24 @@ class WikiSearcher:
     @staticmethod
     def _tokenizer_mode() -> str:
         return resolve_tokenizer_mode(os.getenv("RAG_BM25_TOKENIZER"))
+
+    @staticmethod
+    def _k1_config() -> float:
+        """BM25 term-frequency saturation.
+
+        Exposed because it is a relevance lever that had never been measured;
+        see scripts/sweep_bm25_params.py for the sweep that picks the default.
+        """
+        return _float_env("RAG_BM25_K1", 1.5, minimum=0.0)
+
+    @staticmethod
+    def _b_config() -> float:
+        """BM25 length normalisation in [0, 1].
+
+        0 ignores document length, 1 normalises fully. Documents of uneven
+        length otherwise lose to short ones purely through score dilution.
+        """
+        return _float_env("RAG_BM25_B", 0.75, minimum=0.0, maximum=1.0)
 
     @staticmethod
     def _max_pages_per_kb_config() -> int:
@@ -472,3 +492,18 @@ class WikiSearcher:
         if document.kind == "index":
             return 0.05
         return 0.0
+
+
+def _float_env(name: str, default: float, *, minimum: float, maximum: float | None = None) -> float:
+    """Read a float from the environment, failing loudly on a bad value."""
+    raw = os.getenv(name)
+    if raw is None or raw.strip() == "":
+        return default
+    try:
+        value = float(raw)
+    except ValueError as exc:
+        raise ConfigurationError(f"{name} must be a number, got {raw!r}") from exc
+    if value < minimum or (maximum is not None and value > maximum):
+        bound = f"[{minimum}, {maximum}]" if maximum is not None else f">= {minimum}"
+        raise ConfigurationError(f"{name} must be {bound}, got {value}")
+    return value

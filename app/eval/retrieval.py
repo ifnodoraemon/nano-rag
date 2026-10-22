@@ -18,6 +18,8 @@ It never calls a model, so it is cheap, reproducible, and usable as a gate.
 
 from __future__ import annotations
 
+import math
+
 from dataclasses import dataclass, field
 from typing import Awaitable, Callable
 
@@ -57,6 +59,11 @@ class RetrievalRecord:
     expected_doc_ids: tuple[str, ...] = ()
     expected_source_keys: tuple[str, ...] = ()
     expected_titles: tuple[str, ...] = ()
+    # Optional graded relevance, keyed by the same identifier values used above
+    # (doc_id / source_key / title). Datasets that carry grades - T2Retrieval's
+    # qrels do - should pass them: recall and MRR both throw the grades away,
+    # while nDCG uses them to ask "are the *most* valuable results at the top".
+    relevance_grades: dict[str, int] = field(default_factory=dict)
     metadata_filters: dict[str, object] | None = None
 
     @property
@@ -116,6 +123,26 @@ def parse_retrieval_record(raw: dict, index: int) -> RetrievalRecord:
         raise StoreError(
             f"retrieval eval row {index}: metadata_filters must be an object"
         )
+    grades_raw = raw.get("relevance_grades")
+    if grades_raw is None:
+        grades_raw = raw.get("grades")
+    relevance_grades: dict[str, int] = {}
+    if grades_raw is not None:
+        if not isinstance(grades_raw, dict):
+            raise StoreError(
+                f"retrieval eval row {index}: relevance_grades must be an object "
+                "mapping identifier -> integer grade"
+            )
+        for identifier, grade in grades_raw.items():
+            try:
+                numeric = int(grade)
+            except (TypeError, ValueError) as exc:
+                raise StoreError(
+                    f"retrieval eval row {index}: grade for {identifier!r} must be "
+                    f"an integer, got {grade!r}"
+                ) from exc
+            if numeric > 0:
+                relevance_grades[str(identifier).strip().casefold()] = numeric
     return RetrievalRecord(
         sample_id=str(raw.get("sample_id") or f"retrieval-{index + 1}"),
         query=query,
@@ -123,8 +150,62 @@ def parse_retrieval_record(raw: dict, index: int) -> RetrievalRecord:
         expected_doc_ids=expected_doc_ids,
         expected_source_keys=expected_source_keys,
         expected_titles=expected_titles,
+        relevance_grades=relevance_grades,
         metadata_filters=metadata_filters,
     )
+
+
+def _gain(document: RetrievedDocument, record: RetrievalRecord) -> int:
+    """Relevance gain of one candidate.
+
+    With graded relevance supplied, the gain is the best grade among the
+    identifiers this document satisfies; without grades, every expected document
+    is worth 1 (binary relevance). Non-expected documents gain nothing.
+    """
+    satisfied = _satisfied_expectations(document, record)
+    if not satisfied:
+        return 0
+    if not record.relevance_grades:
+        return 1
+    grades = [
+        record.relevance_grades.get(value)
+        for _kind, value in satisfied
+    ]
+    numeric = [grade for grade in grades if isinstance(grade, int) and grade > 0]
+    return max(numeric) if numeric else 1
+
+
+def _dcg(gains: list[int]) -> float:
+    # 2^rel - 1 is the standard NDCG gain, which makes a grade of 2 worth far
+    # more than two grade-1 documents - that is the whole point of using grades.
+    return sum(
+        (2**gain - 1) / math.log2(index + 2) for index, gain in enumerate(gains)
+    )
+
+
+def _ndcg(
+    documents: list[RetrievedDocument], record: RetrievalRecord, cutoff: int
+) -> float:
+    """Ranking quality at ``cutoff``.
+
+    Recall@k cannot tell "the best document is first" from "it is tenth"; MRR
+    sees only the first relevant hit and ignores the rest. nDCG scores the whole
+    ordering with position discounts, so it is the metric that answers "is the
+    overall ranking good, and are the high-value results near the top".
+    """
+    actual = _dcg([_gain(document, record) for document in documents[:cutoff]])
+    if actual == 0.0:
+        return 0.0
+    # Ideal ordering: the best possible gains this corpus could produce.
+    grade_pool = (
+        sorted((grade for grade in record.relevance_grades.values() if grade > 0), reverse=True)
+        if record.relevance_grades
+        else [1] * record.expected_count
+    )
+    ideal = _dcg(grade_pool[:cutoff])
+    if ideal == 0.0:
+        return 0.0
+    return min(1.0, actual / ideal)
 
 
 def _satisfied_expectations(
@@ -166,6 +247,7 @@ class _RowScore:
     first_relevant_rank: int | None = None
     recall_at_k: dict[str, float] = field(default_factory=dict)
     hit_at_k: dict[str, float] = field(default_factory=dict)
+    ndcg_at_k: dict[str, float] = field(default_factory=dict)
     # How clearly the right document beat the best wrong one. Recall cannot see
     # this: two configurations can both rank the answer first while one leaves
     # the runner-up almost tied (which is one query wording away from a miss).
@@ -220,6 +302,9 @@ def _score_row(
             len(covered & expected) / record.expected_count, 4
         )
         row.hit_at_k[str(cutoff)] = 1.0 if covered & expected else 0.0
+        row.ndcg_at_k[str(cutoff)] = round(
+            _ndcg(documents, record, cutoff), 4
+        )
     return row
 
 
@@ -273,6 +358,9 @@ async def evaluate_retrieval(
     }
     for cutoff in ordered_cutoffs:
         key = str(cutoff)
+        aggregate[f"ndcg@{cutoff}"] = round(
+            sum(row.ndcg_at_k[key] for row in rows) / len(rows), 4
+        )
         aggregate[f"recall@{cutoff}"] = round(
             sum(row.recall_at_k[key] for row in rows) / len(rows), 4
         )
@@ -298,6 +386,12 @@ async def evaluate_retrieval(
                 "first_relevant_rank": row.first_relevant_rank,
                 "recall_at_k": row.recall_at_k,
                 "hit_at_k": row.hit_at_k,
+                "ndcg_at_k": row.ndcg_at_k,
+                "mrr": (
+                    round(1.0 / row.first_relevant_rank, 4)
+                    if row.first_relevant_rank
+                    else 0.0
+                ),
                 "ranking": row.ranking,
                 "separation_margin": row.separation_margin,
                 "separation_ratio": row.separation_ratio,

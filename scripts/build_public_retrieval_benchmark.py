@@ -78,10 +78,19 @@ def build(
     corpus = {str(row["id"]): str(row["text"]) for row in _read_parquet(corpus_path)}
     queries = {str(row["id"]): str(row["text"]) for row in _read_parquet(queries_path)}
     qrels: dict[str, list[str]] = {}
+    # The qrels carry a graded relevance score; recall and MRR would discard it,
+    # so it is kept for nDCG ("are the most valuable passages near the top").
+    grades: dict[str, dict[str, int]] = {}
     for row in _read_parquet(qrels_path):
         qid, pid = str(row["qid"]), str(row["pid"])
         if qid in queries and pid in corpus:
             qrels.setdefault(qid, []).append(pid)
+            try:
+                grade = int(row.get("score") or 1)
+            except (TypeError, ValueError):
+                grade = 1
+            if grade > 0:
+                grades.setdefault(qid, {})[pid] = grade
 
     # Prefer queries with a small judged set: a single relevant passage among
     # thousands of distractors is a sharper test than ten of them.
@@ -160,14 +169,20 @@ def build(
         expected = [id_map[pid] for pid in qrels[qid] if pid in id_map]
         if not expected:
             continue
-        rows.append(
-            {
-                "sample_id": f"t2r-{qid}",
-                "kb_id": "default",
-                "query": queries[qid],
-                "expected_doc_ids": expected,
-            }
-        )
+        row: dict[str, object] = {
+            "sample_id": f"t2r-{qid}",
+            "kb_id": "default",
+            "query": queries[qid],
+            "expected_doc_ids": expected,
+        }
+        graded = {
+            id_map[pid]: grade
+            for pid, grade in grades.get(qid, {}).items()
+            if pid in id_map
+        }
+        if graded:
+            row["relevance_grades"] = graded
+        rows.append(row)
 
     dataset_path = out_dir / "retrieval.jsonl"
     dataset_path.write_text(
