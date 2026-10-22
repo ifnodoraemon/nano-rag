@@ -19,27 +19,18 @@ if TYPE_CHECKING:
     from app.core.config import AppConfig
 
 
-_MODEL_PARSER_SUFFIXES = {
-    ".doc",
-    ".pdf",
-    ".ppt",
-    ".xls",
-    ".png",
-    ".jpg",
-    ".jpeg",
-    ".webp",
-}
-_CONTENT_TYPES = {
-    ".doc": "application/msword",
-    ".pdf": "application/pdf",
-    ".ppt": "application/vnd.ms-powerpoint",
-    ".xls": "application/vnd.ms-excel",
-    ".png": "image/png",
-    ".jpg": "image/jpeg",
-    ".jpeg": "image/jpeg",
-    ".webp": "image/webp",
-}
+# The accepted suffixes and their MIME types live in one dependency-free module
+# so the ingest loader and this client cannot drift apart.
+from app.ingestion.text_reader import read_inline_text
+from app.ingestion.suffixes import (
+    INLINE_TEXT_SUFFIXES,
+    PDF_SUFFIXES,
+    SUPPORTED_SUFFIXES,
+    content_type,
+)
+
 _EMPTY_SENTINEL = "__PARSER_EMPTY__"
+_MAX_INLINE_TEXT_CHARS = 400_000
 
 
 class DocumentParserClient:
@@ -130,7 +121,8 @@ class DocumentParserClient:
         )
 
     def supports(self, path: Path) -> bool:
-        return path.suffix.lower() in _MODEL_PARSER_SUFFIXES
+        """Every accepted suffix is parsed by the model - there is no local path."""
+        return path.suffix.lower() in SUPPORTED_SUFFIXES
 
     def _get_client(self) -> httpx.AsyncClient:
         if self._client is None:
@@ -145,6 +137,69 @@ class DocumentParserClient:
             self._client = None
         await self.openai_client.close()
 
+    def _inline_text_prompt(self, path: Path, text: str) -> str:
+        return (
+            "Convert the document below into clean Markdown for retrieval. "
+            "Preserve headings, table values, numbered items, place names, and key "
+            "numeric data. Do not summarise or omit content. "
+            f"If the document is unreadable or has no extractable content, return "
+            f"exactly `{_EMPTY_SENTINEL}`.\n\n"
+            f"--- FILE: {path.name} ---\n{text}"
+        )
+
+    async def _parse_inline_text(self, path: Path, provider: str) -> str:
+        """Send a text-like document's content as a text part.
+
+        Keeps a single parsing path (the model) for every format, while working
+        with a text-only model: no file upload, no base64.
+        """
+        text = read_inline_text(path)
+        if len(text) > _MAX_INLINE_TEXT_CHARS:
+            raise ParsingError(
+                f"{path.name} is {len(text)} characters, above the "
+                f"{_MAX_INLINE_TEXT_CHARS}-character inline limit for text parsing; "
+                "split the document or raise _MAX_INLINE_TEXT_CHARS"
+            )
+        prompt = self._inline_text_prompt(path, text)
+        if provider == "qwen":
+            data = await self.openai_client.chat_completions(
+                [{"role": "user", "content": prompt}], self.alias, temperature=0
+            )
+            parsed = self._extract_chat_text(data)
+        else:
+            payload = {
+                "contents": [{"role": "user", "parts": [{"text": prompt}]}],
+                "generationConfig": {"temperature": 0, "responseMimeType": "text/plain"},
+            }
+            client = self._get_client()
+            try:
+                response = await client.post(
+                    f"{self.base_url}/v1beta/models/{self.alias}:generateContent",
+                    headers={
+                        "x-goog-api-key": self.api_key,
+                        "Content-Type": "application/json",
+                    },
+                    json=payload,
+                )
+                response.raise_for_status()
+            except httpx.TimeoutException as exc:
+                raise ModelGatewayError(
+                    "document parser timeout on Gemini generateContent"
+                ) from exc
+            except httpx.HTTPStatusError as exc:
+                raise ModelGatewayError(
+                    "document parser request failed: "
+                    f"{exc.response.status_code} {exc.response.text.strip()}"
+                ) from exc
+            except httpx.HTTPError as exc:
+                raise ModelGatewayError(
+                    f"document parser connection failed: {exc}"
+                ) from exc
+            parsed = self._extract_text(response.json())
+        if not parsed or parsed.strip() == _EMPTY_SENTINEL:
+            raise ParsingError(f"document parser returned empty content for {path.name}")
+        return parsed.strip()
+
     async def parse_file(self, path: Path) -> str:
         if not self.enabled or not self.supports(path):
             raise ParsingError(f"model parser is not enabled for {path.suffix}")
@@ -152,11 +207,14 @@ class DocumentParserClient:
             raise ParsingError("DOCUMENT_PARSER_MODEL must be configured.")
         if not self.api_key:
             raise ParsingError("DOCUMENT_PARSER_API_KEY must be configured.")
+        suffix = path.suffix.lower()
+        if suffix in INLINE_TEXT_SUFFIXES:
+            return await self._parse_inline_text(path, self.provider)
         if self.provider == "qwen":
             return await self._parse_file_openai_compatible(path)
         if self.provider != "gemini":
             raise ParsingError(f"unsupported document parser provider: {self.provider}")
-        if path.suffix.lower() == ".pdf":
+        if suffix in PDF_SUFFIXES:
             batched = await self._parse_pdf_in_page_batches(path)
             if batched is not None:
                 return batched
@@ -273,9 +331,15 @@ class DocumentParserClient:
             ) from exc
         except httpx.HTTPError as exc:
             raise ModelGatewayError(f"document parser connection failed: {exc}") from exc
-        text = self._extract_text(response.json())
+        payload_json = response.json()
+        text = self._extract_text(payload_json)
         if not text or text.strip() == _EMPTY_SENTINEL:
-            raise ParsingError(f"document parser returned empty content for {path.name}")
+            raise ParsingError(
+                f"document parser returned empty content for {path.name} "
+                f"(model={self.alias}, mime={self._guess_content_type(path)}). "
+                "Binary formats (PDF, images, Office) need a model with vision/"
+                "document input; a text-only model returns nothing for them."
+            )
         return text.strip()
 
     async def _parse_file_openai_compatible(self, path: Path) -> str:
@@ -310,7 +374,14 @@ class DocumentParserClient:
         )
         text = self._extract_chat_text(data)
         if not text or text.strip() == _EMPTY_SENTINEL:
-            raise ParsingError(f"document parser returned empty content for {path.name}")
+            choice = (data.get("choices") or [{}])[0] if isinstance(data, dict) else {}
+            raise ParsingError(
+                f"document parser returned empty content for {path.name} "
+                f"(model={self.alias}, finish_reason={choice.get('finish_reason')!r}, "
+                f"usage={data.get('usage') if isinstance(data, dict) else None}). "
+                "Binary formats (PDF, images, Office) need a model with vision/"
+                "document input; a text-only chat model returns nothing for them."
+            )
         return text.strip()
 
     def _build_qwen_file_part(self, path: Path, mime_type: str, data_url: str) -> dict:
@@ -412,7 +483,9 @@ class DocumentParserClient:
 
     def _guess_content_type(self, path: Path) -> str:
         suffix = path.suffix.lower()
-        content_type = _CONTENT_TYPES.get(suffix)
-        if not content_type:
-            raise ParsingError(f"document parser content type is not configured for {suffix}")
-        return content_type
+        resolved = content_type(suffix, fallback="")
+        if not resolved:
+            raise ParsingError(
+                f"document parser content type is not configured for {suffix}"
+            )
+        return resolved

@@ -5,9 +5,10 @@ from pathlib import Path
 
 import pytest
 
-from app.core.exceptions import ModelOutputError, ParsingError
+from app.core.exceptions import ConfigurationError, ModelOutputError, ParsingError
 from app.ingestion.graph_extractor import GraphExtractor
 from app.ingestion.parser_registry import parse_content
+from app.ingestion.text_reader import read_inline_text
 
 
 class TextCapablePdfParser:
@@ -69,23 +70,22 @@ async def test_model_parser_failure_is_not_swallowed(tmp_path) -> None:
         await parse_content(pdf_path, FailingModelParser())
 
 
-@pytest.mark.asyncio
-async def test_non_utf8_text_file_fails_loudly(tmp_path) -> None:
+def test_non_utf8_text_file_fails_loudly(tmp_path) -> None:
     """errors='replace' silently produced mojibake; strict decode surfaces the
-    bad file at ingest time instead of corrupting the corpus."""
+    bad file when it is read for inlining into the parser request."""
     txt_path = tmp_path / "bad.txt"
     txt_path.write_bytes(b"valid utf-8 prefix \xff\xfe invalid bytes")
 
     with pytest.raises(ParsingError) as exc_info:
-        await parse_content(txt_path, None)
+        read_inline_text(txt_path)
 
     assert "not valid UTF-8" in str(exc_info.value)
 
 
 @pytest.mark.asyncio
-async def test_empty_pdf_without_parser_requires_multimodal_parser(tmp_path) -> None:
-    """A scanned PDF yields no local text: raise with an actionable message
-    instead of committing an empty document."""
+async def test_pdf_without_a_configured_parser_fails_loudly(tmp_path) -> None:
+    """There is no local PDF extraction left: without the multimodal parser the
+    ingest must fail instead of committing an empty document."""
     from pypdf import PdfWriter
 
     pdf_path = tmp_path / "blank.pdf"
@@ -94,10 +94,8 @@ async def test_empty_pdf_without_parser_requires_multimodal_parser(tmp_path) -> 
     with pdf_path.open("wb") as handle:
         writer.write(handle)
 
-    with pytest.raises(ParsingError) as exc_info:
+    with pytest.raises(ConfigurationError, match="no local extraction"):
         await parse_content(pdf_path, None)
-
-    assert "multimodal document parser" in str(exc_info.value)
 
 
 def _document_for_extraction():

@@ -102,9 +102,17 @@ app.include_router(openai_router)
 
 def _log_startup_readiness(config) -> None:  # noqa: ANN001
     document_parser = config.document_parser_configured
-    if document_parser["enabled"] and not document_parser["configured"]:
-        logger.warning(
-            "Startup readiness: document parser is not configured. provider=%s model=%s missing=%s",
+    # Not a warning any more: there is no local extraction, so an unconfigured
+    # parser means every ingest fails. Say that plainly at startup.
+    if not document_parser["enabled"]:
+        logger.error(
+            "Startup readiness: DOCUMENT_PARSER_ENABLED is false, but parsing is "
+            "model-only in this build (no local extraction) - all ingests will fail"
+        )
+    elif not document_parser["configured"]:
+        logger.error(
+            "Startup readiness: document parser is not configured, but parsing is "
+            "model-only in this build - all ingests will fail. provider=%s model=%s missing=%s",
             document_parser.get("provider"),
             document_parser.get("model"),
             ", ".join(document_parser.get("missing", [])),

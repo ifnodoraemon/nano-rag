@@ -19,7 +19,6 @@ from app.ingestion.dedup import find_duplicates_for_content, remove_document_eve
 from app.ingestion.loader import discover_files
 from app.ingestion.metadata import build_source_key, extract_document_metadata
 from app.ingestion.graph_extractor import GraphExtractor
-from app.ingestion.parser_registry import model_parser_available
 from app.wiki.compiler import WikiCompiler
 from app.wiki.search import WikiSearcher
 from app.ingestion.structured_parser import StructuredDocumentParser
@@ -954,10 +953,9 @@ class IngestionPipeline:
         chunks = [media_chunk]
         structured_document: StructuredDocument | None = None
         text = ""
-        if modality == "image" and model_parser_available(self.document_parser, file_path):
-            # A configured image parser must succeed — falling back to a
-            # media-only chunk on parse failure would silently drop the
-            # image's text content from retrieval.
+        if modality == "image":
+            # Images have no local text to extract: the multimodal parser is the
+            # only path, so it is required and its failure is terminal.
             structured_document = await self.structured_parser.parse(
                 file_path,
                 doc_id=doc_id,

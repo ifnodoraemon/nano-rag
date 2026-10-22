@@ -23,6 +23,18 @@ from app.ingestion.dedup import (
 )
 
 
+
+class _ModelParser:
+    """Parsing is model-only in this build, so every pipeline needs a parser."""
+
+    enabled = True
+
+    def supports(self, path: Path) -> bool:  # noqa: ARG002
+        return True
+
+    async def parse_file(self, path: Path) -> str:  # noqa: ARG002
+        return path.read_text(encoding="utf-8")
+
 def _write_artifact(
     parsed_dir: Path,
     doc_id: str,
@@ -314,7 +326,7 @@ async def test_ingest_supersedes_same_content_at_a_new_path(
         config=config,
         generation_client=_Generation(),
         tracing_manager=TracingManager("test-service", ""),
-        document_parser=None,
+        document_parser=_ModelParser(),
     )
 
     first_response = await pipeline.run(str(first), kb_id="default")
@@ -366,7 +378,7 @@ async def test_ingest_does_not_supersede_different_content(monkeypatch, tmp_path
         config=config,
         generation_client=_Generation(),
         tracing_manager=TracingManager("test-service", ""),
-        document_parser=None,
+        document_parser=_ModelParser(),
     )
 
     await pipeline.run(str(source_root / "a.md"), kb_id="default")

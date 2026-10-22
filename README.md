@@ -74,7 +74,7 @@ Nano RAG 的核心原则是：**真实输入、真实索引、真实模型、真
 - 图片索引：图片文件默认生成视觉媒体 chunk；如果配置了多模态 document parser 且能抽出文字，会同时生成文本/结构 chunk
 - agentic 检索：wiki BM25 发现 → 确定性版本过滤（按 `source_key` 取最新）→ LLM 结构化读计划（json_schema）→ 深读选中的 parsed artifact → 上下文构建；每个阶段进 trace
 - 证据治理：生成结果带 structured supporting claims，并在后处理里标记 claim 是否有引用支撑、缺失数字和缺失术语
-- 模型路径：**一个模型走天下**——查询理解、阅读计划、证据审计、图抽取、答案生成全部由同一个生成模型完成；文档解析复用该 provider 的多模态能力。**不配置 embedding 模型，也不配置 rerank 模型**
+- 模型路径：**一个 provider 走天下**——查询理解、阅读计划、证据审计、图抽取、答案生成由同一个生成模型完成，文档解析由该 provider 的多模态模型完成。**不配置 embedding 模型、不配置 rerank 模型、也没有任何本地解析**
 - 前端：React + Vite 源码位于 `frontend/` 子模块，Docker 构建为 nginx 静态站点并代理后端
 
 ## 目录

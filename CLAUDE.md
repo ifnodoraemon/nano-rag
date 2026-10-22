@@ -11,7 +11,7 @@ Enterprise RAG system with a real-data runtime: no frontend hardcoded business d
 - Retrieval is document-level discovery, not dense-vector similarity: a document-scoped BM25 wiki is the retrieval engine's first hop, followed by deterministic version filtering and an LLM read plan. There is no dense-vector fallback, and no cross-encoder rerank stage: ranking quality comes from the lexical index and the model's reading plan, never from a second model.
 - The frontend does not store or submit business API keys. Browser requests go through the account system or the Docker nginx proxy, which injects the local backend key — for business routes only; operator routes are authenticated by the caller with the admin key and are never auto-authenticated by the proxy.
 - Every RAG answer should be traceable to retrieved context, citations, source documents, and trace IDs. This is checked, not just prompted: `app/generation/citation_check.py` deterministically verifies that every cited label resolves to a provided context and that the numbers a cited sentence states appear in the context it cites; the result lands on the trace (`citation_integrity`) and as a deterministic eval metric.
-- Deterministic ingest behavior: a configured multimodal document parser takes precedence over local extraction for every suffix it supports (local pypdf/office extraction runs only when no model parser is configured); provenance fields are honest (unknown page numbers stay `None`); source files must be valid UTF-8.
+- Deterministic ingest behavior: **the multimodal document parser is the only parsing path** - there is no local extraction at all (no pypdf text mining, no Office/zip walking, no HTML stripping), so every accepted file is turned into Markdown by the provider's model. Text-like files are sent to the model as text (a text-only model can parse them); binary formats need a multimodal model and fail loudly otherwise. An unconfigured or disabled parser makes ingest fail; it never falls back to a lesser local parse. Provenance fields are honest (unknown page numbers stay `None`).
 - Evaluation has two real modes: deterministic builtin metrics (token-based exact match + reference context recall, no LLM) and LLM-assisted deepeval metrics. Eval result rows pass every input field through; report gates fail when a gated metric is missing from the report.
 
 ## Tech Stack
@@ -20,7 +20,7 @@ Enterprise RAG system with a real-data runtime: no frontend hardcoded business d
 - **Frontend**: React 19 + TypeScript + Vite, served by nginx in Docker
 - **Discovery index**: document-level BM25 over the compiled wiki (no vector DB, no embedding model)
 - **Graph store**: native PostgreSQL (document structure for optional graph expansion)
-- **Model Providers**: ONE generation model does everything (query understanding, reading plan, evidence audit, graph extraction, answers), plus the same provider's multimodal capability for document parsing when needed. No embedding model, no rerank model, no Bifrost/LiteLLM runtime layer.
+- **Model Providers**: ONE provider, two capabilities of the same family: a generation model does all the reasoning (query understanding, reading plan, evidence audit, graph extraction, answers) and a multimodal model parses every document. No embedding model, no rerank model, no local text extraction, no Bifrost/LiteLLM runtime layer.
 - **Tracing**: OpenTelemetry HTTP export to Langfuse
 - **Testing**: pytest + pytest-asyncio, TypeScript build/lint
 - **Evaluation**: deterministic eval plus optional deepeval metrics
@@ -33,7 +33,7 @@ app/
   api/          # FastAPI routes (business + debug)
   core/         # Config, exceptions, logging, tracing
   generation/   # Prompt builder, answer formatter
-  ingestion/    # Document parsing, chunking, metadata extraction
+  ingestion/    # Model-only parsing (no local extraction), chunking, metadata extraction
   model_client/ # Generation + document parser clients (single model; no rerank/embedding client)
   retrieval/    # BM25 index, graph store/index/expander, context builder, versioning
   schemas/      # Pydantic models
@@ -48,7 +48,7 @@ scripts/        # run_eval.py, run_benchmark.py, live_smoke.py
 
 ### Ingestion Pipeline
 
-Document -> configured parser -> normalizer -> chunker -> metadata -> committed parsed artifact + PostgreSQL graph rows + wiki discovery page
+Document -> multimodal model parser (only parsing path) -> normalizer -> chunker -> metadata -> committed parsed artifact + PostgreSQL graph rows + wiki discovery page
 
 Document identity is content-addressed on ingest: a file that arrives under a new path (upload, rename, reorganized corpus) but whose text equals an existing document in the same KB supersedes it instead of adding a second copy. Duplicates are not cosmetic — each copy takes a discovery slot and splits BM25 scores, which measurably pushes the real answer out of the top-k. Superseded ids are reported on the ingest response; `scripts/dedup_corpus.py` cleans a corpus that already accumulated them.
 
@@ -85,7 +85,7 @@ Do not use non-Docker commands to start the app for runtime validation.
 - `GENERATION_API_KEY` - generation provider key
 - `GENERATION_MODEL_ALIAS` - generation model alias; default examples are Gemini or Qwen
 - `DOCUMENT_PARSER_API_BASE_URL` - document parser endpoint
-- `DOCUMENT_PARSER_API_KEY` - document parser key
+- `DOCUMENT_PARSER_API_KEY` - document parser key (required: the only parsing path)
 - `DOCUMENT_PARSER_PROVIDER` - `gemini` or `qwen`; `qwen` covers DashScope and OpenAI-compatible vLLM
 - `RAG_GRAPH_BACKEND` - `postgres` (standard Docker runtime) or `artifact` (bare local scripts, no database); also `none`/`disabled`
 - `PG_URI` - PostgreSQL connection string for the graph store (defaults to the in-network `postgres` service)
@@ -99,7 +99,7 @@ Do not use non-Docker commands to start the app for runtime validation.
 - `RAG_API_KEYS` - backend business API keys (single key: nginx injects exactly one; `RAG_ADMIN_API_KEYS` must differ)
 - `RAG_PROXY_API_KEY` - derived from `RAG_API_KEYS` by compose; override only if the browser-facing key must differ
 
-Configuration surface is deliberately two-tier: exactly two *external* credentials (generation, and document parser when needed) plus `scripts/init_env.py`, which generates every internal secret (business/admin keys, postgres password) with `secrets.token_hex`. Derived values are never configured twice: `PG_URI` comes from `POSTGRES_*`, `RAG_PROXY_API_KEY` from `RAG_API_KEYS`. Legacy names (`COMPOSE_*`, `MODEL_GATEWAY_*`, `PG_PASSWORD`) are still recognised and migrated in place. Internal components (redis, postgres) are `expose`-only, so they need no operator-managed credentials.
+Configuration surface is deliberately two-tier: exactly two *external* credentials (generation, and the multimodal document parser, which is the only parsing path) plus `scripts/init_env.py`, which generates every internal secret (business/admin keys, postgres password) with `secrets.token_hex`. Derived values are never configured twice: `PG_URI` comes from `POSTGRES_*`, `RAG_PROXY_API_KEY` from `RAG_API_KEYS`. Legacy names (`COMPOSE_*`, `MODEL_GATEWAY_*`, `PG_PASSWORD`) are still recognised and migrated in place. Internal components (redis, postgres) are `expose`-only, so they need no operator-managed credentials.
 
 ## Code Conventions
 

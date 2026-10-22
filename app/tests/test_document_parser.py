@@ -7,10 +7,9 @@ import httpx
 import pytest
 from pypdf import PdfWriter
 
-from app.core.exceptions import ModelGatewayError, ParsingError
-from app.ingestion.parser_docling import parse_document
+from app.core.exceptions import ConfigurationError, ModelGatewayError, ParsingError
+from app.ingestion.parser_registry import parse_content
 from app.ingestion.pipeline import IngestionPipeline
-from app.ingestion.structured_parser import StructuredDocumentParser
 from app.model_client.document_parser import DocumentParserClient
 from app.core.config import AppConfig
 from app.core.tracing import TracingManager
@@ -60,46 +59,52 @@ class FailingGenerationClient:
 
 
 @pytest.mark.asyncio
-async def test_parse_document_uses_model_parser_for_pdf(tmp_path) -> None:
-    pdf_path = tmp_path / "notice.pdf"
-    pdf_path.write_bytes(b"%PDF-1.4 fake")
+async def test_parse_content_always_uses_the_model_parser(tmp_path) -> None:
+    """One parsing path: even plain text goes through the multimodal model.
 
-    text = await parse_document(pdf_path, FakeDocumentParser())
+    There is no local extraction left to fall back to, so the choice of parser
+    is never a function of the file suffix.
+    """
+    markdown_path = tmp_path / "policy.md"
+    markdown_path.write_text("# Policy\n\nSubmit within 15 days.\n", encoding="utf-8")
 
-    assert "徐套乡区片综合地价" in text
+    parsed = await parse_content(markdown_path, FakeDocumentParser())
 
-
-@pytest.mark.asyncio
-async def test_parse_document_disabled_parser_fails_loudly_on_unreadable_pdf(tmp_path) -> None:
-    """Disabled model parser + a PDF the local reader cannot open must raise
-    (previously this fell through with a generic 'configure a parser' error or
-    silently returned empty text)."""
-    pdf_path = tmp_path / "notice.pdf"
-    pdf_path.write_bytes(b"%PDF-1.4 fake")
-
-    with pytest.raises(ParsingError) as exc_info:
-        await parse_document(pdf_path, DisabledStringDocumentParser())
-
-    assert "cannot extract text from PDF" in str(exc_info.value)
+    assert "徐套乡区片综合地价" in parsed.text
+    assert parsed.parser_name == "multimodal-llm-inline-text"
 
 
 @pytest.mark.asyncio
-async def test_structured_parser_disabled_parser_fails_loudly_on_unreadable_pdf(
-    tmp_path,
-) -> None:
-    pdf_path = tmp_path / "notice.pdf"
-    pdf_path.write_bytes(b"%PDF-1.4 fake")
-    parser = StructuredDocumentParser(DisabledStringDocumentParser())
+async def test_parse_content_requires_a_configured_parser(tmp_path) -> None:
+    """No parser configured = no parsing at all: fail loudly, never parse locally."""
+    markdown_path = tmp_path / "policy.md"
+    markdown_path.write_text("# Policy\n", encoding="utf-8")
 
-    with pytest.raises(ParsingError) as exc_info:
-        await parser.parse(
-            pdf_path,
-            doc_id="doc",
-            kb_id="default",
-            source_path="/tmp/notice.pdf",
-        )
+    with pytest.raises(ConfigurationError) as exc_info:
+        await parse_content(markdown_path, None)
+    assert "no local extraction" in str(exc_info.value)
 
-    assert "cannot extract text from PDF" in str(exc_info.value)
+    with pytest.raises(ConfigurationError):
+        await parse_content(markdown_path, DisabledStringDocumentParser())
+
+
+@pytest.mark.asyncio
+async def test_parse_content_rejects_unsupported_suffix(tmp_path) -> None:
+    binary = tmp_path / "archive.bin"
+    binary.write_bytes(b"\x00\x01")
+
+    with pytest.raises(ParsingError, match="Unsupported file type"):
+        await parse_content(binary, FakeDocumentParser())
+
+
+@pytest.mark.asyncio
+async def test_parse_content_rejects_empty_parser_output(tmp_path) -> None:
+    # An empty parse would create a document that is undiscoverable in the index.
+    markdown_path = tmp_path / "blank.md"
+    markdown_path.write_text("# Blank\n", encoding="utf-8")
+
+    with pytest.raises(ParsingError, match="empty content"):
+        await parse_content(markdown_path, EmptyDocumentParser())
 
 
 @pytest.mark.asyncio
@@ -153,6 +158,7 @@ async def test_ingestion_pipeline_fails_when_graph_extraction_fails(
         config=config,
         generation_client=FailingGenerationClient(),
         tracing_manager=TracingManager("test-service", ""),
+        document_parser=FakeDocumentParser(),  # parsing is model-only now
     )
 
     with pytest.raises(ModelGatewayError):
@@ -272,6 +278,7 @@ async def test_pptx_ingestion_extracts_embedded_images(monkeypatch, tmp_path) ->
         config=config,
         generation_client=FakeGenerationClient(),
         tracing_manager=TracingManager("test-service", ""),
+        document_parser=FakeDocumentParser(),
     )
 
     response = await pipeline.run(str(pptx_path), kb_id="default")
