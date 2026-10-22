@@ -40,6 +40,10 @@ class IngestJobRecord(BaseModel):
     # Files skipped because their committed artifact already matched the source
     # byte for byte under the same parse configuration (nothing was re-parsed).
     unchanged_documents: int = 0
+    # What this job spent on the model (parsing + graph extraction). Zero means
+    # the provider reported no usage, so it is never mistaken for "free".
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
     uploaded_files: list[str] = Field(default_factory=list)
     error: str | None = None
     submitted_at: float = Field(default_factory=time)
@@ -161,7 +165,14 @@ class IngestJobStore:
         return reaped
 
     def mark_completed(
-        self, job_id: str, *, documents: int, chunks: int, unchanged_documents: int = 0
+        self,
+        job_id: str,
+        *,
+        documents: int,
+        chunks: int,
+        unchanged_documents: int = 0,
+        prompt_tokens: int = 0,
+        completion_tokens: int = 0,
     ) -> IngestJobRecord:
         record = self._require(job_id)
         record.status = IngestJobStatus.COMPLETED
@@ -169,6 +180,8 @@ class IngestJobStore:
         record.documents = documents
         record.chunks = chunks
         record.unchanged_documents = unchanged_documents
+        record.prompt_tokens = prompt_tokens
+        record.completion_tokens = completion_tokens
         record.completed_at = time()
         record.error = None
         self.save(record)

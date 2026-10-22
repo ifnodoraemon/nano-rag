@@ -94,6 +94,8 @@ class BusinessIngestJobResponse(BaseModel):
     chunks: int = 0
     # Files skipped because nothing changed since the committed artifact.
     unchanged_documents: int = 0
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
     uploaded_files: list[str] = Field(default_factory=list)
     error: str | None = None
     submitted_at: float

@@ -6,6 +6,7 @@ from typing import Any
 
 from app.core.exceptions import ModelOutputError
 from app.model_client.generation import GenerationClient
+from app.ingestion.token_ledger import record_tokens
 from app.schemas.structured import (
     ENTITY_ID_PREFIX,
     GraphEntity,
@@ -59,6 +60,7 @@ class GraphExtractor:
                 },
             ]
         )
+        record_tokens("graph_extraction", result.get("usage"))
         return parse_json_object(str(result.get("content") or ""))
 
     def _nodes_for_prompt(self, document: StructuredDocument) -> list[dict[str, object]]:

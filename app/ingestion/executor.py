@@ -20,6 +20,8 @@ async def run_ingest_paths(
     documents = 0
     chunks = 0
     unchanged = 0
+    prompt_tokens = 0
+    completion_tokens = 0
     try:
         container.ingest_job_store.mark_running(job_id, stage="ingesting")
         for index, path in enumerate(paths):
@@ -37,11 +39,16 @@ async def run_ingest_paths(
             documents += response.documents
             chunks += response.chunks
             unchanged += len(response.unchanged_doc_ids)
+            usage = response.usage or {}
+            prompt_tokens += int(usage.get("prompt_tokens") or 0)
+            completion_tokens += int(usage.get("completion_tokens") or 0)
         container.ingest_job_store.mark_completed(
             job_id,
             documents=documents,
             chunks=chunks,
             unchanged_documents=unchanged,
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
         )
     except Exception as exc:
         container.ingest_job_store.mark_failed(

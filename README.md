@@ -452,6 +452,28 @@ curl -X POST .../v1/rag/ingest -d '{"path":"data/raw/handbook.md","kb_id":"defau
 | --- | --- | --- |
 | `RAG_PARSE_CACHE_ENABLED` | `true` | 关掉后每份文件都会重新调用模型解析 |
 
+### 摄入成本可见
+
+解析全部走模型后，"一次摄入花了多少"必须能查。每个文档的 token 用量按阶段记录
+（`parse` / `graph_extraction`），累加到作业记录和响应：
+
+```bash
+curl .../v1/rag/ingest/jobs/<job_id>
+# {"documents":3,"unchanged_documents":12,"prompt_tokens":1935,"completion_tokens":6049}
+```
+
+实测一份普通文档约 **2,200–2,500 tokens**，其中**约 91% 花在图谱抽取上**，解析只占约 9%：
+
+| 阶段 | token |
+| --- | --- |
+| `graph_extraction` | ~2,780 |
+| `parse` | ~281 |
+
+这个比例很重要：如果摄入成本需要压缩，**杠杆在图谱抽取**（它是可选阶段，关掉可省约九成），
+而不是解析。注意这两项都随文档规模增长，样本小不代表大文档的分布。
+
+用量按**并发任务隔离**统计（`ContextVar`），不会把 A 文档的消耗算到 B 文档头上。
+
 ### 重复文档清理
 
 同一份内容以不同路径进入同一知识库（上传 + raw 副本、文件改名、语料重组，或历史版本用了不同的

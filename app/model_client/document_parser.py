@@ -22,6 +22,7 @@ if TYPE_CHECKING:
 # The accepted suffixes and their MIME types live in one dependency-free module
 # so the ingest loader and this client cannot drift apart.
 from app.ingestion.text_reader import read_inline_text
+from app.ingestion.token_ledger import record_tokens
 from app.ingestion.suffixes import (
     INLINE_TEXT_SUFFIXES,
     PDF_SUFFIXES,
@@ -165,6 +166,7 @@ class DocumentParserClient:
             data = await self.openai_client.chat_completions(
                 [{"role": "user", "content": prompt}], self.alias, temperature=0
             )
+            record_tokens("parse", data.get("usage") if isinstance(data, dict) else None)
             parsed = self._extract_chat_text(data)
         else:
             payload = {
@@ -195,7 +197,9 @@ class DocumentParserClient:
                 raise ModelGatewayError(
                     f"document parser connection failed: {exc}"
                 ) from exc
-            parsed = self._extract_text(response.json())
+            payload_json = response.json()
+            record_tokens("parse", payload_json.get("usageMetadata"))
+            parsed = self._extract_text(payload_json)
         if not parsed or parsed.strip() == _EMPTY_SENTINEL:
             raise ParsingError(f"document parser returned empty content for {path.name}")
         return parsed.strip()
@@ -332,6 +336,7 @@ class DocumentParserClient:
         except httpx.HTTPError as exc:
             raise ModelGatewayError(f"document parser connection failed: {exc}") from exc
         payload_json = response.json()
+        record_tokens("parse", payload_json.get("usageMetadata"))
         text = self._extract_text(payload_json)
         if not text or text.strip() == _EMPTY_SENTINEL:
             raise ParsingError(
@@ -372,6 +377,7 @@ class DocumentParserClient:
             self.alias,
             **payload,
         )
+        record_tokens("parse", data.get("usage") if isinstance(data, dict) else None)
         text = self._extract_chat_text(data)
         if not text or text.strip() == _EMPTY_SENTINEL:
             choice = (data.get("choices") or [{}])[0] if isinstance(data, dict) else {}

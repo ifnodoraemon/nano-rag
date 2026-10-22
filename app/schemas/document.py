@@ -30,3 +30,6 @@ class IngestResponse(BaseModel):
     # skip is explicit: "0 documents" then means "nothing matched", not "nothing
     # done".
     unchanged_doc_ids: list[str] = Field(default_factory=list)
+    # Model tokens this batch spent (parsing + graph extraction). Empty when the
+    # provider reported no usage; never a fabricated number.
+    usage: dict = Field(default_factory=dict)

@@ -18,6 +18,7 @@ from uuid import uuid4
 from app.ingestion.dedup import find_duplicates_for_content, remove_document_everywhere
 from app.ingestion.loader import discover_files
 from app.ingestion.parse_cache import ParseCache, build_fingerprint, content_hash
+from app.ingestion.token_ledger import TokenLedger, collect_tokens
 from app.ingestion.metadata import build_source_key, extract_document_metadata
 from app.ingestion.graph_extractor import GraphExtractor
 from app.wiki.compiler import WikiCompiler
@@ -241,6 +242,18 @@ class IngestionPipeline:
                     len(superseded),
                     ", ".join(superseded),
                 )
+            usage = TokenLedger()
+            for prepared in prepared_documents:
+                entry = prepared.document.metadata.get("token_usage")
+                if isinstance(entry, dict):
+                    usage.add("document", entry)
+            if usage.total_tokens:
+                logger.info(
+                    "ingest spent %d tokens across %d model calls: %s",
+                    usage.total_tokens,
+                    usage.calls,
+                    usage.by_stage,
+                )
             if unchanged_doc_ids:
                 logger.info(
                     "ingest skipped %d unchanged document(s): %s",
@@ -252,6 +265,7 @@ class IngestionPipeline:
                 chunks=chunk_count,
                 superseded_doc_ids=superseded,
                 unchanged_doc_ids=unchanged_doc_ids,
+                usage=usage.as_dict() if usage.total_tokens else {},
             )
 
     async def _supersede_same_content(
@@ -354,12 +368,16 @@ class IngestionPipeline:
             with self.tracing_manager.span(
                 "ingestion.file", {"ingestion.file_path": str(file_path)}
             ):
-                prepared = await self._prepare_document(
-                    file_path,
-                    kb_id=kb_id,
-                    source_path_overrides=source_path_overrides,
-                    force=force,
-                )
+                # ContextVar: concurrent documents each accrue their own tokens.
+                with collect_tokens() as ledger:
+                    prepared = await self._prepare_document(
+                        file_path,
+                        kb_id=kb_id,
+                        source_path_overrides=source_path_overrides,
+                        force=force,
+                    )
+            if prepared is not None and ledger.total_tokens:
+                prepared.document.metadata["token_usage"] = ledger.as_dict()
             return doc_id, prepared
 
         if concurrency <= 1 or len(files) <= 1:

@@ -98,6 +98,7 @@ Do not use non-Docker commands to start the app for runtime validation.
 - `RAG_WIKI_MAX_PAGES_PER_KB` - per-KB source page quota enforced at ingest (default 20000)
 - `GENERATION_MAX_TOKENS` - generation output cap (0 = unset; invalid values fail startup)
 - `RAG_INGEST_JOB_TTL_DAYS` - finished ingest-job record retention (default 7; 0 = keep forever)
+- `RAG_INGEST_CONCURRENCY` - documents prepared at once during ingest (default 4; each is two model round trips). `1` restores serial behaviour
 - `RAG_PARSE_CACHE_ENABLED` - content-addressed parse cache (default `true`); off means every file is re-parsed by the model
 - `RAG_API_KEYS` - backend business API keys (single key: nginx injects exactly one; `RAG_ADMIN_API_KEYS` must differ)
 - `RAG_PROXY_API_KEY` - derived from `RAG_API_KEYS` by compose; override only if the browser-facing key must differ
