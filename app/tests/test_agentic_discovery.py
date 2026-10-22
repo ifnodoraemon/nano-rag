@@ -15,6 +15,16 @@ from types import SimpleNamespace
 
 import pytest
 
+
+@pytest.fixture(autouse=True)
+def _disable_query_expansion(monkeypatch):
+    """These tests exercise discovery mechanics with a scripted plan client.
+
+    Query expansion is a separate concern (covered in test_query_expansion.py) and
+    would add an extra model call the scripted fakes do not answer.
+    """
+    monkeypatch.setenv("RAG_QUERY_EXPANSION_ENABLED", "false")
+
 from app.agentic import AgenticReasoningService
 from app.agentic.discovery import AgenticDiscovery
 from app.core.exceptions import ModelOutputError, RetrievalError

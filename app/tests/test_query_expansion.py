@@ -61,7 +61,7 @@ async def test_a_sentence_variant_fails_loudly():
 @pytest.mark.asyncio
 async def test_a_missing_keywords_array_fails_loudly():
     client = _Client('{"other": []}')
-    with pytest.raises(ModelOutputError, match="no 'keywords' array"):
+    with pytest.raises(ModelOutputError, match="no keyword array"):
         await expand_query("q", client)  # type: ignore[arg-type]
 
 

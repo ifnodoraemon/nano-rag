@@ -64,6 +64,9 @@ Rules:
 - Return at most 5 variants, most useful first.
 - If the question is already a compact keyword string, return just that one.
 
+Reply with exactly one JSON object and nothing else, using exactly this key:
+{"keywords": ["<variant>", ...]}
+
 Question: {query}
 """
 
@@ -91,10 +94,10 @@ async def expand_query(
     )
     content = result.get("content")
     payload = _parse_payload(content, query)
-    raw = payload.get("keywords")
-    if not isinstance(raw, list):
+    raw = _keywords_of(payload)
+    if raw is None:
         raise ModelOutputError(
-            f"query expansion returned no 'keywords' array for query {query!r}: "
+            f"query expansion returned no keyword array for query {query!r}: "
             f"{content!r:.200}"
         )
     variants: list[str] = []
@@ -119,6 +122,26 @@ async def expand_query(
         if len(variants) >= max_variants:
             break
     return variants
+
+
+# Providers that accept response_format but do not enforce it are real (the
+# project has been tested against one). They return the right content under a
+# plausible key name. These aliases are accepted and logged; anything else is a
+# contract violation and raises.
+KEYWORD_KEYS = ("keywords", "variants", "queries", "keyword_queries")
+
+
+def _keywords_of(payload: dict) -> list | None:
+    for key in KEYWORD_KEYS:
+        value = payload.get(key)
+        if isinstance(value, list):
+            if key != KEYWORD_KEYS[0]:
+                logger.warning(
+                    "query expansion returned %r instead of 'keywords'; accepting it",
+                    key,
+                )
+            return value
+    return None
 
 
 def _parse_payload(content: object, query: str) -> dict:
