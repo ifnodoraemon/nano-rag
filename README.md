@@ -525,6 +525,29 @@ top-1 类的指标（`recall@1`/`MRR`）在样本间方向不一致，不据此�
 
 查询扩展在 NFCorpus 上几乎没有作用（`hit@1` 0.4087 → 0.4118）。
 
+### 文献调研：无向量 RAG 的可行路线（及否定结果）
+
+针对"不引入 embedding 模型，但需要更强语义匹配"这个矛盾，调研了当前公开工作：
+
+| 来源 | 核心结论 | 对本项目的意义 |
+| --- | --- | --- |
+| [CALI: Vector-less RAG with LLM-Distilled Lexical Fields](https://livrepository.liverpool.ac.uk/3199472/1/Context-Aware%20Layered%20Ingestion.pdf)（Liverpool, 2026） | 词法字段 + BM25F 的**无向量**路径成立；dense 向量（MiniLM+RRF）相对它**无统计显著增益**（ΔnDCG@5 = +0.004，置信区间几乎完全重叠） | 直接支持本项目"不要 embedding"的架构选择 |
+| CALI 的**否定结果** | 去掉**全部** LLM 蒸馏信号后检索质量**统计无差别**；LLM 加权字段单独去掉反而更好 | ⚠️ 与我们的实测一致：查询扩展只在网页语料有效、在 NFCorpus 无效；同模型重排效应微弱 |
+| CALI：真正显著的组件 | **对称词形还原** 与 **cross-encoder 重排** | 前者是纯词法手段（尚未实现）；后者已被本项目明确排除 |
+| [Revisiting Document Expansion and Filtering](https://dl.acm.org/doi/10.1145/3626772.3657850)（SIGIR 2024） | 文档扩展（doc2query）与过滤的收益需要重新审视 | 提示"文档扩展"不是无条件的赢 |
+| [LLM-Aided Document Expansion for Sparse Retrieval](https://xplorestaging.ieee.org/document/11035404) | LLM 生成查询式扩展对稀疏检索有效，但依赖领域与语料 | 需在本项目语料上实测，不能直接照搬 |
+| [RAGBench](https://ar5iv.labs.arxiv.org/html/2407.11005) | 面向 RAG 的可解释评测基准 | 可作为后续评测集候选 |
+
+**关键判断**：公开证据与我们的实测在一点上吻合——**LLM 生成式增强（查询扩展/文档扩展）的收益不稳定**，
+真正稳定的是**词法归一化（词形还原）**和**排序模型（已被架构约束排除）**。
+
+因此下一步最值得试的、不违反约束的手段是：
+1. **英文词形还原 / 中文同义词归一**（纯词法，可评测）；
+2. 若语料是中文专业文档，**领域词典扩充**（把专业术语的多种写法映射到同一词）；
+3. 用 [RAGBench](https://ar5iv.labs.arxiv.org/html/2407.11005) 之类的公开基准替代当前构造语料做交叉验证。
+
+**不建议**继续投入的方向：在公开短文本基准上反复调排序参数（已做过，结论是噪声）。
+
 **为什么必须有显著性检验**：两个 200 条查询的样本，任何配置都会差那么零点几。我们曾经差点因此改掉 BM25 默认值：
 
 | 指标 | 样本 A | 样本 B |
