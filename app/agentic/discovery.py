@@ -542,15 +542,48 @@ def select_chunks_for_focus(
             if _section_matches(term, haystack):
                 matched.append(chunk)
                 break
-    if not matched:
-        # No fallback to a whole-document read: the plan named sections that do
-        # not resolve, a contract violation between the planner and the artifact's
-        # heading structure. Fail visibly.
-        raise ModelOutputError(
-            f"reading plan focus sections {sorted(focus)} do not match any "
-            f"section of document {doc_id}"
+    if matched:
+        return matched[:max_chunks]
+
+    if not _has_heading_structure(chunks):
+        # The document has no headings at all - a scanned PDF, an exported email,
+        # a flat web page. A focus section cannot resolve against structure that
+        # does not exist, so this is a property of the document, not a planner
+        # contract violation: reading it (bounded) is the correct interpretation of
+        # "read the relevant part of this document". Failing here made every
+        # request against a heading-less corpus an error.
+        logger.warning(
+            "reading plan named sections %s but document %s has no heading "
+            "structure; reading the document instead",
+            sorted(focus),
+            doc_id,
         )
-    return matched[:max_chunks]
+        return chunks[:max_chunks]
+
+    # The document DOES have headings and the plan still named none of them: the
+    # planner and the artifact disagree, so fail visibly rather than silently
+    # reading something else.
+    raise ModelOutputError(
+        f"reading plan focus sections {sorted(focus)} do not match any section of "
+        f"document {doc_id} (the document has {_heading_count(chunks)} headed chunks)"
+    )
+
+
+def _has_heading_structure(chunks: Sequence[dict[str, object]]) -> bool:
+    """True when at least one chunk carries a heading path."""
+    for chunk in chunks:
+        metadata = as_dict(chunk.get("metadata"))
+        if as_str_list(metadata.get("hierarchy_path")):
+            return True
+    return False
+
+
+def _heading_count(chunks: Sequence[dict[str, object]]) -> int:
+    return sum(
+        1
+        for chunk in chunks
+        if as_str_list(as_dict(chunk.get("metadata")).get("hierarchy_path"))
+    )
 
 
 def _section_matches(focus_term: str, haystack: list[str]) -> bool:

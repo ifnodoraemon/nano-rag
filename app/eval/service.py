@@ -156,6 +156,13 @@ async def materialize_eval_records(
                     )
                     claim_stats = _claim_verification_stats(trace.supporting_claims)
                     prepared["supporting_claims"] = trace.supporting_claims
+                    # The model's structured answerability verdict plus the cost and
+                    # latency of the request: the abstention, token and p95 metrics
+                    # read these, and nothing else in the row carries them.
+                    prepared["answerable"] = trace.answerable
+                    prepared["latency_seconds"] = trace.latency_seconds
+                    if trace.generation_usage:
+                        prepared["generation_usage"] = trace.generation_usage
             if not retrieved_contexts:
                 prepared["retrieved_contexts"] = [
                     _context_to_text(context) for context in chat_response.contexts
