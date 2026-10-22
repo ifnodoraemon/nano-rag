@@ -157,34 +157,28 @@ class IngestionPipeline:
         ):
             # Recursive filesystem walk: keep it off the event loop.
             files = await asyncio.to_thread(discover_files, path)
-            chunk_count = 0
-            doc_count = 0
             prepared_documents: list[PreparedDocument] = []
             unchanged_doc_ids: list[str] = []
 
-            for file_path in files:
-                with self.tracing_manager.span(
-                    "ingestion.file", {"ingestion.file_path": str(file_path)}
-                ):
-                    prepared = await self._prepare_document(
-                        file_path,
-                        kb_id=kb_id,
-                        source_path_overrides=source_path_overrides,
-                        force=force,
-                    )
-                    if prepared is None:
-                        # Reported, never silent: the caller must be able to tell
-                        # "nothing needed doing" from "nothing was found".
-                        unchanged_doc_ids.append(
-                            self._stable_doc_id(
-                                self._resolve_source_path(file_path, source_path_overrides),
-                                kb_id,
-                            )
-                        )
-                        continue
-                    prepared_documents.append(prepared)
-                    doc_count += 1
-                    chunk_count += len(prepared.chunks)
+            # Preparation is pure I/O (two model calls per document) and touches
+            # no shared state, so it runs concurrently up to a bound; commits
+            # below stay strictly sequential. Result order follows `files`, so
+            # the commit sequence - and therefore rollback - is deterministic.
+            for doc_id, prepared in await self._prepare_documents(
+                files,
+                kb_id=kb_id,
+                source_path_overrides=source_path_overrides,
+                force=force,
+            ):
+                if prepared is None:
+                    # Reported, never silent: the caller must be able to tell
+                    # "nothing needed doing" from "nothing was found".
+                    unchanged_doc_ids.append(doc_id)
+                    continue
+                prepared_documents.append(prepared)
+
+            doc_count = len(prepared_documents)
+            chunk_count = sum(len(prepared.chunks) for prepared in prepared_documents)
 
             self.config.parsed_dir.mkdir(parents=True, exist_ok=True)
             # Artifacts, graph rows and wiki pages live in three stores with no
@@ -335,6 +329,51 @@ class IngestionPipeline:
                 await asyncio.to_thread(self.wiki_searcher.refresh)
             except Exception:  # noqa: BLE001
                 logger.exception("rollback: wiki searcher refresh failed")
+
+    async def _prepare_documents(
+        self,
+        files: list[Path],
+        *,
+        kb_id: str,
+        source_path_overrides: dict[str, str] | None,
+        force: bool,
+    ) -> list[tuple[str, PreparedDocument | None]]:
+        """Prepare every file, concurrently up to ``RAG_INGEST_CONCURRENCY``.
+
+        Each document costs two model calls (parse + graph extraction) and writes
+        nothing, so concurrency here cannot corrupt a store - all writes happen
+        later in the sequential commit. ``TaskGroup`` cancels the siblings when one
+        document fails instead of leaving them running against a doomed batch.
+        """
+        concurrency = _ingest_concurrency()
+
+        async def prepare(file_path: Path) -> tuple[str, PreparedDocument | None]:
+            doc_id = self._stable_doc_id(
+                self._resolve_source_path(file_path, source_path_overrides), kb_id
+            )
+            with self.tracing_manager.span(
+                "ingestion.file", {"ingestion.file_path": str(file_path)}
+            ):
+                prepared = await self._prepare_document(
+                    file_path,
+                    kb_id=kb_id,
+                    source_path_overrides=source_path_overrides,
+                    force=force,
+                )
+            return doc_id, prepared
+
+        if concurrency <= 1 or len(files) <= 1:
+            return [await prepare(file_path) for file_path in files]
+
+        semaphore = asyncio.Semaphore(concurrency)
+
+        async def bounded(file_path: Path) -> tuple[str, PreparedDocument | None]:
+            async with semaphore:
+                return await prepare(file_path)
+
+        async with asyncio.TaskGroup() as group:
+            tasks = [group.create_task(bounded(file_path)) for file_path in files]
+        return [task.result() for task in tasks]
 
     async def _prepare_document(
         self,
@@ -1298,6 +1337,20 @@ def _strict_bool_env(name: str, default: str) -> bool:
     raise ConfigurationError(
         f"{name} must be a boolean (true/false), got {raw!r}"
     )
+
+
+def _ingest_concurrency() -> int:
+    """How many documents to prepare at once (each is two gateway round trips)."""
+    raw = os.getenv("RAG_INGEST_CONCURRENCY", "4")
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise ConfigurationError(
+            f"RAG_INGEST_CONCURRENCY must be an integer, got {raw!r}"
+        ) from exc
+    if value < 1:
+        raise ConfigurationError(f"RAG_INGEST_CONCURRENCY must be >= 1, got {value}")
+    return value
 
 
 def _parse_cache_enabled() -> bool:

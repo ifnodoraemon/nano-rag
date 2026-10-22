@@ -18,6 +18,8 @@ x-app-env: &app-env
   RAG_RESULT_BACKEND: ${RAG_RESULT_BACKEND:-redis://redis:6379/1}
   RAG_GRAPH_BACKEND: ${RAG_GRAPH_BACKEND:-postgres}
   RAG_INGEST_EXECUTOR: ${RAG_INGEST_EXECUTOR:-celery}
+  # Documents prepared at once during ingest (each is two model round trips).
+  RAG_INGEST_CONCURRENCY: ${RAG_INGEST_CONCURRENCY:-4}
   # proxy 变量：容器内访问外网用，留空即直连
   HTTP_PROXY: ${HTTP_PROXY:-}
   HTTPS_PROXY: ${HTTPS_PROXY:-}
