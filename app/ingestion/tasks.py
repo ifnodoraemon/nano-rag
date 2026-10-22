@@ -52,6 +52,7 @@ async def _run_job(
     paths: list[str],
     kb_id: str,
     source_path_overrides: dict[str, str],
+    force: bool = False,
 ) -> None:
     configure_logging()
     container = AppContainer.from_env()
@@ -62,6 +63,7 @@ async def _run_job(
             paths,
             kb_id,
             source_path_overrides,
+            force=force,
         )
     finally:
         await container.close()
@@ -87,8 +89,11 @@ if celery_app is not None:
         paths: list[str],
         kb_id: str,
         source_path_overrides: dict[str, str] | None = None,
+        force: bool = False,
     ) -> None:
-        asyncio.run(_run_job(job_id, paths, kb_id, source_path_overrides or {}))
+        asyncio.run(
+            _run_job(job_id, paths, kb_id, source_path_overrides or {}, force=force)
+        )
 
 else:
 

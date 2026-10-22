@@ -498,6 +498,7 @@ async def rag_ingest(
         job_id=job.job_id,
         paths=[payload.path],
         kb_id=payload.kb_id,
+        force=payload.force,
     )
     return BusinessIngestResponse(
         status=job.status.value,

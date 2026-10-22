@@ -15,9 +15,11 @@ async def run_ingest_paths(
     paths: Sequence[str],
     kb_id: str,
     source_path_overrides: dict[str, str] | None = None,
+    force: bool = False,
 ) -> None:
     documents = 0
     chunks = 0
+    unchanged = 0
     try:
         container.ingest_job_store.mark_running(job_id, stage="ingesting")
         for index, path in enumerate(paths):
@@ -30,13 +32,16 @@ async def run_ingest_paths(
                 path,
                 kb_id=kb_id,
                 source_path_overrides=source_path_overrides,
+                force=force,
             )
             documents += response.documents
             chunks += response.chunks
+            unchanged += len(response.unchanged_doc_ids)
         container.ingest_job_store.mark_completed(
             job_id,
             documents=documents,
             chunks=chunks,
+            unchanged_documents=unchanged,
         )
     except Exception as exc:
         container.ingest_job_store.mark_failed(
@@ -64,11 +69,14 @@ def submit_ingest_paths(
     paths: Sequence[str],
     kb_id: str,
     source_path_overrides: dict[str, str] | None = None,
+    force: bool = False,
 ) -> None:
     if os.getenv("RAG_INGEST_EXECUTOR", "background").lower() == "celery":
         from app.ingestion.tasks import ingest_paths_task
 
-        ingest_paths_task.delay(job_id, list(paths), kb_id, source_path_overrides or {})
+        ingest_paths_task.delay(
+            job_id, list(paths), kb_id, source_path_overrides or {}, force
+        )
         return
 
     background_tasks.add_task(
@@ -78,6 +86,7 @@ def submit_ingest_paths(
         list(paths),
         kb_id,
         source_path_overrides,
+        force,
     )
 
 
@@ -87,6 +96,7 @@ async def _run_ingest_paths_background(
     paths: Sequence[str],
     kb_id: str,
     source_path_overrides: dict[str, str] | None = None,
+    force: bool = False,
 ) -> None:
     """Background-task wrapper that contains the failure.
 
@@ -102,6 +112,7 @@ async def _run_ingest_paths_background(
             paths,
             kb_id,
             source_path_overrides,
+            force=force,
         )
     except Exception:  # noqa: BLE001 - already recorded on the job
         logger.exception("background ingest job %s failed", job_id)

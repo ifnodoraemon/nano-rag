@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from app.core.exceptions import ParsingError
+from app.ingestion.parse_cache import ParseCache
 from app.ingestion.parser_registry import parse_content
 from app.model_client.document_parser import DocumentParserClient
 from app.schemas.structured import (
@@ -48,8 +49,9 @@ class StructuredDocumentParser:
         doc_id: str,
         kb_id: str,
         source_path: str,
+        cache: ParseCache | None = None,
     ) -> StructuredDocument:
-        parsed = await parse_content(path, self.document_parser)
+        parsed = await parse_content(path, self.document_parser, cache)
         text = parsed.text
         blocks = await asyncio.to_thread(self._parse_markdown_blocks, text)
         parser_name = parsed.parser_name
@@ -64,7 +66,7 @@ class StructuredDocumentParser:
             node_type=NodeType.ROOT,
             title=path.stem,
             provenance=NodeProvenance(source_document_id=doc_id),
-            metadata={"parser": parser_name},
+            metadata={"parser": parser_name, **parsed.metadata},
         )
         stack: list[tuple[int, DocumentNode]] = [(0, root)]
         leaf_index = 0
@@ -106,7 +108,7 @@ class StructuredDocumentParser:
             source_path=source_path,
             title=path.stem,
             root=root,
-            metadata={"parser": parser_name},
+            metadata={"parser": parser_name, **parsed.metadata},
         )
 
     def _build_node(

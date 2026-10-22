@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from app.core.exceptions import ConfigurationError, ParsingError
+from app.ingestion.parse_cache import ParseCache, content_hash
 from app.ingestion.suffixes import INLINE_TEXT_SUFFIXES, SUPPORTED_SUFFIXES
 from app.ingestion.text_reader import read_inline_text
 from app.utils.text import parse_bool_env
@@ -82,8 +83,14 @@ def require_document_parser(
 async def parse_content(
     path: Path,
     document_parser: DocumentParserClient | None = None,
+    cache: ParseCache | None = None,
 ) -> ParsedContent:
-    """Parse one file into Markdown using the multimodal document parser."""
+    """Parse one file into Markdown using the multimodal document parser.
+
+    With a cache, identical bytes parsed under the same configuration are reused
+    instead of calling the model again; ``metadata["parse_cache"]`` records which
+    happened so a hit is never invisible.
+    """
     suffix = path.suffix.lower()
     if suffix not in SUPPORTED_SUFFIXES:
         raise ParsingError(f"Unsupported file type: {path.suffix}")
@@ -95,6 +102,16 @@ async def parse_content(
             "parser; check DOCUMENT_PARSER_PROVIDER and the model's capabilities."
         )
 
+    digest = content_hash(path) if cache and cache.enabled else ""
+    if cache and cache.enabled:
+        cached = cache.get(digest)
+        if cached is not None:
+            return ParsedContent(
+                text=cached.text,
+                parser_name=cached.parser_name,
+                metadata={"parse_cache": "hit", "content_hash": digest},
+            )
+
     text = await parser.parse_file(path)
     if not text.strip():
         raise ParsingError(f"Document parser returned empty content for {path.name}")
@@ -102,4 +119,13 @@ async def parse_content(
     parser_name = "multimodal-llm-tree"
     if suffix in INLINE_TEXT_SUFFIXES:
         parser_name = "multimodal-llm-inline-text"
-    return ParsedContent(text=text, parser_name=parser_name)
+    if cache and cache.enabled:
+        cache.put(digest, text=text, parser_name=parser_name)
+    return ParsedContent(
+        text=text,
+        parser_name=parser_name,
+        metadata={
+            "parse_cache": "miss" if cache and cache.enabled else "disabled",
+            "content_hash": digest,
+        },
+    )

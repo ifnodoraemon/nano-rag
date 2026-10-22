@@ -17,12 +17,13 @@ from uuid import uuid4
 
 from app.ingestion.dedup import find_duplicates_for_content, remove_document_everywhere
 from app.ingestion.loader import discover_files
+from app.ingestion.parse_cache import ParseCache, build_fingerprint, content_hash
 from app.ingestion.metadata import build_source_key, extract_document_metadata
 from app.ingestion.graph_extractor import GraphExtractor
 from app.wiki.compiler import WikiCompiler
 from app.wiki.search import WikiSearcher
 from app.ingestion.structured_parser import StructuredDocumentParser
-from app.core.exceptions import ConfigurationError, ParsingError
+from app.core.exceptions import ConfigurationError, ParsingError, StoreError
 from app.model_client.document_parser import DocumentParserClient
 from app.model_client.generation import GenerationClient
 
@@ -127,6 +128,17 @@ class IngestionPipeline:
         self.wiki_searcher = wiki_searcher
         self.structured_parser = StructuredDocumentParser(document_parser)
         self.graph_extractor = GraphExtractor(generation_client)
+        chunk_settings = config.settings.get("chunk", {}) or {}
+        self.parse_cache = ParseCache(
+            config.parsed_dir,
+            build_fingerprint(
+                parser_provider=getattr(document_parser, "provider", None),
+                parser_model=getattr(document_parser, "alias", None),
+                chunk_size=chunk_settings.get("size"),
+                chunk_overlap=chunk_settings.get("overlap"),
+            ),
+            enabled=_parse_cache_enabled(),
+        )
 
 
     async def run(
@@ -134,6 +146,7 @@ class IngestionPipeline:
         path: str,
         kb_id: str = "default",
         source_path_overrides: dict[str, str] | None = None,
+        force: bool = False,
     ) -> IngestResponse:
         with self.tracing_manager.span(
             "ingestion.run",
@@ -147,6 +160,7 @@ class IngestionPipeline:
             chunk_count = 0
             doc_count = 0
             prepared_documents: list[PreparedDocument] = []
+            unchanged_doc_ids: list[str] = []
 
             for file_path in files:
                 with self.tracing_manager.span(
@@ -156,7 +170,18 @@ class IngestionPipeline:
                         file_path,
                         kb_id=kb_id,
                         source_path_overrides=source_path_overrides,
+                        force=force,
                     )
+                    if prepared is None:
+                        # Reported, never silent: the caller must be able to tell
+                        # "nothing needed doing" from "nothing was found".
+                        unchanged_doc_ids.append(
+                            self._stable_doc_id(
+                                self._resolve_source_path(file_path, source_path_overrides),
+                                kb_id,
+                            )
+                        )
+                        continue
                     prepared_documents.append(prepared)
                     doc_count += 1
                     chunk_count += len(prepared.chunks)
@@ -222,10 +247,17 @@ class IngestionPipeline:
                     len(superseded),
                     ", ".join(superseded),
                 )
+            if unchanged_doc_ids:
+                logger.info(
+                    "ingest skipped %d unchanged document(s): %s",
+                    len(unchanged_doc_ids),
+                    ", ".join(unchanged_doc_ids[:10]),
+                )
             return IngestResponse(
                 documents=doc_count,
                 chunks=chunk_count,
                 superseded_doc_ids=superseded,
+                unchanged_doc_ids=unchanged_doc_ids,
             )
 
     async def _supersede_same_content(
@@ -309,10 +341,20 @@ class IngestionPipeline:
         file_path: Path,
         kb_id: str,
         source_path_overrides: dict[str, str] | None = None,
-    ) -> PreparedDocument:
+        *,
+        force: bool = False,
+    ) -> PreparedDocument | None:
         source_path = self._resolve_source_path(file_path, source_path_overrides)
         doc_id = self._stable_doc_id(source_path, kb_id)
         suffix = file_path.suffix.lower()
+        if not force and await asyncio.to_thread(
+            self._artifact_matches_source, doc_id, file_path
+        ):
+            # Byte-identical to what is already committed under this path, and the
+            # parse/chunk configuration has not changed: re-parsing would spend a
+            # model call (and a graph-extraction call) to reproduce the artifact
+            # that is already on disk.
+            return None
         if suffix in MEDIA_SUFFIXES:
             return await self._prepare_media_document(
                 file_path=file_path,
@@ -325,6 +367,7 @@ class IngestionPipeline:
             doc_id=doc_id,
             kb_id=kb_id,
             source_path=source_path,
+            cache=self.parse_cache,
         )
         structured_document.graph = await self.graph_extractor.extract(structured_document)
         structured_document.metadata["graph_extraction"] = {"status": "ok"}
@@ -1068,6 +1111,45 @@ class IngestionPipeline:
         digest = hashlib.sha256(identity.encode("utf-8")).hexdigest()
         return f"doc-{digest[:24]}"
 
+    def _artifact_matches_source(self, doc_id: str, file_path: Path) -> bool:
+        """True when the committed artifact already reflects these exact bytes.
+
+        Deliberately strict: the artifact must exist, be readable, record the same
+        content hash, the same ingest fingerprint and a non-empty chunk list. Any
+        doubt falls through to a real re-ingest, so this can only ever save work -
+        never serve a stale or empty document.
+        """
+        artifact_path = self.config.parsed_dir / f"{doc_id}.json"
+        if not artifact_path.exists():
+            return False
+        try:
+            artifact = json.loads(artifact_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            # A corrupt artifact is a real problem, but not one this check should
+            # report: fall through and let the ingest rewrite it.
+            return False
+        if not isinstance(artifact, dict):
+            return False
+        if artifact.get("ingest_fingerprint") != self.parse_cache.fingerprint:
+            return False
+        chunks = artifact.get("chunks")
+        if not isinstance(chunks, list) or not chunks:
+            return False
+        document = artifact.get("document")
+        if not isinstance(document, dict):
+            return False
+        metadata = document.get("metadata")
+        if not isinstance(metadata, dict):
+            return False
+        recorded = metadata.get("source_content_hash")
+        if not isinstance(recorded, str) or not recorded:
+            return False
+        try:
+            current = content_hash(file_path)
+        except StoreError:
+            return False
+        return recorded == current
+
     def _stage_parsed_artifact(
         self,
         document: Document,
@@ -1080,6 +1162,9 @@ class IngestionPipeline:
             "structured_document": (
                 structured_document.model_dump() if structured_document else None
             ),
+            # What produced this artifact. A later ingest compares it to decide
+            # whether re-parsing could even change anything.
+            "ingest_fingerprint": self.parse_cache.fingerprint,
         }
         target = self.config.parsed_dir / f"{document.doc_id}.json"
         tmp_path = target.with_name(f".{target.name}.{uuid4().hex}.tmp")
@@ -1213,6 +1298,10 @@ def _strict_bool_env(name: str, default: str) -> bool:
     raise ConfigurationError(
         f"{name} must be a boolean (true/false), got {raw!r}"
     )
+
+
+def _parse_cache_enabled() -> bool:
+    return _strict_bool_env("RAG_PARSE_CACHE_ENABLED", "true")
 
 
 def _document_attachment_index_enabled() -> bool:

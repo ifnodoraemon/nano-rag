@@ -57,6 +57,9 @@ class BusinessRetrieveResponse(BaseModel):
 class BusinessIngestRequest(BaseModel):
     path: str
     kb_id: str = "default"
+    # Re-parse even when the committed artifact already matches the file: used to
+    # rebuild deliberately, never for routine re-ingest.
+    force: bool = False
 
     @field_validator("path")
     @classmethod
@@ -74,6 +77,7 @@ class BusinessIngestResponse(BaseModel):
     stage: str | None = None
     documents: int = 0
     chunks: int = 0
+    unchanged_documents: int = 0
     source: str = "path"
     uploaded_files: list[str] = Field(default_factory=list)
     error: str | None = None
@@ -88,6 +92,8 @@ class BusinessIngestJobResponse(BaseModel):
     stage: str
     documents: int = 0
     chunks: int = 0
+    # Files skipped because nothing changed since the committed artifact.
+    unchanged_documents: int = 0
     uploaded_files: list[str] = Field(default_factory=list)
     error: str | None = None
     submitted_at: float

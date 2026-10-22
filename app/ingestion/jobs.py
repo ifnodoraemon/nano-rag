@@ -37,6 +37,9 @@ class IngestJobRecord(BaseModel):
     stage: str = "queued"
     documents: int = 0
     chunks: int = 0
+    # Files skipped because their committed artifact already matched the source
+    # byte for byte under the same parse configuration (nothing was re-parsed).
+    unchanged_documents: int = 0
     uploaded_files: list[str] = Field(default_factory=list)
     error: str | None = None
     submitted_at: float = Field(default_factory=time)
@@ -158,13 +161,14 @@ class IngestJobStore:
         return reaped
 
     def mark_completed(
-        self, job_id: str, *, documents: int, chunks: int
+        self, job_id: str, *, documents: int, chunks: int, unchanged_documents: int = 0
     ) -> IngestJobRecord:
         record = self._require(job_id)
         record.status = IngestJobStatus.COMPLETED
         record.stage = "completed"
         record.documents = documents
         record.chunks = chunks
+        record.unchanged_documents = unchanged_documents
         record.completed_at = time()
         record.error = None
         self.save(record)

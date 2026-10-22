@@ -50,6 +50,8 @@ scripts/        # run_eval.py, run_benchmark.py, live_smoke.py
 
 Document -> multimodal model parser (only parsing path) -> normalizer -> chunker -> metadata -> committed parsed artifact + PostgreSQL graph rows + wiki discovery page
 
+Ingest is incremental by content, not by timestamp. A file whose committed artifact already records the same SHA-256 and the same ingest fingerprint (parser provider/model + chunk configuration + artifact schema) is skipped without parsing or re-indexing, and reported in `unchanged_doc_ids` (job field `unchanged_documents`) so a skip is never confusable with "found nothing". `force=true` re-ingests deliberately. Parsed text is also kept in a content-addressed cache (`data/parsed/.parse_cache/<fingerprint>/<hash>.json`), so identical bytes at a *new* path are parsed once too; entries are namespaced by the fingerprint, which makes a parser or chunking change unable to read stale output.
+
 Document identity is content-addressed on ingest: a file that arrives under a new path (upload, rename, reorganized corpus) but whose text equals an existing document in the same KB supersedes it instead of adding a second copy. Duplicates are not cosmetic — each copy takes a discovery slot and splits BM25 scores, which measurably pushes the real answer out of the top-k. Superseded ids are reported on the ingest response; `scripts/dedup_corpus.py` cleans a corpus that already accumulated them.
 
 ### Retrieval (Agentic Discovery) Pipeline
@@ -96,6 +98,7 @@ Do not use non-Docker commands to start the app for runtime validation.
 - `RAG_WIKI_MAX_PAGES_PER_KB` - per-KB source page quota enforced at ingest (default 20000)
 - `GENERATION_MAX_TOKENS` - generation output cap (0 = unset; invalid values fail startup)
 - `RAG_INGEST_JOB_TTL_DAYS` - finished ingest-job record retention (default 7; 0 = keep forever)
+- `RAG_PARSE_CACHE_ENABLED` - content-addressed parse cache (default `true`); off means every file is re-parsed by the model
 - `RAG_API_KEYS` - backend business API keys (single key: nginx injects exactly one; `RAG_ADMIN_API_KEYS` must differ)
 - `RAG_PROXY_API_KEY` - derived from `RAG_API_KEYS` by compose; override only if the browser-facing key must differ
 
