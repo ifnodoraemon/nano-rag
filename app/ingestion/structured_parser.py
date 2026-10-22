@@ -1,14 +1,22 @@
 from __future__ import annotations
 
+import logging
+from typing import TYPE_CHECKING
+
 import asyncio
 import hashlib
 import re
 from dataclasses import dataclass
 from pathlib import Path
 
+logger = logging.getLogger(__name__)
+
 from app.core.exceptions import ParsingError
 from app.ingestion.parse_cache import ParseCache
-from app.ingestion.parser_registry import parse_content
+if TYPE_CHECKING:  # pragma: no cover - typing only
+    from app.ingestion.agentic_parser import AgenticDocumentParser
+
+from app.ingestion.parser_registry import ParsedContent, parse_content
 from app.model_client.document_parser import DocumentParserClient
 from app.schemas.structured import (
     DocumentNode,
@@ -39,8 +47,34 @@ class ParsedBlock:
 
 
 class StructuredDocumentParser:
-    def __init__(self, document_parser: DocumentParserClient | None = None) -> None:
+    def __init__(
+        self,
+        document_parser: DocumentParserClient | None = None,
+        *,
+        agentic_parser: "AgenticDocumentParser | None" = None,
+    ) -> None:
         self.document_parser = document_parser
+        # When set, the document is reconstructed by the model inspecting its parts
+        # (strategy chosen from MEASURED capabilities) instead of one blind conversion.
+        self.agentic_parser = agentic_parser
+
+    async def _parse_text(self, path: Path, cache) -> "ParsedContent":  # noqa: ANN001
+        """Adaptive parse when it can run; the deterministic parser otherwise."""
+        if self.agentic_parser is not None:
+            try:
+                text = await self.agentic_parser.parse(path)
+                return ParsedContent(text=text, parser_name="agentic-document-tree")
+            except ParsingError as exc:
+                # Indeterminate capabilities or a provider that cannot serve this
+                # document: fall back, but never silently - the reason is logged so an
+                # operator can see why the hierarchy may be flatter than expected.
+                logger.warning(
+                    "adaptive parsing unavailable for %s (%s); using the "
+                    "deterministic parser",
+                    path.name,
+                    exc,
+                )
+        return await parse_content(path, self.document_parser, cache)
 
     async def parse(
         self,
@@ -51,7 +85,7 @@ class StructuredDocumentParser:
         source_path: str,
         cache: ParseCache | None = None,
     ) -> StructuredDocument:
-        parsed = await parse_content(path, self.document_parser, cache)
+        parsed = await self._parse_text(path, cache)
         text = parsed.text
         blocks = await asyncio.to_thread(self._parse_markdown_blocks, text)
         parser_name = parsed.parser_name

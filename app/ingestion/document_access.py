@@ -433,6 +433,11 @@ class DocumentAccess:
             f"no part named {part_id!r}; known parts: {known}"
         )
 
+    def document(self, path: str) -> Document:
+        """The parsed-container view of a document (parts text/pixels)."""
+        _resolved, document = self._document(path)
+        return document
+
     def inspect(self, path: str) -> dict[str, Any]:
         _resolved, document = self._document(path)
         return document.manifest()

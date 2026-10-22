@@ -129,7 +129,22 @@ class IngestionPipeline:
         self.graph_store = graph_store
         self.wiki_compiler = wiki_compiler
         self.wiki_searcher = wiki_searcher
-        self.structured_parser = StructuredDocumentParser(document_parser)
+        # Reconstruct documents by letting the model inspect their parts. Enabled by
+        # default: a single blind conversion call loses the heading hierarchy of Chinese
+        # official documents, which carry no Word heading styles at all.
+        self.agentic_parser = None
+        if _strict_bool_env("RAG_AGENTIC_PARSING_ENABLED", "true") and document_parser is not None:
+            from app.ingestion.agentic_parser import AgenticDocumentParser
+            from app.ingestion.document_access import DocumentAccess
+
+            allowed = [config.parsed_dir.parent / "raw", config.upload_dir, Path.cwd()]
+            self.agentic_parser = AgenticDocumentParser(
+                generation_client,
+                DocumentAccess([p for p in allowed if p.exists()]),
+            )
+        self.structured_parser = StructuredDocumentParser(
+            document_parser, agentic_parser=self.agentic_parser
+        )
         self.graph_extractor = GraphExtractor(generation_client)
         self.model_chunking_enabled = _strict_bool_env(
             "RAG_MODEL_CHUNKING_ENABLED", "true"

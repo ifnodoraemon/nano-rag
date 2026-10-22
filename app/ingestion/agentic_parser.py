@@ -20,12 +20,20 @@ text-only, and "an image is at part pg3" would ask the model to imagine the page
 from __future__ import annotations
 
 import json
+import os
 import logging
 import re
+from pathlib import Path
 from typing import Any
+
+from typing import TYPE_CHECKING
 
 from app.core.exceptions import ModelOutputError, ParsingError
 from app.ingestion.document_access import TOOL_SCHEMAS, DocumentAccess
+if TYPE_CHECKING:  # pragma: no cover - typing only
+    from app.ingestion.document_access import Document
+
+from app.model_client.capabilities import ModelCapabilities, probe_capabilities
 from app.model_client.generation import GenerationClient
 
 logger = logging.getLogger(__name__)
@@ -227,3 +235,203 @@ _FENCE_RE = re.compile(r"^\s*```[a-zA-Z]*\s*\n(.*?)\n?```\s*$", re.DOTALL)
 def _strip_fence(text: str) -> str:
     match = _FENCE_RE.match(text)
     return match.group(1) if match else text
+
+
+# --------------------------------------------------------------------- strategy
+
+# Document text per request when the model cannot drive tools. Kept well below the
+# context limit because the OUTPUT is roughly as large as the input (the document is
+# rewritten as Markdown) and a reasoning model also spends tokens deliberating first.
+INLINE_BUDGET_CHARS = 10_000
+# Output budget for one structuring call. This project optimises for quality, not cost.
+STRUCTURE_MAX_TOKENS = 16_000
+
+
+def choose_strategy(
+    document: "Document", capabilities: "ModelCapabilities"
+) -> tuple[str, str]:
+    """Pick a strategy from the DOCUMENT and the MODEL - never from the file format.
+
+    No layer assumes anything: the same code serves a 3 KB notice and a 300-page manual,
+    a model with native tool calling and one without, a model that reads images and one
+    that does not. Returns ``(strategy, reason)`` where strategy is one of
+    ``unsupported`` / ``tool_loop`` / ``inline`` / ``staged``.
+    """
+    text_parts = [part for part in document.parts if part.kind == "text"]
+    image_parts = [part for part in document.parts if part.kind == "image"]
+    total_chars = sum(part.size_hint() for part in text_parts)
+
+    if image_parts and not capabilities.can_read_images:
+        return (
+            "unsupported",
+            f"{len(image_parts)} image part(s) need a vision-capable model; the "
+            "configured model has not been measured as able to read images",
+        )
+    # Tool calling is OPT-IN, not the default. A provider can pass a capability probe
+    # and still degrade at the real prompt: this gateway answered a simple probe with
+    # structured tool_calls, then emitted DSML tool syntax as plain text on the actual
+    # document. Inline/staged does not depend on that protocol at all, so it is the
+    # general baseline; the loop is enabled per deployment once it is known to hold.
+    if capabilities.supports_tools is True and capabilities_allow_tool_loop():
+        return (
+            "tool_loop",
+            "model returns structured tool calls and the tool loop is enabled",
+        )
+    if total_chars <= INLINE_BUDGET_CHARS:
+        return (
+            "inline",
+            f"no native tool calling; {total_chars} chars fit in one request",
+        )
+    return (
+        "staged",
+        f"no native tool calling and {total_chars} chars exceed one request; "
+        "the document is structured piece by piece",
+    )
+
+
+async def parse_adaptive(
+    path_str: str,
+    generation_client: GenerationClient,
+    access: "DocumentAccess",
+    capabilities: "ModelCapabilities",
+) -> str:
+    """Parse using whatever the document and the model together allow."""
+    document = access.document(path_str)
+    strategy, reason = choose_strategy(document, capabilities)
+    logger.info("parse strategy for %s: %s (%s)", path_str, strategy, reason)
+
+    if strategy == "unsupported":
+        raise ParsingError(f"cannot parse {path_str}: {reason}")
+    if strategy == "tool_loop":
+        return await parse_document(path_str, generation_client, access)
+    if strategy == "inline":
+        return await _parse_inline(document, generation_client, path_str)
+    return await _parse_staged(document, generation_client, path_str)
+
+
+async def _parse_inline(
+    document: "Document", generation_client: GenerationClient, path_str: str
+) -> str:
+    """One request carrying every text part - for a model without tool calling."""
+    blocks = [
+        f"--- part {part.part_id} ({part.label}) ---\n{part.text or ''}"
+        for part in document.parts
+        if part.kind == "text"
+    ]
+    return await _structure_text(generation_client, "\n\n".join(blocks), path_str)
+
+
+async def _parse_staged(
+    document: "Document", generation_client: GenerationClient, path_str: str
+) -> str:
+    """Structure the document piece by piece when it cannot fit in one request."""
+    partials: list[str] = []
+    for part in document.parts:
+        if part.kind != "text":
+            continue
+        text = part.text or ""
+        slices = max(1, -(-len(text) // INLINE_BUDGET_CHARS))
+        for index in range(slices):
+            window = text[index * INLINE_BUDGET_CHARS : (index + 1) * INLINE_BUDGET_CHARS]
+            partials.append(
+                await _structure_text(
+                    generation_client,
+                    window,
+                    f"{path_str} (part {part.part_id}, slice {index + 1}/{slices})",
+                )
+            )
+    combined = "\n\n".join(partials)
+    if len(combined) <= INLINE_BUDGET_CHARS:
+        return await _structure_text(generation_client, combined, path_str)
+    # Refuse to silently truncate: a document too large to unify keeps its parts.
+    logger.warning(
+        "%s is too large to unify in one request (%d chars); returning the per-part "
+        "structure",
+        path_str,
+        len(combined),
+    )
+    return combined
+
+
+async def _structure_text(
+    generation_client: GenerationClient, text: str, source_label: str
+) -> str:
+    """Ask for Markdown with true heading depth over the text supplied."""
+    prompt = (
+        f"Reconstruct the structure of this document: {source_label}\n\n"
+        "Return Markdown. Headings at their true depth (# title, ## first section "
+        "level, ### next). Body text verbatim - do not paraphrase, summarise, reorder, "
+        "merge or drop anything. Tables as Markdown tables. Chinese official documents "
+        "often express hierarchy only through numbering inside the text (一、/（一）/1.) "
+        "- judge the depth from the content and numbering as a careful editor would.\n\n"
+        f"--- document ---\n{text}\n--- end ---"
+    )
+    data = await generation_client.generate(
+        [{"role": "user", "content": prompt}],
+        temperature=0,
+        max_tokens=STRUCTURE_MAX_TOKENS,
+    )
+    content = str(data.get("content") or "").strip()
+    if not content:
+        raise ModelOutputError(
+            f"the document parser returned nothing for {source_label}"
+        )
+    return _strip_fence(content)
+
+
+def capabilities_allow_tool_loop() -> bool:
+    """Whether the tool-driven strategy may be used.
+
+    Off by default: measured providers can pass a capability probe and still emit tool
+    syntax as text at the real prompt, and a strategy that depends on a protocol the
+    provider only sometimes honours is not a general strategy.
+    """
+    return os.getenv("RAG_AGENTIC_TOOL_LOOP_ENABLED", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
+class AgenticDocumentParser:
+    """Ingest-facing wrapper: probe capabilities once, parse every document adaptively."""
+
+    def __init__(
+        self,
+        generation_client: GenerationClient,
+        access: "DocumentAccess",
+        *,
+        probe_vision: bool = True,
+        probe_tools: bool = True,
+    ) -> None:
+        self.generation_client = generation_client
+        self.access = access
+        self._probe_vision = probe_vision
+        self._probe_tools = probe_tools
+        self._capabilities: "ModelCapabilities | None" = None
+
+    async def capabilities(self) -> "ModelCapabilities":
+        if self._capabilities is None:
+            self._capabilities = await probe_capabilities(
+                self.generation_client,
+                vision=self._probe_vision,
+                tools=self._probe_tools,
+            )
+        return self._capabilities
+
+    async def parse(self, path: Path) -> str:
+        """Parse adaptively, or raise ``ParsingError`` when no strategy can apply.
+
+        Indeterminate capabilities make every downstream choice a guess, so the caller
+        is told and falls back to the deterministic parser instead of guessing.
+        """
+        capabilities = await self.capabilities()
+        if capabilities.supports_tools is None and capabilities.supports_vision is None:
+            raise ParsingError(
+                "model capabilities could not be determined, so adaptive parsing "
+                "cannot choose a strategy"
+            )
+        return await parse_adaptive(
+            str(path), self.generation_client, self.access, capabilities
+        )
