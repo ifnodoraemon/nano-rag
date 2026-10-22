@@ -106,6 +106,16 @@ class GenerationClient(GatewayClient):
             # its own failure: downstream this looks like "model returned no
             # JSON", which sends operators chasing the wrong problem.
             reasoning = str(message.get("reasoning_content") or "")
+            if finish_reason == "content_filter":
+                # Nothing to raise the token budget for: the provider refused the
+                # content itself. Saying "raise GENERATION_MAX_TOKENS" here sent
+                # operators chasing a budget problem that does not exist.
+                raise ModelGatewayError(
+                    "generation provider blocked the content "
+                    f"(finish_reason='content_filter', model={model_alias or self.alias}). "
+                    "The document or query was refused by the provider's safety "
+                    "filter, not truncated by the token budget."
+                )
             raise ModelGatewayError(
                 "generation provider returned empty content for model "
                 f"{model_alias or self.alias} (finish_reason={finish_reason!r}, "

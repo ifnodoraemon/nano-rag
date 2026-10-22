@@ -19,10 +19,13 @@ It never calls a model, so it is cheap, reproducible, and usable as a gate.
 from __future__ import annotations
 
 import asyncio
+import logging
 import math
 
 from dataclasses import dataclass, field
 from typing import Awaitable, Callable
+
+logger = logging.getLogger(__name__)
 
 from app.core.exceptions import StoreError
 
@@ -249,6 +252,7 @@ class _RowScore:
     recall_at_k: dict[str, float] = field(default_factory=dict)
     hit_at_k: dict[str, float] = field(default_factory=dict)
     ndcg_at_k: dict[str, float] = field(default_factory=dict)
+    error: str | None = None
     # How clearly the right document beat the best wrong one. Recall cannot see
     # this: two configurations can both rank the answer first while one leaves
     # the runner-up almost tied (which is one query wording away from a miss).
@@ -327,6 +331,28 @@ async def evaluate_retrieval(
     if not ordered_cutoffs:
         raise StoreError("retrieval evaluation needs at least one positive cutoff")
 
+    async def _score_or_record_error(
+        record: RetrievalRecord, cutoffs: tuple[int, ...]
+    ) -> _RowScore:
+        """Score one row, recording a failure instead of aborting the batch.
+
+        One query whose content the provider's safety filter blocks used to abort
+        an entire 200-query benchmark, discarding every result. A benchmark is a
+        measurement tool: a row that could not be evaluated is reported as an
+        error row and counted, while the serving path stays fail-loud.
+        """
+        try:
+            documents = await discover(record)
+        except Exception as exc:  # noqa: BLE001 - recorded per row, never hidden
+            logger.error("retrieval eval row %s failed: %s", record.sample_id, exc)
+            row = _RowScore(record=record, error=f"{type(exc).__name__}: {exc}")
+            for cutoff in cutoffs:
+                row.recall_at_k[str(cutoff)] = 0.0
+                row.hit_at_k[str(cutoff)] = 0.0
+                row.ndcg_at_k[str(cutoff)] = 0.0
+            return row
+        return _score_row(record, documents, cutoffs)
+
     # Discovery is I/O-bound (BM25 is fast, but query expansion and reranking are
     # model round trips), so evaluating a dataset sequentially spends almost all of
     # its wall time waiting. Bounded concurrency keeps the gateway load predictable
@@ -334,17 +360,13 @@ async def evaluate_retrieval(
     # collected by input index, so the report is identical to a serial run.
     concurrency = max(1, concurrency)
     if concurrency == 1 or len(records) == 1:
-        rows = [
-            _score_row(record, await discover(record), ordered_cutoffs)
-            for record in records
-        ]
+        rows = [await _score_or_record_error(record, ordered_cutoffs) for record in records]
     else:
         semaphore = asyncio.Semaphore(concurrency)
 
         async def score(record: RetrievalRecord) -> _RowScore:
             async with semaphore:
-                documents = await discover(record)
-            return _score_row(record, documents, ordered_cutoffs)
+                return await _score_or_record_error(record, ordered_cutoffs)
 
         rows = list(
             await asyncio.gather(*(score(record) for record in records))
@@ -375,6 +397,9 @@ async def evaluate_retrieval(
         "rows_without_scored_relevant": sum(
             1 for row in rows if row.separation_margin is None
         ),
+        # Rows the harness could not evaluate at all (provider refusal, gateway
+        # error). Counted so a partially failed run cannot look like a clean one.
+        "errored_records": sum(1 for row in rows if row.error is not None),
     }
     for cutoff in ordered_cutoffs:
         key = str(cutoff)
@@ -415,6 +440,7 @@ async def evaluate_retrieval(
                 "ranking": row.ranking,
                 "separation_margin": row.separation_margin,
                 "separation_ratio": row.separation_ratio,
+                "error": row.error,
             }
             for row in rows
         ],
