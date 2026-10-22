@@ -84,6 +84,15 @@ def main() -> int:
         ),
     )
     parser.add_argument(
+        "--concurrency",
+        type=int,
+        default=None,
+        help=(
+            "dataset rows evaluated in parallel (default RAG_EVAL_CONCURRENCY or 8). "
+            "Rows are independent; results keep input order."
+        ),
+    )
+    parser.add_argument(
         "--mode",
         choices=("deterministic", "deepeval"),
         default=None,
@@ -119,7 +128,9 @@ def main() -> int:
         from app.eval.deepeval_runner import DeepevalRunner
         runner = DeepevalRunner(generation_client=container.generation_client)
         
-    evaluated_records = asyncio.run(materialize_eval_records(container, dataset))
+    evaluated_records = asyncio.run(
+        materialize_eval_records(container, dataset, concurrency=args.concurrency)
+    )
     deterministic_only = args.no_ragas_lib or args.mode == "deterministic"
     report = (
         runner.run(evaluated_records)

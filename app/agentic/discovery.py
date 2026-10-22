@@ -23,6 +23,7 @@ from app.retrieval.versioning import version_sort_key
 from app.schemas.chat import ChatRequest
 from app.schemas.chunk import Chunk
 from app.retrieval.hits import SearchHit
+from app.agentic.llm_rerank import RerankDocument, rerank_documents
 from app.agentic.query_expansion import expand_query, fuse_rankings
 from app.utils.coerce import as_dict, as_list, as_str, as_str_list
 from app.utils.json_utils import parse_json_object
@@ -117,6 +118,11 @@ class AgenticDiscovery:
         self.query_expansion_variants = _positive_int(
             "RAG_QUERY_EXPANSION_VARIANTS", 3
         )
+        # Reorder the first-hop candidates with the SAME generation model: no
+        # separate reranker is introduced. Off by default until a measurement on
+        # the deployment's own corpus justifies the extra call per query.
+        self.llm_rerank_enabled = _flag("RAG_LLM_RERANK_ENABLED", False)
+        self.llm_rerank_top_n = _positive_int("RAG_LLM_RERANK_TOP_N", 10)
 
     async def discovery_candidates(
         self,
@@ -133,6 +139,8 @@ class AgenticDiscovery:
         """
         discovered = await self._discover(query, kb_id, filters)
         candidates, version_filter = self._select_versions(discovered)
+        if self.llm_rerank_enabled:
+            candidates = await self._rerank(query, candidates)
         return DiscoveryCandidates(
             discovered=discovered,
             candidates=candidates,
@@ -293,6 +301,46 @@ class AgenticDiscovery:
                 SearchHit(chunk=hit.chunk, score=score)
             )
         return merged[:fetch_k]
+
+    async def _rerank(self, query: str, hits: list[SearchHit]) -> list[SearchHit]:
+        """Reorder candidates by model judgement, keeping every candidate.
+
+        Runs after the version filter so stale versions never consume rerank
+        attention, and before the read plan chooses what to read - the plan can
+        only work with the order it is given.
+        """
+        if len(hits) <= 1:
+            return hits
+        by_doc_id = {hit.chunk.doc_id: hit for hit in hits}
+        documents = [
+            RerankDocument(
+                doc_id=hit.chunk.doc_id,
+                title=str(hit.chunk.title or ""),
+                text=str(hit.chunk.text or ""),
+            )
+            for hit in hits
+        ]
+        with self.tracing_manager.span("agent.llm_rerank", {"agent.query": query}):
+            ordered_ids = await rerank_documents(
+                query,
+                documents,
+                self.generation_client,
+                top_n=self.llm_rerank_top_n,
+            )
+        reordered: list[SearchHit] = []
+        seen: set[str] = set()
+        for doc_id in ordered_ids:
+            hit = by_doc_id.get(doc_id)
+            if hit is None or doc_id in seen:
+                continue
+            seen.add(doc_id)
+            reordered.append(hit)
+        # Defensive: the rerank must be a permutation of what it was given, but a
+        # candidate must never disappear from the pool because of an ordering step.
+        for hit in hits:
+            if hit.chunk.doc_id not in seen:
+                reordered.append(hit)
+        return reordered
 
     def _select_versions(
         self, discovered: list[SearchHit]

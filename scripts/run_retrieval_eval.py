@@ -23,6 +23,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import logging
+import os
 import sys
 from pathlib import Path
 
@@ -93,6 +94,12 @@ def _build_parser() -> argparse.ArgumentParser:
         metavar="CUTOFF=THRESHOLD",
         help="fail when nDCG@cutoff is below threshold (repeatable)",
     )
+    parser.add_argument(
+        "--concurrency",
+        type=int,
+        default=int(os.getenv("RAG_EVAL_CONCURRENCY", "8")),
+        help="records evaluated in parallel (default 8; model calls are I/O-bound)",
+    )
     parser.add_argument("--min-mrr", type=float, default=None, help="gate on MRR")
     return parser
 
@@ -133,7 +140,9 @@ async def _run(args: argparse.Namespace) -> int:
             )
             return [_document_from_hit(hit) for hit in staged.candidates]
 
-        report = await evaluate_retrieval(discover, records, cutoffs)
+        report = await evaluate_retrieval(
+        discover, records, cutoffs, concurrency=args.concurrency
+    )
     finally:
         await container.close()
 

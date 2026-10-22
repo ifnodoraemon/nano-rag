@@ -18,6 +18,7 @@ It never calls a model, so it is cheap, reproducible, and usable as a gate.
 
 from __future__ import annotations
 
+import asyncio
 import math
 
 from dataclasses import dataclass, field
@@ -312,6 +313,7 @@ async def evaluate_retrieval(
     discover: Discover,
     records: list[RetrievalRecord],
     cutoffs: tuple[int, ...] = DEFAULT_CUTOFFS,
+    concurrency: int = 1,
 ) -> dict[str, object]:
     """Score the discovery stage over a dataset.
 
@@ -325,10 +327,28 @@ async def evaluate_retrieval(
     if not ordered_cutoffs:
         raise StoreError("retrieval evaluation needs at least one positive cutoff")
 
-    rows: list[_RowScore] = []
-    for record in records:
-        documents = await discover(record)
-        rows.append(_score_row(record, documents, ordered_cutoffs))
+    # Discovery is I/O-bound (BM25 is fast, but query expansion and reranking are
+    # model round trips), so evaluating a dataset sequentially spends almost all of
+    # its wall time waiting. Bounded concurrency keeps the gateway load predictable
+    # while cutting a 200-query run from tens of minutes to a couple. Results are
+    # collected by input index, so the report is identical to a serial run.
+    concurrency = max(1, concurrency)
+    if concurrency == 1 or len(records) == 1:
+        rows = [
+            _score_row(record, await discover(record), ordered_cutoffs)
+            for record in records
+        ]
+    else:
+        semaphore = asyncio.Semaphore(concurrency)
+
+        async def score(record: RetrievalRecord) -> _RowScore:
+            async with semaphore:
+                documents = await discover(record)
+            return _score_row(record, documents, ordered_cutoffs)
+
+        rows = list(
+            await asyncio.gather(*(score(record) for record in records))
+        )
 
     aggregate: dict[str, object] = {
         "mrr": round(

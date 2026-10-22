@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import asyncio
+import os
+
 from typing import TYPE_CHECKING
 
 from app.schemas.chat import ChatRequest
@@ -107,123 +110,154 @@ def _claim_verification_stats(claims: object) -> dict[str, object]:
 
 
 async def materialize_eval_records(
-    container: AppContainer, records: list[dict]
+    container: AppContainer, records: list[dict], *, concurrency: int | None = None
 ) -> list[dict]:
-    prepared_records: list[dict] = []
-    for index, record in enumerate(records):
-        logger.info(f"Materializing record {index+1}/{len(records)}: {record.get('query')}")
-        prepared = dict(record)
-        prepared.setdefault("sample_id", f"sample-{index + 1}")
-        query = str(prepared.get("query", "")).strip()
-        top_k = prepared.get("top_k")
-        kb_id = str(prepared.get("kb_id", "default") or "default")
-        session_id = prepared.get("session_id")
-        answer = str(prepared.get("answer", "")).strip()
-        retrieved_contexts = prepared.get("retrieved_contexts", []) or []
-        conflicting_context_count = int(prepared.get("conflicting_context_count", 0) or 0)
-        conflict_claim_count = int(prepared.get("conflict_claim_count", 0) or 0)
-        insufficiency_claim_count = int(
-            prepared.get("insufficiency_claim_count", 0) or 0
+    """Run each dataset row through the live pipeline.
+
+    Sequential by construction before this: every row waited for a full retrieval
+    plus synthesis round trip, so a 60-row answer-level evaluation took tens of
+    minutes of pure waiting. The rows are independent, so they are evaluated with
+    bounded concurrency and reassembled in input order.
+    """
+    limit = concurrency if concurrency is not None else _eval_concurrency()
+    if limit <= 1 or len(records) <= 1:
+        return [await _materialize_one(container, index, record) for index, record in enumerate(records)]
+
+    semaphore = asyncio.Semaphore(limit)
+
+    async def bounded(index: int, record: dict) -> dict:
+        async with semaphore:
+            return await _materialize_one(container, index, record)
+
+    return list(
+        await asyncio.gather(
+            *(bounded(index, record) for index, record in enumerate(records))
         )
+    )
+
+
+def _eval_concurrency() -> int:
+    raw = os.getenv("RAG_EVAL_CONCURRENCY", "8")
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise ValueError(f"RAG_EVAL_CONCURRENCY must be an integer, got {raw!r}") from exc
+    return max(1, value)
+
+
+async def _materialize_one(container: AppContainer, index: int, record: dict) -> dict:
+    # (single record; concurrency is handled by the caller)
+    logger.info("Materializing record %d: %s", index + 1, record.get("query"))
+    prepared = dict(record)
+    prepared.setdefault("sample_id", f"sample-{index + 1}")
+    query = str(prepared.get("query", "")).strip()
+    top_k = prepared.get("top_k")
+    kb_id = str(prepared.get("kb_id", "default") or "default")
+    session_id = prepared.get("session_id")
+    answer = str(prepared.get("answer", "")).strip()
+    retrieved_contexts = prepared.get("retrieved_contexts", []) or []
+    conflicting_context_count = int(prepared.get("conflicting_context_count", 0) or 0)
+    conflict_claim_count = int(prepared.get("conflict_claim_count", 0) or 0)
+    insufficiency_claim_count = int(
+        prepared.get("insufficiency_claim_count", 0) or 0
+    )
+    claim_stats = _claim_verification_stats(prepared.get("supporting_claims", []))
+
+    if not query:
+        return prepared
+
+    if not answer:
+        chat_response = await container.chat_pipeline.run(
+            ChatRequest(
+                query=query,
+                top_k=top_k,
+                kb_id=kb_id,
+                session_id=session_id,
+                sample_id=str(prepared["sample_id"]),
+            )
+        )
+        prepared["answer"] = chat_response.answer
+        if chat_response.trace_id:
+            prepared["trace_id"] = chat_response.trace_id
+            trace = container.trace_store.get(chat_response.trace_id)
+            if trace is not None:
+                trace.sample_id = str(prepared["sample_id"])
+                conflicting_context_count = _count_conflicting_contexts(trace.contexts)
+                conflict_claim_count = _count_claim_type(
+                    trace.supporting_claims, "conflict"
+                )
+                insufficiency_claim_count = _count_claim_type(
+                    trace.supporting_claims, "insufficiency"
+                )
+                claim_stats = _claim_verification_stats(trace.supporting_claims)
+                prepared["supporting_claims"] = trace.supporting_claims
+                # The model's structured answerability verdict plus the cost and
+                # latency of the request: the abstention, token and p95 metrics
+                # read these, and nothing else in the row carries them.
+                prepared["answerable"] = trace.answerable
+                prepared["latency_seconds"] = trace.latency_seconds
+                if trace.generation_usage:
+                    prepared["generation_usage"] = trace.generation_usage
+        if not retrieved_contexts:
+            prepared["retrieved_contexts"] = [
+                _context_to_text(context) for context in chat_response.contexts
+            ]
+            retrieved_contexts = prepared["retrieved_contexts"]
+            conflicting_context_count = _count_conflicting_contexts(
+                chat_response.contexts
+            )
+        conflict_claim_count = max(
+            conflict_claim_count,
+            _count_claim_type(
+                getattr(chat_response, "supporting_claims", []), "conflict"
+            ),
+        )
+        insufficiency_claim_count = max(
+            insufficiency_claim_count,
+            _count_claim_type(
+                getattr(chat_response, "supporting_claims", []), "insufficiency"
+            ),
+        )
+        if not prepared.get("supporting_claims"):
+            prepared["supporting_claims"] = [
+                claim.model_dump() if hasattr(claim, "model_dump") else claim
+                for claim in getattr(chat_response, "supporting_claims", [])
+            ]
         claim_stats = _claim_verification_stats(prepared.get("supporting_claims", []))
 
-        if not query:
-            prepared_records.append(prepared)
-            continue
-
-        if not answer:
-            chat_response = await container.chat_pipeline.run(
-                ChatRequest(
-                    query=query,
-                    top_k=top_k,
-                    kb_id=kb_id,
-                    session_id=session_id,
-                    sample_id=str(prepared["sample_id"]),
-                )
+    if not retrieved_contexts:
+        contexts, _retrieval_trace = await container.chat_pipeline.retrieve(
+            ChatRequest(
+                query=query,
+                top_k=top_k,
+                kb_id=kb_id,
+                session_id=session_id,
             )
-            prepared["answer"] = chat_response.answer
-            if chat_response.trace_id:
-                prepared["trace_id"] = chat_response.trace_id
-                trace = container.trace_store.get(chat_response.trace_id)
-                if trace is not None:
-                    trace.sample_id = str(prepared["sample_id"])
-                    conflicting_context_count = _count_conflicting_contexts(trace.contexts)
-                    conflict_claim_count = _count_claim_type(
-                        trace.supporting_claims, "conflict"
-                    )
-                    insufficiency_claim_count = _count_claim_type(
-                        trace.supporting_claims, "insufficiency"
-                    )
-                    claim_stats = _claim_verification_stats(trace.supporting_claims)
-                    prepared["supporting_claims"] = trace.supporting_claims
-                    # The model's structured answerability verdict plus the cost and
-                    # latency of the request: the abstention, token and p95 metrics
-                    # read these, and nothing else in the row carries them.
-                    prepared["answerable"] = trace.answerable
-                    prepared["latency_seconds"] = trace.latency_seconds
-                    if trace.generation_usage:
-                        prepared["generation_usage"] = trace.generation_usage
-            if not retrieved_contexts:
-                prepared["retrieved_contexts"] = [
-                    _context_to_text(context) for context in chat_response.contexts
-                ]
-                retrieved_contexts = prepared["retrieved_contexts"]
-                conflicting_context_count = _count_conflicting_contexts(
-                    chat_response.contexts
-                )
+        )
+        prepared["retrieved_contexts"] = [
+            _context_to_text(context) for context in contexts
+        ]
+        conflicting_context_count = _count_conflicting_contexts(contexts)
+
+    if not conflicting_context_count and prepared.get("trace_id"):
+        trace = container.trace_store.get(str(prepared["trace_id"]))
+        if trace is not None:
+            conflicting_context_count = _count_conflicting_contexts(trace.contexts)
             conflict_claim_count = max(
                 conflict_claim_count,
-                _count_claim_type(
-                    getattr(chat_response, "supporting_claims", []), "conflict"
-                ),
+                _count_claim_type(trace.supporting_claims, "conflict"),
             )
             insufficiency_claim_count = max(
                 insufficiency_claim_count,
-                _count_claim_type(
-                    getattr(chat_response, "supporting_claims", []), "insufficiency"
-                ),
+                _count_claim_type(trace.supporting_claims, "insufficiency"),
             )
             if not prepared.get("supporting_claims"):
-                prepared["supporting_claims"] = [
-                    claim.model_dump() if hasattr(claim, "model_dump") else claim
-                    for claim in getattr(chat_response, "supporting_claims", [])
-                ]
+                prepared["supporting_claims"] = trace.supporting_claims
             claim_stats = _claim_verification_stats(prepared.get("supporting_claims", []))
 
-        if not retrieved_contexts:
-            contexts, _retrieval_trace = await container.chat_pipeline.retrieve(
-                ChatRequest(
-                    query=query,
-                    top_k=top_k,
-                    kb_id=kb_id,
-                    session_id=session_id,
-                )
-            )
-            prepared["retrieved_contexts"] = [
-                _context_to_text(context) for context in contexts
-            ]
-            conflicting_context_count = _count_conflicting_contexts(contexts)
+    prepared["conflicting_context_count"] = conflicting_context_count
+    prepared["conflict_claim_count"] = conflict_claim_count
+    prepared["insufficiency_claim_count"] = insufficiency_claim_count
+    prepared.update(claim_stats)
 
-        if not conflicting_context_count and prepared.get("trace_id"):
-            trace = container.trace_store.get(str(prepared["trace_id"]))
-            if trace is not None:
-                conflicting_context_count = _count_conflicting_contexts(trace.contexts)
-                conflict_claim_count = max(
-                    conflict_claim_count,
-                    _count_claim_type(trace.supporting_claims, "conflict"),
-                )
-                insufficiency_claim_count = max(
-                    insufficiency_claim_count,
-                    _count_claim_type(trace.supporting_claims, "insufficiency"),
-                )
-                if not prepared.get("supporting_claims"):
-                    prepared["supporting_claims"] = trace.supporting_claims
-                claim_stats = _claim_verification_stats(prepared.get("supporting_claims", []))
-
-        prepared["conflicting_context_count"] = conflicting_context_count
-        prepared["conflict_claim_count"] = conflict_claim_count
-        prepared["insufficiency_claim_count"] = insufficiency_claim_count
-        prepared.update(claim_stats)
-
-        prepared_records.append(prepared)
-    return prepared_records
+    return prepared
