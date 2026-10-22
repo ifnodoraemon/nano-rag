@@ -126,6 +126,9 @@ class GenerationClient(GatewayClient):
             )
         return {
             "content": content,
+            # Tool-calling agents need the calls back verbatim: dropping them here
+            # made every tool-using request look like an empty reply.
+            "tool_calls": message.get("tool_calls") or [],
             "finish_reason": choice.get("finish_reason"),
             "usage": data.get("usage") or {},
             "model": data.get("model") or model_alias or self.alias,
