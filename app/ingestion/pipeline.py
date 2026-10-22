@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING
 from uuid import uuid4
 
 from app.ingestion.dedup import find_duplicates_for_content, remove_document_everywhere
+from app.ingestion.llm_chunk_planner import plan_chunk_boundaries
 from app.ingestion.loader import discover_files
 from app.ingestion.parse_cache import ParseCache, build_fingerprint, content_hash
 from app.ingestion.token_ledger import TokenLedger, collect_tokens
@@ -130,6 +131,9 @@ class IngestionPipeline:
         self.wiki_searcher = wiki_searcher
         self.structured_parser = StructuredDocumentParser(document_parser)
         self.graph_extractor = GraphExtractor(generation_client)
+        self.model_chunking_enabled = _strict_bool_env(
+            "RAG_MODEL_CHUNKING_ENABLED", "true"
+        )
         self.parse_cache = ParseCache(
             config.parsed_dir,
             build_fingerprint(
@@ -571,12 +575,17 @@ class IngestionPipeline:
             content=text,
             metadata=document_metadata,
         )
+        # Chunk boundaries are a semantic judgement, so the model plans them; the
+        # planner only returns offsets, and every anchor is verified against the
+        # original text before it is used.
+        planned_splits = await self._plan_model_splits(structured_document)
         chunks = await asyncio.to_thread(
             self._structured_document_to_chunks,
             structured_document,
             source_path=source_path,
             title=document.title,
             metadata=document.metadata,
+            planned_splits=planned_splits,
         )
         if not chunks:
             raise ParsingError(
@@ -649,6 +658,35 @@ class IngestionPipeline:
                 parts.append(node.text.strip())
         return "\n\n".join(parts).strip()
 
+    async def _plan_model_splits(
+        self, structured_document: StructuredDocument
+    ) -> dict[str, list[tuple[str, str]]]:
+        """Ask the model for chunk boundaries, per oversized node.
+
+        Only nodes longer than the character budget need planning, so short documents
+        and short sections cost nothing. Results are keyed by node id and handed to the
+        (synchronous) chunk builder, which slices the node text at those offsets.
+        """
+        if not self.model_chunking_enabled:
+            return {}
+        planned: dict[str, list[tuple[str, str]]] = {}
+        for node in structured_document.iter_leaves():
+            text = (
+                node.table.narrative if node.table and node.table.narrative else node.text
+            ).strip()
+            if not text:
+                continue
+            strategy = _chunk_strategy_for_node(
+                node.node_type.value, {"doc_type": structured_document.metadata.get("doc_type")}
+            )
+            budget = _text_chunk_max_chars(strategy)
+            if len(text) <= budget:
+                continue
+            planned[node.node_id] = await plan_chunk_boundaries(
+                text, self.generation_client, max_chars=budget
+            )
+        return planned
+
     def _structured_document_to_chunks(
         self,
         structured_document: StructuredDocument,
@@ -656,6 +694,7 @@ class IngestionPipeline:
         source_path: str,
         title: str,
         metadata: dict,
+        planned_splits: dict[str, list[tuple[str, str]]] | None = None,
     ) -> list[Chunk]:
         chunks: list[Chunk] = []
         for index, node in enumerate(structured_document.iter_leaves()):
@@ -701,11 +740,16 @@ class IngestionPipeline:
                 chunk_metadata["chunk_kind"] = "table_summary"
                 chunk_metadata["chunk_strategy"] = "table_summary"
                 chunk_strategy = "table_summary"
-            text_parts = _split_text_for_index(
-                text,
-                max_chars=_text_chunk_max_chars(chunk_strategy),
-                overlap_chars=_text_chunk_overlap_chars(chunk_strategy),
-            )
+            planned = (planned_splits or {}).get(node.node_id)
+            if planned:
+                # Model-planned boundaries: contiguous verbatim slices.
+                text_parts = [piece for piece, _ in planned]
+            else:
+                text_parts = _split_text_for_index(
+                    text,
+                    max_chars=_text_chunk_max_chars(chunk_strategy),
+                    overlap_chars=_text_chunk_overlap_chars(chunk_strategy),
+                )
             for part_index, part_text in enumerate(text_parts):
                 chunk_id = (
                     node.node_id
@@ -718,6 +762,7 @@ class IngestionPipeline:
                     "text_part_index": part_index,
                     "text_part_count": len(text_parts),
                 }
+
                 chunks.append(
                     Chunk(
                         chunk_id=chunk_id,
