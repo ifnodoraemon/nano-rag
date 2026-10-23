@@ -265,10 +265,16 @@ class AgenticReasoningService:
         query = self._next_query(state)
         if query is None:
             return {}
+        # Each corrective round deepens the candidate pool as well as possibly
+        # rewording the question. Measured on the Chinese-law corpus: the answering
+        # statute sits below rank 12 for most questions (hit@12 0.37 vs hit@100 0.60),
+        # so a round that only changes the wording cannot reach it. Rounds are bounded
+        # by max_retrieval_loops, so the pool cannot grow without limit.
+        depth = len(state.get("retrieval_queries", [])) + 1
         with self.tracing_manager.span(
-            "agent.corrective_recall", {"agent.query": query}
+            "agent.corrective_recall", {"agent.query": query, "agent.depth": depth}
         ):
-            more_contexts, trace = await self._retrieve(payload, query)
+            more_contexts, trace = await self._retrieve(payload, query, depth=depth)
             graph_contexts = await self._expand_graph_contexts(
                 payload, more_contexts, trace
             )
@@ -441,9 +447,9 @@ class AgenticReasoningService:
         }
 
     async def _retrieve(
-        self, payload: ChatRequest, query: str
+        self, payload: ChatRequest, query: str, *, depth: int = 1
     ) -> tuple[list[dict[str, object]], dict[str, object]]:
-        return await self.agentic_discovery.retrieve(payload, query)
+        return await self.agentic_discovery.retrieve(payload, query, depth=depth)
 
     async def retrieve(self, payload: ChatRequest) -> tuple[list[dict[str, object]], dict[str, object]]:
         """Run the discovery+deep-read engine for a query.

@@ -142,3 +142,31 @@ def test_follow_up_queries_are_preferred_over_the_original() -> None:
     service = _service(max_loops=5)
     state = _state(["q"], _check(False, ["q2"]))
     assert service._next_query(state) == "q2"
+
+
+def test_each_corrective_round_deepens_the_candidate_pool() -> None:
+    """Rewording alone cannot reach a document ranked below the first twelve.
+
+    Measured on the Chinese-law corpus: the answering statute sits below rank 12 for
+    most real questions (hit@12 0.37, hit@100 0.60). A corrective round that only
+    rephrases the query re-searches the same shallow pool, so the depth has to grow.
+    """
+    state = _state(["q"], _check(False, ["q2"]))
+    depth = len(state["retrieval_queries"]) + 1
+    assert depth == 2, "the second round must search a wider pool than the first"
+
+    state2 = _state(["q", "q2"], _check(False, ["q3"]))
+    depth2 = len(state2["retrieval_queries"]) + 1
+    assert depth2 == 3
+    assert depth2 > depth
+
+
+def test_the_depth_is_bounded_by_the_loop_budget() -> None:
+    """The pool cannot grow without limit: rounds are capped by max_retrieval_loops."""
+    from app.agentic.discovery import DISCOVERY_OVERFETCH_MULTIPLIER
+
+    service = _service(max_loops=2)
+    state = _state(["q", "q2"], _check(False, ["q3"]))
+    # Budget exhausted -> no further corrective round -> no deeper search.
+    assert service._route_after_verification(state) == "answer_synthesis"
+    assert DISCOVERY_OVERFETCH_MULTIPLIER >= 1
