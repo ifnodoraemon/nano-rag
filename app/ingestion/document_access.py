@@ -46,6 +46,15 @@ MAX_PART_CHARS = 60_000
 MAX_PARTS = 500
 MAX_IMAGE_BYTES = 8_000_000
 
+_IMAGE_MIME = {
+    "png": "image/png",
+    "jpg": "image/jpeg",
+    "jpeg": "image/jpeg",
+    "gif": "image/gif",
+    "bmp": "image/bmp",
+    "webp": "image/webp",
+}
+
 
 @dataclass
 class Part:
@@ -131,6 +140,22 @@ def _docx_parts(path: Path) -> list[Part]:
             styles_xml = archive.read("word/styles.xml")
         except KeyError:
             styles_xml = b""
+        # Operation guides are mostly screenshots: one document in the test corpus is
+        # 642 KB of which 134 characters are text. Ignoring embedded media would throw
+        # away almost the entire document, so images become parts of their own.
+        media = [
+            info
+            for info in archive.infolist()
+            if info.filename.startswith("word/media/") and info.file_size > 0
+        ]
+        embedded = [
+            (
+                info.filename.rsplit("/", 1)[-1],
+                archive.read(info.filename),
+                info.filename.rsplit(".", 1)[-1].lower(),
+            )
+            for info in media
+        ]
     paragraphs = _ooxml_paragraphs(xml)
     tables = _ooxml_tables(xml)
     style_names = _style_names(styles_xml) if styles_xml else {}
@@ -172,8 +197,25 @@ def _docx_parts(path: Path) -> list[Part]:
                 text=rows,
             )
         )
+    for image_name, payload, suffix in embedded:
+        if len(payload) > MAX_IMAGE_BYTES:
+            raise ParsingError(
+                f"{path.name}: embedded image {image_name} is {len(payload)} bytes, "
+                f"above the {MAX_IMAGE_BYTES}-byte limit"
+            )
+        parts.append(
+            Part(
+                part_id=f"img{len(parts) + 1}",
+                kind="image",
+                label=image_name,
+                image_bytes=payload,
+                mime=_IMAGE_MIME.get(suffix, "image/png"),
+            )
+        )
     if not parts:
-        raise ParsingError(f"{path.name} contains no readable text")
+        raise ParsingError(
+            f"{path.name} contains neither readable text nor embedded images"
+        )
     return parts
 
 

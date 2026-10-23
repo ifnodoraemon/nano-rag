@@ -19,6 +19,7 @@ text-only, and "an image is at part pg3" would ask the model to imagine the page
 
 from __future__ import annotations
 
+import base64
 import json
 import os
 import logging
@@ -28,7 +29,7 @@ from typing import Any
 
 from typing import TYPE_CHECKING
 
-from app.core.exceptions import ModelOutputError, ParsingError
+from app.core.exceptions import ModelGatewayError, ModelOutputError, ParsingError
 from app.ingestion.document_access import TOOL_SCHEMAS, DocumentAccess
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from app.ingestion.document_access import Document
@@ -242,9 +243,9 @@ def _strip_fence(text: str) -> str:
 # Document text per request when the model cannot drive tools. Kept well below the
 # context limit because the OUTPUT is roughly as large as the input (the document is
 # rewritten as Markdown) and a reasoning model also spends tokens deliberating first.
-INLINE_BUDGET_CHARS = 10_000
+INLINE_BUDGET_CHARS = 6_000
 # Output budget for one structuring call. This project optimises for quality, not cost.
-STRUCTURE_MAX_TOKENS = 16_000
+STRUCTURE_MAX_TOKENS = 32_000
 
 
 def choose_strategy(
@@ -312,13 +313,34 @@ async def parse_adaptive(
 async def _parse_inline(
     document: "Document", generation_client: GenerationClient, path_str: str
 ) -> str:
-    """One request carrying every text part - for a model without tool calling."""
+    """One request carrying every text part, plus the images when the model sees.
+
+    A guide that is 134 characters of text and five screenshots is a normal document,
+    not an edge case: the images ARE the content, so they travel with the text in the
+    same request.
+    """
     blocks = [
         f"--- part {part.part_id} ({part.label}) ---\n{part.text or ''}"
         for part in document.parts
         if part.kind == "text"
     ]
-    return await _structure_text(generation_client, "\n\n".join(blocks), path_str)
+    images = [
+        part for part in document.parts if part.kind == "image" and part.image_bytes
+    ][:MAX_IMAGES_PER_DOCUMENT]
+    try:
+        return await _structure_text(
+            generation_client, "\n\n".join(blocks), path_str, images=images
+        )
+    except ModelGatewayError as exc:
+        # The model ran out of output budget part-way through. Losing the tail of a
+        # document silently is worse than spending more calls, so fall back to the
+        # staged path, which structures it in smaller pieces.
+        logger.warning(
+            "inline structuring of %s hit the output limit (%s); retrying in stages",
+            path_str,
+            exc,
+        )
+        return await _parse_staged(document, generation_client, path_str)
 
 
 async def _parse_staged(
@@ -354,20 +376,60 @@ async def _parse_staged(
 
 
 async def _structure_text(
-    generation_client: GenerationClient, text: str, source_label: str
+    generation_client: GenerationClient,
+    text: str,
+    source_label: str,
+    *,
+    images: list[Any] | None = None,
 ) -> str:
-    """Ask for Markdown with true heading depth over the text supplied."""
+    """Ask for Markdown with true heading depth over the text (and images) supplied."""
     prompt = (
         f"Reconstruct the structure of this document: {source_label}\n\n"
-        "Return Markdown. Headings at their true depth (# title, ## first section "
-        "level, ### next). Body text verbatim - do not paraphrase, summarise, reorder, "
-        "merge or drop anything. Tables as Markdown tables. Chinese official documents "
-        "often express hierarchy only through numbering inside the text (一、/（一）/1.) "
-        "- judge the depth from the content and numbering as a careful editor would.\n\n"
+        "Output Markdown. Two rules matter most:\n"
+        "1. NESTING -> HEADING DEPTH. The heading markers must reflect how deeply an "
+        "entry is nested. The document title is `#`. The outermost entries are `##`. "
+        "Entries nested one level inside them are `###`, then `####`, and so on. "
+        "The real problem to avoid is putting EVERY heading at `#`: that flattens the "
+        "document and destroys its hierarchy, which is worse than making a borderline "
+        "judgement call. Chinese official documents express nesting through numbering "
+        "(一、/（一）/1./（1）/①), through indentation, or through both - use them as "
+        "the nesting signal.\n"
+        "2. NOTHING MAY BE LOST. Body text verbatim: do not paraphrase, summarise, "
+        "reorder, merge, split or drop anything. Tables become Markdown tables.\n"
+        "   IMAGES ARE CONTENT, NOT DECORATION. For every image you are given, transcribe "
+        "what it shows as body text under the heading it belongs to: interface labels, "
+        "form fields, menu items, the text of a diagram or a form. A guide made of "
+        "screenshots must come back as a guide with text, not as a list of titles.\n\n"
+        "Worked example of the mapping for a typical Chinese official notice - how deep "
+        "each entry sits decides its marker:\n"
+        "  document title            -> #\n"
+        "  a top-level chapter       -> ##\n"
+        "  a sub-item of a chapter   -> ###\n"
+        "  an item under that        -> ####\n"
+        "The letter or numeral used is irrelevant; what matters is that an entry nested "
+        "inside another gets one more `#` than its parent.\n\n"
         f"--- document ---\n{text}\n--- end ---"
     )
+    content_parts: Any = prompt
+    if images:
+        content_parts = [{"type": "text", "text": prompt}]
+        for index, part in enumerate(images, start=1):
+            content_parts.append(
+                {"type": "text", "text": f"[image {index}: {part.label}]"}
+            )
+            content_parts.append(
+                {
+                    "type": "image_url",
+                    "image_url": {
+                        "url": (
+                            f"data:{part.mime};base64,"
+                            f"{base64.b64encode(part.image_bytes or b'').decode('ascii')}"
+                        )
+                    },
+                }
+            )
     data = await generation_client.generate(
-        [{"role": "user", "content": prompt}],
+        [{"role": "user", "content": content_parts}],
         temperature=0,
         max_tokens=STRUCTURE_MAX_TOKENS,
     )
