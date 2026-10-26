@@ -54,10 +54,21 @@ class _Client:
 async def test_articles_are_sliced_from_the_original_text():
     labels = ["第一条", "第二条", "第三条", "第四条", "第五条"]
     articles = await split_into_articles(STATUTE, _Client(labels), title="某某条例")  # type: ignore[arg-type]
-    assert [a.label for a in articles] == labels
+    assert [a.label for a in articles if a.label in labels] == labels
     for article in articles:
         assert article.text in STATUTE, "article text must be a slice of the source"
     assert "制定本条例" in articles[0].text
+
+
+@pytest.mark.asyncio
+async def test_a_trailing_heading_is_detached_from_the_unit_before_it():
+    """The model sometimes closes a unit AT the next heading instead of starting there."""
+    labels = ["第一条", "第二条", "第三条", "第四条", "第五条"]
+    articles = await split_into_articles(STATUTE, _Client(labels), title="某某条例")  # type: ignore[arg-type]
+    # "第二章  组织机构" trails 第三条 and must not stay glued to it.
+    third = [a for a in articles if a.label == "第三条"][0]
+    assert "第二章" not in third.text
+    assert any(a.label.strip() == "第二章  组织机构" for a in articles)
 
 
 @pytest.mark.asyncio

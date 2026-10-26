@@ -39,6 +39,10 @@ logger = logging.getLogger(__name__)
 # A threshold of 40 silently dropped it, and a dropped article is invisible - it simply
 # never appears in retrieval results.
 MIN_ARTICLE_CHARS = 15
+# A trailing paragraph longer than this is content, not a heading.
+HEADING_LIKE_CHARS = 40
+# Sentence terminators in the scripts this system sees; a heading carries none.
+SENTENCE_MARKS = ("。", "；", "！", "？", ".", ";", "!", "?")
 # Above this the document is split into several requests rather than one huge prompt.
 MAX_DOCUMENT_CHARS = 24_000
 MAX_ARTICLES = 600
@@ -67,9 +71,12 @@ Rules:
 - The entry is that unit's LABEL: its own designation if it has one (a number, a heading,
   a section title), or its first few characters if it has none.
 - Copy the label exactly as the document writes it. Do not merge, skip or invent entries.
-- Do NOT quote the unit's body text.
+- Also give `opens_with`: the first 20 characters of that unit as they appear in the
+  document, so the boundary can be located exactly even when a label repeats.
+- Do NOT quote the rest of the unit's body text.
 
-Return only JSON: {"articles": ["<label>", "<label>", ...]}
+Return only JSON:
+{"articles": [{"label": "<label>", "opens_with": "<verbatim opening>"}, ...]}
 
 DOCUMENT:
 __TEXT__
@@ -100,6 +107,45 @@ def _body_offset(text: str, first_label: str, label_offsets: Sequence[int]) -> i
     if second is not None and second - first < CONTENTS_PROXIMITY:
         return second
     return first
+
+
+def _split_embedded_heading(label: str, body: str) -> list[Article]:
+    """Split a unit that ends with a heading-like line but no content after it.
+
+    The model sometimes closes a unit at the next heading instead of starting a new unit
+    there, so a section title ends up glued to the previous unit's tail - a real case in
+    the manual fixture: "第二章 定期保养" sat at the end of 1.2 with nothing following.
+
+    Recognised without vocabulary: the last paragraph of the body is SHORT, contains no
+    sentence terminator, and is followed by nothing. Such a trailing line carries no
+    answerable content on its own, which is exactly why leaving it attached loses a
+    heading from the index while adding nothing to the unit before it.
+    """
+    paragraphs = [p for p in body.split("\n\n") if p.strip()]
+    if len(paragraphs) < 2:
+        return [Article(label=label, text=body)]
+    tail = paragraphs[-1].strip()
+    if len(tail) > HEADING_LIKE_CHARS or any(mark in tail for mark in SENTENCE_MARKS):
+        return [Article(label=label, text=body)]
+    head = "\n\n".join(paragraphs[:-1]).strip()
+    if not head:
+        return [Article(label=label, text=body)]
+    logger.info("split trailing heading %r off unit %r", tail[:30], label[:20])
+    return [Article(label=label, text=head), Article(label=tail, text=tail)]
+
+
+def _locate_unit(text: str, label: str, opening: str, start: int) -> int | None:
+    """Offset where this unit begins, preferring the verbatim opening.
+
+    The opening excerpt is tried first because it is unique; the label is the fallback
+    so a model that omits ``opens_with`` still works. Artificially requiring the opening
+    would reject valid splits from providers that only return labels.
+    """
+    if opening:
+        located = _find_label(text, opening, start)
+        if located is not None:
+            return located
+    return _find_label(text, label, start)
 
 
 def _find_label(text: str, label: str, start: int) -> int | None:
@@ -194,17 +240,20 @@ async def _split_once(
         )
 
     anchors: list[tuple[str, str]] = []
+    openings: list[str] = []
     for item in raw:
         if isinstance(item, dict):
             # Tolerate the older shape a provider may still return.
             label = item.get("label") or item.get("starts_with")
+            opening = item.get("opens_with")
         else:
-            label = item
+            label, opening = item, None
         if not isinstance(label, str) or not label.strip():
             raise ModelOutputError(
                 f"article split returned an unusable entry for {title!r}: {item!r}"
             )
         anchors.append((label.strip(), label.strip()))
+        openings.append(opening.strip() if isinstance(opening, str) else "")
 
     # Cut points come from the LABEL, not from a re-typed copy of the text. Chinese
     # statutes begin every article with its own number (第十七条), and that number is
@@ -225,17 +274,21 @@ async def _split_once(
     cursor = _body_offset(
         text, first_label, [first_hit] if first_hit is not None else []
     )
-    for _anchor, label in anchors:
+    for index, (_anchor, label) in enumerate(anchors):
         if not label:
             raise ModelOutputError(
                 f"article split returned an entry without a label for {title!r}; "
                 "the label is what locates the article in the document"
             )
-        located = _find_label(text, label, cursor)
+        # Prefer the verbatim opening when the model supplied one: a label alone can
+        # repeat (two units both starting "第二章", or a contents entry), and resolving
+        # the wrong repeat silently shifts every following boundary.
+        opening = openings[index] if index < len(openings) else ""
+        located = _locate_unit(text, label, opening, cursor)
         if located is None:
             raise ModelOutputError(
-                f"article label {label!r} was not found in {title!r} after offset "
-                f"{cursor}; the model named an article the document does not contain"
+                f"article {label!r} was not found in {title!r} after offset "
+                f"{cursor}; the model named a unit the document does not contain"
             )
         positions.append((located, label))
         cursor = located + 1
@@ -243,12 +296,13 @@ async def _split_once(
     articles: list[Article] = []
     for index, (position, label) in enumerate(positions):
         end = positions[index + 1][0] if index + 1 < len(positions) else len(text)
-        body = text[position:end].strip()
+        raw_body = text[position:end]
+        body = raw_body.strip()
         if len(body) < MIN_ARTICLE_CHARS:
             # A fragment this short is a heading or a stray line; indexing it would add a
             # document that can never be the right answer on its own.
             continue
-        articles.append(Article(label=label, text=body))
+        articles.extend(_split_embedded_heading(label, body))
     if not articles:
         raise ModelOutputError(
             f"article split produced no article above {MIN_ARTICLE_CHARS} characters "
