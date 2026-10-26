@@ -40,6 +40,15 @@ CITATION_LABEL_RE = re.compile(r"C\d+")
 # one "sentence" and made sentence-level citation scoring meaningless.
 SENTENCE_SPLIT_RE = re.compile(r"(?<=[。！？；])|(?<=[.!?;])(?=\s|$)|(?<=\n)")
 NUMBER_RE = re.compile(r"\d[\d,]*(?:\.\d+)?")
+# Chinese numerals, as the corpus writes them ("一百八十厘米", "十五日"). Without this the
+# checker compared "180" against "一百八十" as different claims and reported a support
+# failure for an answer that was right: the model had converted the source's numeral form.
+CHINESE_NUMBER_RE = re.compile(r"[零〇一二两三四五六七八九十百千万]+")
+_CN_DIGITS = {
+    "零": 0, "〇": 0, "一": 1, "二": 2, "两": 2, "三": 3, "四": 4,
+    "五": 5, "六": 6, "七": 7, "八": 8, "九": 9,
+}
+_CN_UNITS = {"十": 10, "百": 100, "千": 1000, "万": 10000}
 QUOTED_SPAN_RE = re.compile(r"[\"“”「」『』]([^\"“”「」『』]{2,80})[\"“”「」『』]")
 
 
@@ -186,11 +195,56 @@ def _normalize_number(raw: str) -> str:
     return repr(value)
 
 
+def chinese_to_number(raw: str) -> int | None:
+    """Value of a Chinese numeral ("一百八十" -> 180), or None if it is not one.
+
+    Handles the forms statutes use: digit runs (一八 -> 18), tens/hundreds/thousands with
+    units (一百八十), and the 万 multiplier. Ambiguous strings return None rather than a
+    guess, so a wrong parse cannot create a false support claim.
+    """
+    text = raw.strip()
+    if not text:
+        return None
+    # A pure digit run with no units ("一八") reads as digits only in contexts this
+    # checker does not have; refuse rather than guess.
+    if all(ch in _CN_DIGITS for ch in text):
+        return int("".join(str(_CN_DIGITS[ch]) for ch in text)) if len(text) > 1 else _CN_DIGITS[text]
+    total = 0
+    section = 0
+    number = 0
+    saw_unit = False
+    for ch in text:
+        if ch in _CN_DIGITS:
+            number = _CN_DIGITS[ch]
+            continue
+        unit = _CN_UNITS.get(ch)
+        if unit is None:
+            return None
+        saw_unit = True
+        if unit == 10000:
+            section = (section + number) * unit
+            total += section
+            section = 0
+        else:
+            section += (number or 1) * unit
+        number = 0
+    if not saw_unit:
+        return None
+    return total + section + number
+
+
 def _numbers_in(text: str) -> set[str]:
-    return {
-        _normalize_number(match)
-        for match in NUMBER_RE.findall(CITATION_GROUP_RE.sub(" ", text))
+    stripped = CITATION_GROUP_RE.sub(" ", text)
+    numbers = {
+        _normalize_number(match) for match in NUMBER_RE.findall(stripped)
     }
+    # The same quantity written differently is the same claim: a source that says
+    # 一百八十厘米 supports an answer that says 180 厘米.
+    for raw in CHINESE_NUMBER_RE.findall(stripped):
+        value = chinese_to_number(raw)
+        if value is not None:
+            numbers.add(str(value))
+    return numbers
 
 
 def _cited_labels_in(sentence: str) -> list[str]:

@@ -121,19 +121,47 @@ async def materialize_eval_records(
     """
     limit = concurrency if concurrency is not None else _eval_concurrency()
     if limit <= 1 or len(records) <= 1:
-        return [await _materialize_one(container, index, record) for index, record in enumerate(records)]
+        # The serial path needs the same failure isolation as the concurrent one: a run
+        # with concurrency=1 must not turn one bad row into "no report at all" either.
+        return [
+            await _safe_materialize(container, index, record)
+            for index, record in enumerate(records)
+        ]
 
     semaphore = asyncio.Semaphore(limit)
 
     async def bounded(index: int, record: dict) -> dict:
         async with semaphore:
-            return await _materialize_one(container, index, record)
+            return await _safe_materialize(container, index, record)
 
     return list(
         await asyncio.gather(
             *(bounded(index, record) for index, record in enumerate(records))
         )
     )
+
+
+async def _safe_materialize(
+    container: AppContainer, index: int, record: dict
+) -> dict:
+    """Materialize one row, recording a failure on the row instead of raising.
+
+    One row failing must not abort the other 269. The failure is recorded ON THE ROW and
+    counted as errored_records, so the report says "this row failed, and why" rather than
+    the batch producing no report at all - which is what happened when a single generation
+    hit its token cap and took the whole 270-question run down with it.
+
+    Not a silent fallback: the error text is carried on the row, the row is counted as
+    errored, and no answer is fabricated for it.
+    """
+    try:
+        return await _materialize_one(container, index, record)
+    except Exception as exc:  # noqa: BLE001 - recorded per row, never hidden
+        logger.error("record %d failed (%s): %s", index + 1, record.get("query"), exc)
+        prepared = dict(record)
+        prepared.setdefault("sample_id", f"sample-{index + 1}")
+        prepared["error"] = f"{type(exc).__name__}: {exc}"
+        return prepared
 
 
 def _eval_concurrency() -> int:
