@@ -195,3 +195,74 @@ def test_render_structured_answer_rejects_contract_violations() -> None:
             '{"is_answerable":true,"missing_entities":[],"extracted_answer":"ok",'
             '"supporting_claims":"not-a-list"}'
         )
+
+
+class SequencedAuditorClient:
+    """An auditor that answers a fixed sequence, so re-audit paths are testable."""
+
+    alias = "sequenced-auditor"
+
+    def __init__(self, answers: list[dict]) -> None:
+        self.answers = list(answers)
+        self.calls = 0
+
+    async def generate(self, messages, **kwargs):  # noqa: ANN001, ARG002
+        payload = self.answers[min(self.calls, len(self.answers) - 1)]
+        self.calls += 1
+        return {"content": __import__("json").dumps(payload, ensure_ascii=False)}
+
+
+@pytest.mark.asyncio
+async def test_a_first_pass_sufficient_audit_costs_one_call() -> None:
+    client = SequencedAuditorClient(
+        [{"sufficient": True, "coverage_ratio": 0.9, "missing_terms": [],
+          "follow_up_queries": [], "reason": "ok"}]
+    )
+    service = _service(client)
+
+    check = await service._verify(
+        "问题", ["问题"], [{"chunk_id": "c1", "text": "答案在这里。", "citation_label": "C1"}]
+    )
+
+    assert check.sufficient is True
+    assert check.initial_sufficient is True
+    assert client.calls == 1
+    assert len(check.audit_seconds) == 1
+    assert check.as_dict()["audit_calls"] == 1
+    assert check.as_dict()["redrill_improved"] is False
+
+
+@pytest.mark.asyncio
+async def test_an_insufficient_verdict_costs_exactly_one_audit_call() -> None:
+    """A real gap must not be papered over, and must not be paid for twice.
+
+    A second auditor pass over the same documents was removed after measuring
+    that it exposed no term the first pass had not: the first pass is already
+    term-driven, so a gap it reports is a gap in the retrieved evidence. The
+    audit count on the trace has to show one call, which is what makes "fewer
+    corrective rounds" separable from "extra audit calls".
+    """
+    client = SequencedAuditorClient(
+        [
+            {"sufficient": False, "coverage_ratio": 0.1, "missing_terms": ["缴费年限"],
+             "follow_up_queries": ["缴费年限 规定"], "reason": "缺"},
+            {"sufficient": True, "coverage_ratio": 0.9, "missing_terms": [],
+             "follow_up_queries": [], "reason": "should never be asked"},
+        ]
+    )
+    service = _service(client)
+
+    check = await service._verify(
+        "问题", ["问题"], [{"chunk_id": "c1", "text": "无关内容。", "citation_label": "C1"}]
+    )
+
+    assert check.sufficient is False
+    assert check.initial_sufficient is False
+    # The verdict is not re-audited: one call, and the corrector gets the gaps.
+    assert client.calls == 1
+    assert len(check.audit_seconds) == 1
+    assert check.as_dict()["audit_calls"] == 1
+    assert check.as_dict()["redrill_improved"] is False
+    assert check.follow_up_queries == ["缴费年限 规定"]
+
+

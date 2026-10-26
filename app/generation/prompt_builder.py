@@ -175,15 +175,41 @@ class PromptBuilder:
         retrieval_queries = as_str_list(agent_state.get("retrieval_queries"))
         graph_expanded = as_str_list(agent_state.get("graph_expanded_node_ids"))
         missing_terms = as_str_list(verification_text.get("missing_terms"))
+        sufficient = verification_text.get("sufficient")
+        evidence_complete = verification_text.get("evidence_complete")
+        if sufficient is True:
+            policy = (
+                "证据审计判为足够：直接依据上下文回答。\n"
+            )
+        elif sufficient is False and evidence_complete is False:
+            # This line used to read "if evidence_sufficient is false you MUST
+            # say the evidence is insufficient" unconditionally. That standing
+            # order and the anti-hallucination rule in the answer contract could
+            # not both be obeyed: when the retriever had found an answering
+            # article that the auditor then missed, obeying the order meant
+            # refusing evidence the model could read. The order now carries its
+            # own precondition - it applies only when the auditor saw every
+            # retrieved document and still found it insufficient.
+            policy = (
+                "证据审计判为不足；但审计仅看到各文档的节选（evidence_complete=false）。"
+                "是否拒答由你依据上述上下文自行判断：上下文确有答案就回答并引用；"
+                "确无答案才说明缺少哪些信息。\n"
+            )
+        else:
+            policy = (
+                "证据审计判为不足，且已看到全部检索到的文档（evidence_complete=true）。"
+                "最终答案必须明确说明现有证据不足，并列出还缺少哪些信息。\n"
+            )
         return (
             "Agent evidence check:\n"
             f"- subqueries: {'; '.join(subqueries) or 'n/a'}\n"
             f"- retrieval_queries: {'; '.join(retrieval_queries) or 'n/a'}\n"
             f"- graph_expanded_node_ids: {', '.join(graph_expanded) or 'none'}\n"
-            f"- evidence_sufficient: {verification_text.get('sufficient')}\n"
+            f"- evidence_sufficient: {sufficient}\n"
+            f"- evidence_complete: {evidence_complete}\n"
             f"- missing_terms: {', '.join(missing_terms) or 'none'}\n"
             f"{self._render_reading_plan(agent_state.get('reading_plan'))}"
-            "如果 evidence_sufficient 为 false，最终答案必须明确说明现有证据不足，并列出还缺少哪些信息。\n\n"
+            f"{policy}\n"
         )
 
     def _render_reading_plan(self, value: object) -> str:

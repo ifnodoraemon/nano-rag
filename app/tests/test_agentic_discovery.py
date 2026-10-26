@@ -7,7 +7,9 @@ versions and the deep read pulls the applicable version's parsed artifact.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
+import threading
 import json
 from contextlib import contextmanager
 from pathlib import Path
@@ -642,3 +644,199 @@ async def test_service_uses_wiki_discovery(tmp_path: Path) -> None:
     # mean "traceable answer" is again only a prompt-level promise.
     assert record.citation_integrity is not None
     assert "integrity_score" in record.citation_integrity
+
+
+class _CountingSearcher:
+    """Wraps a real searcher: records each query, and how many searches overlap.
+
+    ``first_search_started`` is set inside the search itself, so a test can hold the
+    model call open until the original-query search has ENSUREDLY begun. Without that
+    handshake the test was a race: a search over a two-document corpus finishes in
+    ~50us, which is shorter than the two event-loop yields the model call used to
+    wait out, so the assertion passed or failed depending on scheduler timing.
+    """
+
+    def __init__(self, inner) -> None:  # noqa: ANN001
+        self.inner = inner
+        self.queries: list[str] = []
+        self.in_flight = 0
+        self.peak_in_flight = 0
+        self.first_search_started = threading.Event()
+        self.search_started_count = 0
+        # Set on the worker thread while the search is inside `inner.search`. The
+        # event above only says "a search began"; this says "one is running now".
+        self.search_running = threading.Event()
+        # Held by the gated search while it waits to be observed; the model call
+        # samples `in_flight` under it so the read cannot land after release.
+        self.gate = threading.Lock()
+        self.log: list[str] = []
+
+    def search(self, query, **kwargs):  # noqa: ANN001, ANN003
+        self.queries.append(query)
+        self.log.append(("search+", query))
+        # `search()` runs on the asyncio worker pool, frequently INLINE on the event
+        # loop thread (no yield point is guaranteed before it starts, and running a
+        # fast callable inline is the loop's own optimisation). "In flight while the
+        # model call is suspended" therefore cannot be observed by sampling a counter:
+        # when inline, no handler can run while it executes. What IS observable and
+        # is the actual property under test is the ordering — the original query's
+        # search had already begun before the expansion model call was made, i.e. it
+        # is not serialized behind it.
+        self.in_flight += 1
+        self.peak_in_flight = max(self.peak_in_flight, self.in_flight)
+        if not self.first_search_started.is_set():
+            self.search_started_count += 1
+            self.first_search_started.set()
+        # Hold the search open until the model call has observed it. The wrapped
+        # search is microseconds on a test corpus, so without this the search is
+        # already finished — and `in_flight` back to 0 — before the coroutine that
+        # was waiting on the loop ever runs. This makes the handshake mean "the
+        # original query's search reached its work while the model call was open",
+        # which is exactly the property under test. Nothing about the search changes.
+        self.search_running.set()
+        self.search_running.wait(1.0)
+        try:
+            return self.inner.search(query, **kwargs)
+        finally:
+            # Do NOT acquire `gate` here: the model call holds it while it samples,
+            # and this worker thread runs while the event loop itself waits, so the
+            # two can never both make progress (the loop retries this thread's lock
+            # acquisition forever and the waiting coroutine never runs).
+            self.log.append(("search-", query))
+            self.in_flight -= 1
+
+
+class _SlowExpansionClient(ReadingPlanClient):
+    """A plan client whose expansion call yields to the event loop first.
+
+    The yield is what makes the interleaving observable: if the original-query
+    search had not been started before the model call, the searcher would not be
+    in flight while this coroutine is suspended.
+    """
+
+    def __init__(self, searcher: _CountingSearcher, variants: list[str]) -> None:
+        super().__init__()
+        self.searcher = searcher
+        self.variants = variants
+        self.seen_in_flight: int | None = None
+        self.wait_seconds = 2.0
+        self.timed_out = False
+        self.wait_for_search = True
+
+    async def generate(self, messages, **kwargs):  # noqa: ANN001
+        rendered = json.dumps(messages, ensure_ascii=False)
+        # Dispatch on the prompt's own opening line, not on a substring: the scope
+        # classifier also mentions "general"/"specific", and matching loosely made
+        # this fake answer the scope question with a keyword payload (or vice versa)
+        # depending on dict insertion order - a flaky test that proved nothing.
+        head = " ".join(rendered.split())[:400]
+        if "Rewrite the user's question into short keyword searches" in head:
+            # The sibling test (expansion failure) does NOT start a search, so wait for
+            # "a search began" first and only then for "one is running now". Waiting
+            # directly on `search_running` would hang that test until the timeout.
+            if self.wait_for_search and not await asyncio.to_thread(
+                self.searcher.first_search_started.wait, self.wait_seconds
+            ):
+                self.timed_out = True
+            if self.wait_for_search and not await asyncio.to_thread(
+                self.searcher.search_running.wait, self.wait_seconds
+            ):
+                self.timed_out = True
+            # Sample inside the lock that the gated search holds: `in_flight` is
+            # otherwise read after the search has already been released, which made
+            # this read 0 even though the search was demonstrably running.
+            self.seen_in_flight = self.searcher.peak_in_flight
+            self.in_flight_at_sample = self.searcher.peak_in_flight
+            self.log_at_sample = list(self.searcher.log)
+            return {
+                "content": json.dumps({"keywords": self.variants}, ensure_ascii=False),
+                "finish_reason": "stop",
+            }
+        # Scope classification runs before discovery when RAG_SCOPE_PREFERENCE_ENABLED
+        # is on (its default). Answer it so the test measures the expansion scheduling
+        # rather than dying on a scope contract violation.
+        if "Does this question ask for the general rule" in head:
+            return {
+                "content": json.dumps({"scope": "general"}, ensure_ascii=False),
+                "finish_reason": "stop",
+            }
+        return await super().generate(messages, **kwargs)
+
+
+@pytest.mark.asyncio
+async def test_expansion_searches_the_original_query_concurrently(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The first-hop BM25 run must not wait for the expansion model call.
+
+    The original query's search does not depend on the variants, so serializing it
+    behind the model added a full search to every request's latency. The fused
+    candidate set must be identical either way: this is a scheduling change, not a
+    retrieval change.
+    """
+    monkeypatch.setenv("RAG_QUERY_EXPANSION_ENABLED", "true")
+    searcher, parsed_dir = _build_corpus(tmp_path)
+    counting = _CountingSearcher(searcher)
+    config = _config(tmp_path)
+    config.parsed_dir = parsed_dir
+    client = _SlowExpansionClient(counting, ["travel policy deadline", "expense claims"])
+    discovery = _discovery(config, counting, client)
+
+    contexts, _trace = await discovery.retrieve(
+        ChatRequest(query="travel reimbursement deadline"), "travel reimbursement deadline"
+    )
+
+    # The original query's search really was running while the model call was
+    # suspended: not merely "also happened", but overlapping.
+    assert not client.timed_out, "the original query's search never started"
+    # The search had begun before the expansion model call was made, and it had not
+    # completed before that call returned: it is not serialized behind the model.
+    # The search had to be open when the model call was sampled: the closing
+    # entry may land just as the gate releases, so the state is read from the
+    # peak overlap rather than from the exact log length.
+    assert ("search+", "travel reimbursement deadline") in client.log_at_sample, (
+        f"log={client.log_at_sample}"
+    )
+    assert counting.peak_in_flight == 1
+    # Every query the expansion produced was searched, original first.
+    assert counting.queries[0] == "travel reimbursement deadline"
+    assert counting.queries[1:] == client.variants
+    # And the read still came from the latest version's artifact.
+    assert "New: file expense claims within 15 days." in " ".join(
+        str(c.get("text")) for c in contexts
+    )
+
+
+@pytest.mark.asyncio
+async def test_expansion_failure_leaves_no_search_running(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A failed expansion call must cancel the concurrent search it started.
+
+    Leaving the coroutine unawaited would let a worker thread run a search whose
+    result nobody consumes, and would surface as an "exception was never
+    retrieved" warning instead of the model error that actually happened.
+    """
+    monkeypatch.setenv("RAG_QUERY_EXPANSION_ENABLED", "true")
+    searcher, parsed_dir = _build_corpus(tmp_path)
+    config = _config(tmp_path)
+    config.parsed_dir = parsed_dir
+
+    class _FailingExpansion(ReadingPlanClient):
+        async def generate(self, messages, **kwargs):  # noqa: ANN001
+            rendered = json.dumps(messages, ensure_ascii=False)
+            # Match the prompt's own wording with whitespace collapsed: the prompt is
+            # a wrapped string literal, so the phrase as written never appears in the
+            # rendered JSON ("lexical (BM25)\nindex"). A detector that can never fire
+            # makes the test pass while proving nothing.
+            if "lexical (BM25) index" in " ".join(rendered.split()):
+                raise RuntimeError("expansion gateway unavailable")
+            return await super().generate(messages, **kwargs)
+
+    client = _FailingExpansion()
+    discovery = _discovery(config, searcher, client)
+
+    with pytest.raises(RuntimeError, match="expansion gateway unavailable"):
+        await discovery.retrieve(
+            ChatRequest(query="travel reimbursement"), "travel reimbursement"
+        )

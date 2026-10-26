@@ -18,6 +18,9 @@ from app.wiki.compiler import WikiCompiler
 
 logger = logging.getLogger(__name__)
 
+# How much page text a hit carries. The read plan reads this as the document's
+# manifest, so a page fed to the planner must not be cut mid-sentence: the clause that
+# matters is often the one after the truncation point.
 MAX_WIKI_CONTEXT_CHARS = 2200
 DEFAULT_MAX_DOCUMENTS = 50000
 DEFAULT_MAX_PAGES_PER_KB = 20000
@@ -72,6 +75,10 @@ class WikiSearcher:
         self.documents: dict[str, WikiDocument] = {}
         self._page_mtimes: dict[str, int] = {}
         self._path_doc_ids: dict[str, str] = {}
+        # Page id -> the provenance to report on a hit for that page. For an article
+        # page this is its PARENT document's frontmatter: versioning, doc_type and
+        # source_key describe the document, not the one article the page holds.
+        self._document_provenance: dict[str, dict[str, object]] = {}
         self._kb_page_counts: dict[str, int] = {}
         self._kb_doc_ids: dict[str, set[str]] = {}
         self._max_pages_per_kb = self._max_pages_per_kb_config()
@@ -269,6 +276,7 @@ class WikiSearcher:
             self.documents.clear()
             self._page_mtimes.clear()
             self._path_doc_ids.clear()
+            self._document_provenance.clear()
             self._kb_page_counts.clear()
             self._kb_doc_ids.clear()
             if not self.root_dir.exists():
@@ -321,6 +329,7 @@ class WikiSearcher:
         term_weights: dict[str, float] | None = None,
         scope_preference: ScopePreference | None = None,
         scope_verdict: str | None = None,
+        granularity: str = "page",
     ) -> list[SearchHit]:
         """Search the wiki.
 
@@ -329,6 +338,17 @@ class WikiSearcher:
         matches the question's scope; ``None`` means no preference. Multipliers rather
         than filters, on purpose: a question about the general rule must not make a
         regional rule unfindable.
+
+        ``granularity`` decides what the ranked list is a ranking OF:
+
+        - ``page`` (default): the retrieval unit is the indexed page, so a long statute
+          can appear several times - once per article page, plus its source page. That
+          is the right list when one match means one candidate to read.
+        - ``document``: ranks each document once, by its best-matching page, and
+          reports that page as the hit. A document that matched at all therefore takes
+          exactly one slot, instead of crowding its own neighbours out with its
+          siblings (measured: repeated documents consumed 2-3 of the first twelve
+          candidates for the obvious queries and for the hard ones alike).
         """
         with self._lock:
             self._sync_if_stale()
@@ -356,65 +376,120 @@ class WikiSearcher:
                 allowed_doc_ids = kb_doc_ids
             if not allowed_doc_ids:
                 return []
-            results = self.index.search_weighted(
+            ranking = self._rank_pages(
                 query,
-                top_k=max(top_k * 4, 8),
                 allowed_doc_ids=allowed_doc_ids,
+                top_k=top_k,
                 term_weights=term_weights,
+                scope_preference=scope_preference,
+                scope_verdict=scope_verdict,
             )
-            def level_factor(doc_id: str) -> float:
-                if scope_preference is None or scope_preference.is_neutral:
-                    return 1.0
-                document = self.documents.get(doc_id)
-                if document is None:
-                    return 1.0
-                matched = document_matches(document.metadata, scope_verdict or "")
-                return (
-                    scope_preference.matches
-                    if matched
-                    else scope_preference.others
-                )
+            if granularity == "document":
+                ranking = self._one_page_per_document(ranking)
+            return [
+                self._hit_for_page(page_id, score)
+                for page_id, score in ranking[:top_k]
+                if self.documents.get(page_id) is not None
+            ]
 
-            ordered = sorted(
-                results,
-                key=lambda item: (
-                    (item[1] + self._kind_bonus(self.documents.get(item[0])))
-                    * level_factor(item[0]),
-                    item[1],
-                ),
-                reverse=True,
-            )[:top_k]
-            hits: list[SearchHit] = []
-            for doc_id, score in ordered:
-                document = self.documents.get(doc_id)
-                if document is None:
-                    continue
-                hits.append(
-                    SearchHit(
-                        chunk=Chunk(
-                            chunk_id=doc_id,
-                            doc_id=document.doc_id,
-                            chunk_index=0,
-                            text=self._limit_body(document.body),
-                            source_path=document.page_path,
-                            title=document.title,
-                            metadata={
-                                "kb_id": document.kb_id,
-                                "wiki_kind": document.kind,
-                                "wiki_status": document.metadata.get("status"),
-                                "original_source_path": document.source_path,
-                                "doc_type": document.metadata.get("doc_type"),
-                                "source_key": document.metadata.get("source_key"),
-                                "effective_date": document.metadata.get("effective_date"),
-                                "version": document.metadata.get("version"),
-                                "is_latest_version": document.metadata.get("is_latest_version"),
-                                "superseded_by": document.metadata.get("superseded_by"),
-                            },
-                        ),
-                        score=score,
-                    )
-                )
-            return hits
+    def _rank_pages(
+        self,
+        query: str,
+        *,
+        allowed_doc_ids: set[str] | frozenset[str],
+        top_k: int,
+        term_weights: dict[str, float] | None,
+        scope_preference: ScopePreference | None,
+        scope_verdict: str | None,
+    ) -> list[tuple[str, float]]:
+        """The page ranking, with the scope preference and page-kind bonus applied.
+
+        The index is asked for more than ``top_k`` pages because collapse and the
+        deterministic version filter run downstream: ranking exactly ``top_k`` pages
+        and then dropping duplicates would return fewer documents than requested.
+        """
+        results = self.index.search_weighted(
+            query,
+            top_k=max(top_k * 4, 8),
+            allowed_doc_ids=allowed_doc_ids,
+            term_weights=term_weights,
+        )
+
+        def level_factor(doc_id: str) -> float:
+            if scope_preference is None or scope_preference.is_neutral:
+                return 1.0
+            document = self.documents.get(doc_id)
+            if document is None:
+                return 1.0
+            matched = document_matches(document.metadata, scope_verdict or "")
+            return (
+                scope_preference.matches
+                if matched
+                else scope_preference.others
+            )
+
+        return sorted(
+            results,
+            key=lambda item: (
+                (item[1] + self._kind_bonus(self.documents.get(item[0])))
+                * level_factor(item[0]),
+                item[1],
+            ),
+            reverse=True,
+        )
+
+    def _one_page_per_document(
+        self, ranking: list[tuple[str, float]]
+    ) -> list[tuple[str, float]]:
+        """Collapse a page ranking to one entry per document, best page first.
+
+        Documents are keyed on ``(kb_id, doc_id)`` rather than on the page id, because
+        that is the identity the deep read needs: an article page and a source page of
+        the same document are two ways of finding one thing to read.
+        """
+        seen: set[tuple[str, str]] = set()
+        collapsed: list[tuple[str, float]] = []
+        for page_id, score in ranking:
+            document = self.documents.get(page_id)
+            if document is None:
+                continue
+            key = (document.kb_id, document.doc_id)
+            if key in seen:
+                continue
+            seen.add(key)
+            collapsed.append((page_id, score))
+        return collapsed
+
+    def _hit_for_page(self, page_id: str, score: float) -> SearchHit:
+        """Turn an indexed page into the hit the agentic pipeline consumes."""
+        document = self.documents[page_id]
+        # Generation metadata describes the DOCUMENT; this page may be one article of
+        # it (``document.metadata`` is the article page's own frontmatter there).
+        provenance = self._document_provenance.get(page_id, document.metadata)
+        return SearchHit(
+            chunk=Chunk(
+                chunk_id=page_id,
+                doc_id=document.doc_id,
+                chunk_index=0,
+                text=self._limit_body(document.body),
+                source_path=document.page_path,
+                title=document.title,
+                metadata={
+                    "kb_id": document.kb_id,
+                    "wiki_kind": document.kind,
+                    "wiki_status": provenance.get("status"),
+                    "wiki_page_path": document.page_path,
+                    "original_source_path": document.source_path,
+                    "doc_type": provenance.get("doc_type"),
+                    "source_key": provenance.get("source_key"),
+                    "effective_date": provenance.get("effective_date"),
+                    "version": provenance.get("version"),
+                    "is_latest_version": provenance.get("is_latest_version"),
+                    "superseded_by": provenance.get("superseded_by"),
+                },
+            ),
+            score=score,
+        )
 
     # ------------------------------------------------------------------ #
     # Per-page indexing                                                   #
@@ -434,6 +509,7 @@ class WikiSearcher:
         doc_id = self._path_doc_ids.pop(path_str, None)
         if doc_id is None:
             return
+        self._document_provenance.pop(doc_id, None)
         document = self.documents.pop(doc_id, None)
         if document is not None:
             kb_docs = self._kb_doc_ids.get(document.kb_id)
@@ -449,7 +525,14 @@ class WikiSearcher:
                 self._kb_page_counts.pop(document.kb_id, None)
         self.index.remove_document(doc_id)
 
-    def _register_document(self, path: Path, doc_id: str, document: WikiDocument) -> None:
+    def _register_document(
+        self,
+        path: Path,
+        doc_id: str,
+        document: WikiDocument,
+        *,
+        provenance: dict[str, object] | None = None,
+    ) -> None:
         # Re-indexing the same page replaces the previous entry.
         previous_doc_id = self._path_doc_ids.get(str(path))
         if previous_doc_id is not None and previous_doc_id != doc_id:
@@ -468,6 +551,9 @@ class WikiSearcher:
             self._kb_page_counts[document.kb_id] = count
         self._path_doc_ids[str(path)] = doc_id
         self.documents[doc_id] = document
+        self._document_provenance[doc_id] = (
+            dict(provenance) if provenance is not None else document.metadata
+        )
         self._kb_doc_ids.setdefault(document.kb_id, set()).add(doc_id)
         # The page title carries the document's own summary, which is a much
         # denser signal per token than body text; it is indexed as a separate
@@ -497,6 +583,25 @@ class WikiSearcher:
                 metadata=metadata,
             ),
         )
+        self._adopt_pending_articles(metadata)
+
+    def _adopt_pending_articles(self, metadata: dict[str, object]) -> None:
+        """Give already-indexed article pages of this document its provenance.
+
+        Pages are indexed in path order and ``articles/`` sorts before ``sources/``, so
+        in a full refresh every article page is seen before the source page that
+        describes it. The article page cannot invent the document's versioning, and the
+        document must not lose it, so the source page fills it in the moment it arrives.
+        Without this an article hit reported no ``source_key``/``is_latest_version`` and
+        slipped past the deterministic version filter.
+        """
+        parent_doc_id = str(metadata.get("doc_id", ""))
+        if not parent_doc_id:
+            return
+        prefix = f"wiki:article:{parent_doc_id}:"
+        for page_id in self.documents:
+            if page_id.startswith(prefix):
+                self._document_provenance[page_id] = metadata
 
     def _index_article_page(self, page_path: Path) -> None:
         """Index one article of a long document as its own retrieval unit.
@@ -531,7 +636,26 @@ class WikiSearcher:
                 kind="article",
                 metadata={**metadata, "wiki_kind": "article", "article_label": label},
             ),
+            provenance=self._parent_provenance(kb_id, parent_doc_id, metadata),
         )
+
+    def _parent_provenance(
+        self, kb_id: str, parent_doc_id: str, article_metadata: dict[str, object]
+    ) -> dict[str, object]:
+        """The parent document's frontmatter, if its source page is already indexed.
+
+        An article page's own frontmatter carries the label and index, not the
+        document's versioning (``source_key``, ``effective_date``, ``is_latest_version``).
+        Those describe the DOCUMENT, and an article hit that reported them as absent
+        would slip past the deterministic version filter. Pages are indexed in path
+        order, so an article page can arrive before its source page: it then falls back
+        to its own frontmatter, and nothing is invented - a field the article page does
+        not carry stays absent here.
+        """
+        source_page = self.documents.get(f"wiki:source:{parent_doc_id}")
+        if source_page is not None and source_page.kb_id == kb_id:
+            return source_page.metadata
+        return article_metadata
 
     def _index_topic_page(self, page_path: Path) -> None:
         metadata, body = WikiCompiler.read_frontmatter(page_path)

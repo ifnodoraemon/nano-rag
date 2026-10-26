@@ -4,11 +4,12 @@ import asyncio
 import json
 import logging
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from time import perf_counter
 from typing import TYPE_CHECKING, TypedDict
 
 from app.agentic.discovery import AgenticDiscovery
+from app.agentic.evidence_view import EvidenceDriller
 from app.core.exceptions import ConfigurationError, ModelOutputError
 from app.generation.answer_formatter import AnswerFormatter
 from app.generation.citation_check import check_citations
@@ -102,6 +103,15 @@ VERIFY_SCHEMA = {
     },
 }
 
+# How much of the evidence the auditor and the synthesizer actually get to see.
+# The defaults are sized for the corpus this was measured on: a statute is one
+# chunk of 5k-9k characters, so the per-document ceiling is what keeps one whole
+# law readable, and the total keeps twelve of them inside the model's window.
+DEFAULT_EVIDENCE_TOTAL_CHARS = 36000
+DEFAULT_EVIDENCE_PER_CONTEXT_CHARS = 6000
+DEFAULT_EVIDENCE_MIN_PER_CONTEXT_CHARS = 1200
+DEFAULT_EVIDENCE_MAX_CONTEXTS = 12
+
 
 @dataclass(frozen=True)
 class EvidenceCheck:
@@ -112,16 +122,38 @@ class EvidenceCheck:
     has_contexts: bool
     has_conflicts: bool
     reason: str
+    # The auditor's first verdict, before its own gaps were searched for in the
+    # evidence it had already been shown. ``sufficient`` is the final one.
+    initial_sufficient: bool = True
+    # True when the auditor was shown every retrieved document in full: neither
+    # the retrieved evidence nor the auditor's view was truncated. A "not found"
+    # from an auditor that saw only excerpts is "not found in what I was shown",
+    # which is a different claim; synthesis needs to know which one it got.
+    evidence_complete: bool = True
+    # Seconds spent in each auditor round trip, in order. One entry for the first
+    # audit; two when the auditor's gaps were searched for in the evidence it
+    # already had. Recorded because "the savings came from triggering fewer
+    # corrective rounds" and "the savings were eaten by extra audit calls" are
+    # otherwise indistinguishable from the outside.
+    audit_seconds: list[float] = field(default_factory=list)
 
     def as_dict(self) -> dict[str, object]:
         return {
             "sufficient": self.sufficient,
+            "initial_sufficient": self.initial_sufficient,
             "coverage_ratio": self.coverage_ratio,
             "missing_terms": self.missing_terms,
             "follow_up_queries": self.follow_up_queries,
             "has_contexts": self.has_contexts,
             "has_conflicts": self.has_conflicts,
+            "evidence_complete": self.evidence_complete,
             "reason": self.reason,
+            "audit_seconds": self.audit_seconds,
+            "audit_calls": len(self.audit_seconds),
+            "redrill_improved": (
+                len(self.audit_seconds) > 1 and not self.initial_sufficient
+                and self.sufficient
+            ),
         }
 
 
@@ -181,6 +213,31 @@ class AgenticReasoningService:
         self.max_retrieval_loops = int(agent_settings.get("max_retrieval_loops", 2))
         self.max_subqueries = int(agent_settings.get("max_subqueries", 4))
         self.graph_expansion_mode = os.getenv("RAG_GRAPH_EXPANSION_MODE", "auto").lower()
+        # Evidence visibility budget: how much of each retrieved document the
+        # auditor and the synthesizer are shown. See app/agentic/evidence_view.py
+        # for why a per-document allocation replaced a per-context character cap.
+        self.evidence_driller = EvidenceDriller(
+            max_contexts=int(
+                os.getenv(
+                    "RAG_EVIDENCE_MAX_CONTEXTS", str(DEFAULT_EVIDENCE_MAX_CONTEXTS)
+                )
+            ),
+            total_chars=int(
+                os.getenv("RAG_EVIDENCE_TOTAL_CHARS", str(DEFAULT_EVIDENCE_TOTAL_CHARS))
+            ),
+            max_per_context=int(
+                os.getenv(
+                    "RAG_EVIDENCE_PER_CONTEXT_CHARS",
+                    str(DEFAULT_EVIDENCE_PER_CONTEXT_CHARS),
+                )
+            ),
+            min_per_context=int(
+                os.getenv(
+                    "RAG_EVIDENCE_MIN_PER_CONTEXT_CHARS",
+                    str(DEFAULT_EVIDENCE_MIN_PER_CONTEXT_CHARS),
+                )
+            ),
+        )
         self.workflow = self._build_workflow()
 
     async def run(self, payload: ChatRequest) -> ChatResponse:
@@ -233,18 +290,35 @@ class AgenticReasoningService:
         if history:
             with self.tracing_manager.span("agent.contextualize", {"agent.query": query}):
                 resolved = await self._contextualize(query, history)
-        with self.tracing_manager.span("agent.decompose", {"agent.query": resolved}):
-            subqueries = await self._decompose(resolved)
-        return {"resolved_query": resolved, "subqueries": subqueries}
+        # The subquery decomposition runs alongside the first retrieval instead of
+        # before it: see _initial_recall_node. Here it used to put one model round
+        # trip in front of every request, and nothing on the first pass consumes
+        # its result.
+        return {"resolved_query": resolved}
 
     async def _initial_recall_node(self, state: AgentState) -> AgentState:
         payload = state["payload"]
         query = self._query_of(state)
-        contexts, trace = await self._retrieve(payload, query)
+        # Subqueries are consulted only by a corrective round (`_next_queries`),
+        # which runs after this node has already produced contexts; the call that
+        # produces them does not depend on those contexts. Running it concurrently
+        # with the first retrieval measured 104.9s -> 80.5s over six real queries
+        # (-23%) against the same gateway.
+        decompose = asyncio.ensure_future(self._decompose(query))
+        try:
+            contexts, trace = await self._retrieve(payload, query)
+        except BaseException:
+            # A failed retrieval must not leave the decomposition running unawaited:
+            # that surfaces as "coroutine was never awaited" and, worse, hides the
+            # retrieval error that actually failed the request.
+            decompose.cancel()
+            raise
+        subqueries = await decompose
         graph_contexts = await self._expand_graph_contexts(payload, contexts, trace)
         return {
             "trace_id": str(trace["trace_id"]),
             "retrieval_queries": [query],
+            "subqueries": subqueries,
             "graph_expanded_node_ids": self._node_ids(graph_contexts),
             "reading_plans": self._reading_plans_from_trace(trace),
             "contexts": self._merge_contexts(contexts, graph_contexts),
@@ -303,9 +377,13 @@ class AgenticReasoningService:
         check = state["check"]
         contexts = state.get("contexts", [])
         agent_state = self._public_agent_state(state, check)
+        # Synthesis gets the evidence the auditor judged, not each context's first
+        # N characters: handing synthesis text the auditor never saw (or vice
+        # versa) is how a verdict and an answer come to disagree about the same
+        # request. Verbatim spans only.
         messages = self.prompt_builder.build_messages(
             query,
-            contexts,
+            self._synthesis_contexts(query, contexts),
             agent_state=agent_state,
         )
         generation_started = perf_counter()
@@ -335,6 +413,7 @@ class AgenticReasoningService:
             generation_seconds=generation_seconds,
             end_to_end_seconds=round(perf_counter() - state["started_at"], 4),
             answerable=answerable,
+            audit_seconds=list(check.audit_seconds),
         )
         return {
             "messages": messages,
@@ -444,6 +523,28 @@ class AgenticReasoningService:
             ),
             "reading_plan": self._latest_reading_plan(state),
             "verification": check.as_dict(),
+            "evidence_view": self._evidence_view_summary(state),
+        }
+
+    def _evidence_view_summary(self, state: AgentState) -> dict[str, object]:
+        """How much of each retrieved document the model was actually shown.
+
+        Recorded on the trace because "the evidence does not contain X" and "the
+        excerpt I read does not contain X" were indistinguishable in this
+        project's refusals: the same 42 rows read identical either way. This
+        number is what makes the next diagnosis possible without re-running.
+        """
+        contexts = state.get("contexts", [])
+        excerpts = self.evidence_driller.excerpt(contexts, watch_terms=[self._query_of(state)])
+        total = sum(excerpt.total_chars for excerpt in excerpts)
+        visible = sum(excerpt.visible_chars for excerpt in excerpts)
+        return {
+            "contexts": len(contexts),
+            "contexts_shown": len(excerpts),
+            "document_chars": total,
+            "visible_chars": visible,
+            "visible_ratio": round(visible / total, 4) if total else 0.0,
+            "all_exhausted": bool(excerpts) and all(e.exhausted for e in excerpts),
         }
 
     async def _retrieve(
@@ -583,8 +684,84 @@ class AgenticReasoningService:
                 has_contexts=False,
                 has_conflicts=False,
                 reason="no_contexts",
+                initial_sufficient=False,
             )
-        evidence = self._compact_contexts(contexts)
+        started = perf_counter()
+        first = await self._audit(
+            query, subqueries, contexts, watch_terms=[query, *subqueries]
+        )
+        audit_seconds = [round(perf_counter() - started, 4)]
+        if first[0]:
+            return self._check_from(
+                contexts,
+                payload=first[1],
+                sufficient=True,
+                initial_sufficient=True,
+                exhausted=first[2],
+                audit_seconds=audit_seconds,
+            )
+        # A second pass used to run here: re-show the same documents with the
+        # auditor's own missing_terms added to the watch terms, in case the
+        # auditor had missed a passage it could have seen. Measured against the
+        # 41 insufficient rows of the 270-question run, it exposed ZERO terms
+        # the first view had not already exposed, because the first view is
+        # already term-driven - a term it does not show is a term the retrieved
+        # contexts do not contain, and re-reading them cannot conjure it. So the
+        # pass cost an extra audit call and found nothing; the gaps it was meant
+        # to catch are handled by the first view, and the gaps that remain are
+        # genuinely absent evidence, which is what corrective retrieval is for.
+        return self._check_from(
+            contexts,
+            payload=first[1],
+            sufficient=False,
+            initial_sufficient=False,
+            exhausted=first[2],
+            audit_seconds=audit_seconds,
+        )
+
+    def _check_from(
+        self,
+        contexts: list[dict[str, object]],
+        *,
+        payload: dict[str, object],
+        sufficient: bool,
+        initial_sufficient: bool,
+        exhausted: bool,
+        audit_seconds: list[float],
+    ) -> EvidenceCheck:
+        coverage_ratio = self._float_in_range(payload.get("coverage_ratio"), 0.0, 1.0)
+        missing = self._string_list_field(payload, "missing_terms")
+        follow_up_queries = self._string_list_field(payload, "follow_up_queries")
+        return EvidenceCheck(
+            sufficient=sufficient,
+            coverage_ratio=round(coverage_ratio, 3),
+            missing_terms=missing[:8],
+            follow_up_queries=self._dedupe(follow_up_queries)[: self.max_subqueries],
+            has_contexts=True,
+            has_conflicts=self._has_conflicts(contexts),
+            reason=str(
+                payload.get("reason")
+                or ("coverage_ok" if sufficient else "coverage_gap")
+            ),
+            initial_sufficient=initial_sufficient,
+            evidence_complete=exhausted,
+            audit_seconds=audit_seconds,
+        )
+
+    async def _audit(
+        self,
+        query: str,
+        subqueries: list[str],
+        contexts: list[dict[str, object]],
+        *,
+        watch_terms: list[str],
+    ) -> tuple[bool, dict[str, object], bool]:
+        """One auditor round trip. Returns (sufficient, payload, saw_everything)."""
+        excerpts = self.evidence_driller.excerpt(contexts, watch_terms=watch_terms)
+        evidence = [excerpt.as_dict_for_prompt() for excerpt in excerpts]
+        exhausted = all(excerpt.exhausted for excerpt in excerpts) and (
+            len(contexts) <= self.evidence_driller.max_contexts
+        )
         auditor_input = {
             "question": query,
             "subqueries": subqueries,
@@ -619,6 +796,15 @@ class AgenticReasoningService:
                         "because the evidence is partial about the general subject - mark "
                         "it insufficient only when the specific thing asked is absent or "
                         "the evidence contradicts itself.\n\n"
+                        "Answering the question is not your job: do not write the answer, "
+                        "and do not judge whether it takes effort to assemble from several "
+                        "passages. If the passages together state it, the evidence is "
+                        "sufficient.\n\n"
+                        "Each evidence item is selected passages from one document, not "
+                        "necessarily its beginning. The visible_region_* fields locate them. "
+                        "\"[...]\" means text was left out there. excerpt_exhausted=true "
+                        "means the item is that whole document, so an absence in it is a real "
+                        "absence; false means you are judging what you were shown.\n\n"
                         "If it is genuinely insufficient, propose targeted follow-up "
                         "retrieval queries.\n\n"
                         "Return JSON with keys: sufficient(boolean), coverage_ratio(number 0..1), "
@@ -632,18 +818,7 @@ class AgenticReasoningService:
         )
         payload = parse_json_object(str(result.get("content") or ""))
         sufficient = self._parse_bool(payload.get("sufficient"))
-        coverage_ratio = self._float_in_range(payload.get("coverage_ratio"), 0.0, 1.0)
-        missing = self._string_list_field(payload, "missing_terms")
-        follow_up_queries = self._string_list_field(payload, "follow_up_queries")
-        return EvidenceCheck(
-            sufficient=sufficient,
-            coverage_ratio=round(coverage_ratio, 3),
-            missing_terms=missing[:8],
-            follow_up_queries=self._dedupe(follow_up_queries)[: self.max_subqueries],
-            has_contexts=True,
-            has_conflicts=self._has_conflicts(contexts),
-            reason=str(payload.get("reason") or ("coverage_ok" if sufficient else "coverage_gap")),
-        )
+        return sufficient, payload, exhausted
 
     def _next_queries(
         self, original_query: str, subqueries: list[str], check: EvidenceCheck
@@ -681,24 +856,45 @@ class AgenticReasoningService:
             for context in contexts
         )
 
-    def _compact_contexts(
-        self, contexts: list[dict[str, object]]
+    def _synthesis_contexts(
+        self, query: str, contexts: list[dict[str, object]]
     ) -> list[dict[str, object]]:
-        compacted: list[dict[str, object]] = []
-        for context in contexts[:12]:
-            compacted.append(
+        """Render the audited excerpts as synthesis contexts.
+
+        The prompt builder still needs an ``item["text"]`` per context, so each
+        excerpt is written back as a copy of its context with ``text`` replaced
+        by the same verbatim passages the auditor was shown. Offsets and the
+        elision markers are kept in ``evidence_excerpt`` so the trace records
+        what was visible. Nothing is re-ranked or re-selected here.
+        """
+        excerpts = self.evidence_driller.excerpt(contexts, watch_terms=[query])
+        by_key: dict[str, dict[str, object]] = {}
+        for context in contexts:
+            for key in (
+                context.get("chunk_id"),
+                context.get("node_id"),
+                context.get("citation_label"),
+            ):
+                if key is not None:
+                    by_key.setdefault(str(key), context)
+        rendered: list[dict[str, object]] = []
+        for excerpt in excerpts:
+            source = by_key.get(str(excerpt.node_id)) or by_key.get(str(excerpt.label))
+            if source is None:
+                continue
+            rendered.append(
                 {
-                    "label": context.get("citation_label"),
-                    "node_id": context.get("node_id") or context.get("chunk_id"),
-                    "source": context.get("source"),
-                    "title": context.get("title"),
-                    "hierarchy_path": context.get("hierarchy_path"),
-                    "page_number": context.get("page_number"),
-                    "graph_relation": context.get("graph_relation"),
-                    "text": str(context.get("text") or "")[:1600],
+                    **source,
+                    "text": excerpt.render(),
+                    "evidence_excerpt": {
+                        "document_chars": excerpt.total_chars,
+                        "visible_chars": excerpt.visible_chars,
+                        "exhausted": excerpt.exhausted,
+                        "passages": [passage.as_dict() for passage in excerpt.passages],
+                    },
                 }
             )
-        return compacted
+        return rendered
 
     def _string_list_field(self, payload: dict[str, object], key: str) -> list[str]:
         """Read a JSON array of strings, failing loudly on any other shape."""
@@ -766,6 +962,7 @@ class AgenticReasoningService:
         generation_seconds: float,
         end_to_end_seconds: float,
         answerable: bool | None = None,
+        audit_seconds: list[float] | None = None,
     ) -> None:
         record = self.trace_store.get(trace_id)
         if record is None:
@@ -801,6 +998,8 @@ class AgenticReasoningService:
                     **record.step_latencies,
                     "generation_seconds": generation_seconds,
                     "agent_end_to_end_seconds": end_to_end_seconds,
+                    "audit_seconds": list(audit_seconds or []),
+                    "audit_calls": len(audit_seconds or []),
                 },
                 "citation_integrity": citation_integrity,
                 "answerable": answerable,
