@@ -23,6 +23,7 @@ from app.ingestion.parse_cache import ParseCache, build_fingerprint, content_has
 from app.ingestion.token_ledger import TokenLedger, collect_tokens
 from app.ingestion.metadata import build_source_key, extract_document_metadata
 from app.ingestion.graph_extractor import GraphExtractor
+from app.agentic.scope import describe_document_scope
 from app.wiki.article_index import split_into_articles
 from app.wiki.compiler import WikiCompiler
 from app.wiki.doc2query import generate_questions
@@ -154,6 +155,12 @@ class IngestionPipeline:
         # summary (~15% of the source on the measured corpus); without article pages the
         # rest is invisible to the lexical index.
         self.article_index_enabled = _strict_bool_env("RAG_ARTICLE_INDEX_ENABLED", "true")
+        # Read where each document applies and how authoritative it is, from the
+        # document's own words. Generic across corpora - a statute names its legislature,
+        # a contract names its entities, a manual names its site.
+        self.scope_extraction_enabled = _strict_bool_env(
+            "RAG_SCOPE_EXTRACTION_ENABLED", "true"
+        )
         self.model_chunking_enabled = _strict_bool_env(
             "RAG_MODEL_CHUNKING_ENABLED", "true"
         )
@@ -271,6 +278,8 @@ class IngestionPipeline:
                         await self._attach_synthetic_questions(prepared_documents)
                     if self.article_index_enabled:
                         await self._write_article_pages(prepared_documents)
+                    if self.scope_extraction_enabled:
+                        await self._attach_document_scope(prepared_documents)
                     await asyncio.to_thread(
                         self.wiki_compiler.upsert_documents,
                         [
@@ -689,6 +698,28 @@ class IngestionPipeline:
             elif node.text.strip():
                 parts.append(node.text.strip())
         return "\n\n".join(parts).strip()
+
+    async def _attach_document_scope(
+        self, prepared_documents: list[PreparedDocument]
+    ) -> None:
+        """Record each document's own scope statement in its metadata."""
+        limit = _ingest_concurrency()
+
+        async def one(prepared: PreparedDocument) -> None:
+            async with asyncio.Semaphore(limit):
+                scope = await describe_document_scope(
+                    prepared.document.content,
+                    self.generation_client,
+                    title=prepared.document.title,
+                )
+                if scope.get("applies_to"):
+                    prepared.document.metadata["applies_to"] = scope["applies_to"]
+                if scope.get("authority_rank") is not None:
+                    prepared.document.metadata["authority_rank"] = scope["authority_rank"]
+
+        async with asyncio.TaskGroup() as group:
+            for prepared in prepared_documents:
+                group.create_task(one(prepared))
 
     async def _write_article_pages(
         self, prepared_documents: list[PreparedDocument]

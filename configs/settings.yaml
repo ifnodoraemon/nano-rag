@@ -4,7 +4,7 @@ agent:
   # Agentic (wiki) retrieval engine. The wiki discovery layer is the retrieval
   # engine (RAG_WIKI_ENABLED=true is required; there is no dense fallback).
   discovery_top_k: 12
-  max_read_docs: 4
+  max_read_docs: 6
   max_read_chunks_per_doc: 24
   max_context_text_chars: 6000
   freshness_policy:

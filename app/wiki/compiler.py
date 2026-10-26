@@ -466,6 +466,13 @@ class WikiCompiler:
             "is_latest_version": True,
             "superseded_by": None,
             "updated_at": datetime.now(timezone.utc).isoformat(),
+            # The document's own statement of where it applies and how authoritative it
+            # is, as the model read it from the text. Generic on purpose: a statute says
+            # "全国人民代表大会", a contract says "applies to subsidiaries in China", a
+            # manual says "this revision supersedes the 2023 edition". All of them are
+            # scope, none of them need a per-domain table.
+            "applies_to": as_str_list(document.metadata.get("applies_to")),
+            "authority_rank": document.metadata.get("authority_rank"),
             # The questions this document answers, in a user's own words. Rendered into
             # the page body, which is what the BM25 discovery layer indexes.
             "synthetic_questions": as_str_list(
@@ -601,6 +608,9 @@ class WikiCompiler:
                 "title": f"{document.title} {label}",
                 "source_path": document.source_path,
                 "kb_id": kb_id,
+                # An article is exactly as authoritative as its parent document.
+                "applies_to": as_str_list(document.metadata.get("applies_to")),
+                "authority_rank": document.metadata.get("authority_rank"),
             }
             self._write_page(path, metadata, text)
             written += 1

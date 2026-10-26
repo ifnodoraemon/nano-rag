@@ -25,6 +25,7 @@ from app.schemas.chunk import Chunk
 from app.retrieval.hits import SearchHit
 from app.agentic.candidate_filter import filter_candidates
 from app.agentic.hyde import build_hyde_weights
+from app.agentic.scope import ScopePreference, preference_for, query_scope
 from app.agentic.llm_rerank import RerankDocument, rerank_documents
 from app.agentic.query_expansion import expand_query, fuse_rankings
 from app.utils.coerce import as_dict, as_list, as_str, as_str_list
@@ -141,6 +142,10 @@ class AgenticDiscovery:
         # survey (docs/research/industry-rag-2026.md). Off by default so the A/B is
         # explicit; enable with RAG_HYDE_ENABLED=true.
         self.hyde_enabled = _flag("RAG_HYDE_ENABLED", False)
+        # Prefer documents whose stated scope matches the question's scope. Read from
+        # the documents themselves at ingest, so it works for any corpus - see
+        # app/agentic/scope.py for why there is no per-domain table.
+        self.scope_preference_enabled = _flag("RAG_SCOPE_PREFERENCE_ENABLED", True)
         self.llm_rerank_top_n = _positive_int("RAG_LLM_RERANK_TOP_N", 10)
 
     async def discovery_candidates(
@@ -274,6 +279,17 @@ class AgenticDiscovery:
             * DISCOVERY_OVERFETCH_MULTIPLIER
             * max(1, depth)
         )
+        # What scope the question is about (general rule vs a specific place/entity),
+        # turned into a ranking preference. The preference reorders; it never filters,
+        # so a "general" question cannot make a regional document unfindable.
+        scope_preference = None
+        scope_verdict: str | None = None
+        if self.scope_preference_enabled:
+            scope_verdict = await query_scope(query, self.generation_client)
+            candidate_pref = preference_for(scope_verdict)
+            if not candidate_pref.is_neutral:
+                scope_preference = candidate_pref
+
         if self.hyde_enabled:
             # HyDE + Rocchio: the model writes the passage that would answer the
             # question, and that passage becomes TERM WEIGHTS rather than being
@@ -297,10 +313,17 @@ class AgenticDiscovery:
                 top_k=fetch_k,
                 kb_id=kb_id,
                 metadata_filters=filters,
+                scope_preference=scope_preference,
+                scope_verdict=scope_verdict,
             )
         else:
             hits = await self._discover_with_expansion(
-                query, kb_id=kb_id, filters=filters, fetch_k=fetch_k
+                query,
+                kb_id=kb_id,
+                filters=filters,
+                fetch_k=fetch_k,
+                scope_preference=scope_preference,
+                scope_verdict=scope_verdict,
             )
         # Only source pages map to a deep-readable parsed artifact; topic/index
         # pages are aggregates with no artifact of their own.
@@ -382,6 +405,8 @@ class AgenticDiscovery:
         kb_id: str,
         filters: dict[str, object] | None,
         fetch_k: int,
+        scope_preference: "ScopePreference | None" = None,
+        scope_verdict: str | None = None,
     ) -> list[SearchHit]:
         """Search the original query plus model-generated keyword variants, fused.
 
@@ -410,6 +435,8 @@ class AgenticDiscovery:
                 top_k=fetch_k,
                 kb_id=kb_id,
                 metadata_filters=filters,
+                scope_preference=scope_preference,
+                scope_verdict=scope_verdict,
             )
             # Only source pages map to a deep-readable parsed artifact; topic and
             # index pages are aggregates with no artifact of their own.

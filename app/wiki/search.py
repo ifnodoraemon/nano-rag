@@ -7,6 +7,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
+from app.agentic.scope import ScopePreference, document_matches
 from app.core.exceptions import ConfigurationError, RetrievalError
 from app.retrieval.bm25 import BM25Config, BM25Index
 from app.retrieval.filters import match_metadata_filters
@@ -318,8 +319,17 @@ class WikiSearcher:
         metadata_filters: dict[str, object] | None = None,
         *,
         term_weights: dict[str, float] | None = None,
+        scope_preference: ScopePreference | None = None,
+        scope_verdict: str | None = None,
     ) -> list[SearchHit]:
-        """Search the wiki. ``term_weights`` enables weighted (Rocchio/HyDE) queries."""
+        """Search the wiki.
+
+        ``term_weights`` enables weighted (Rocchio/HyDE) queries. ``scope_preference``
+        multiplies a hit's score according to whether the document's recorded scope
+        matches the question's scope; ``None`` means no preference. Multipliers rather
+        than filters, on purpose: a question about the general rule must not make a
+        regional rule unfindable.
+        """
         with self._lock:
             self._sync_if_stale()
             scope_id = WikiCompiler.scope_id(kb_id=kb_id)
@@ -352,10 +362,24 @@ class WikiSearcher:
                 allowed_doc_ids=allowed_doc_ids,
                 term_weights=term_weights,
             )
+            def level_factor(doc_id: str) -> float:
+                if scope_preference is None or scope_preference.is_neutral:
+                    return 1.0
+                document = self.documents.get(doc_id)
+                if document is None:
+                    return 1.0
+                matched = document_matches(document.metadata, scope_verdict or "")
+                return (
+                    scope_preference.matches
+                    if matched
+                    else scope_preference.others
+                )
+
             ordered = sorted(
                 results,
                 key=lambda item: (
-                    item[1] + self._kind_bonus(self.documents.get(item[0])),
+                    (item[1] + self._kind_bonus(self.documents.get(item[0])))
+                    * level_factor(item[0]),
                     item[1],
                 ),
                 reverse=True,
