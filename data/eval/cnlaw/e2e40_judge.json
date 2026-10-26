@@ -1,0 +1,202 @@
+[
+ {
+  "sample_id": "tb-0",
+  "label": "REFUSED",
+  "reason": "回答称文档未包含，未直接作答"
+ },
+ {
+  "sample_id": "tb-1",
+  "label": "SUPPORTED",
+  "reason": "条例明确一孩延长产假六十天"
+ },
+ {
+  "sample_id": "tb-2",
+  "label": "SUPPORTED",
+  "reason": "第二十二条明确规定"
+ },
+ {
+  "sample_id": "tb-3",
+  "label": "REFUSED",
+  "reason": "回答称文档未包含相关信息"
+ },
+ {
+  "sample_id": "tb-4",
+  "label": "ERROR",
+  "reason": "judge failed"
+ },
+ {
+  "sample_id": "tb-5",
+  "label": "UNSUPPORTED",
+  "reason": "上下文未含补偿条款"
+ },
+ {
+  "sample_id": "tb-6",
+  "label": "ERROR",
+  "reason": "judge failed"
+ },
+ {
+  "sample_id": "tb-7",
+  "label": "UNSUPPORTED",
+  "reason": "上下文未见该规定"
+ },
+ {
+  "sample_id": "tb-8",
+  "label": "SUPPORTED",
+  "reason": "第十四条规定30日内书面通知"
+ },
+ {
+  "sample_id": "tb-9",
+  "label": "REFUSED",
+  "reason": "称未包含，上下文有变通规定"
+ },
+ {
+  "sample_id": "tb-10",
+  "label": "REFUSED",
+  "reason": "回答称文档未包含，属拒答"
+ },
+ {
+  "sample_id": "tb-11",
+  "label": "SUPPORTED",
+  "reason": "口头或文字通知离婚均无效，有依据"
+ },
+ {
+  "sample_id": "tb-12",
+  "label": "UNSUPPORTED",
+  "reason": "节选未见禁止工具条款"
+ },
+ {
+  "sample_id": "tb-13",
+  "label": "UNSUPPORTED",
+  "reason": "上下文未含繁育许可条款"
+ },
+ {
+  "sample_id": "tb-14",
+  "label": "UNSUPPORTED",
+  "reason": "上下文未提供该法条依据"
+ },
+ {
+  "sample_id": "tb-15",
+  "label": "SUPPORTED",
+  "reason": "第十五条明确规定需授权"
+ },
+ {
+  "sample_id": "tb-16",
+  "label": "SUPPORTED",
+  "reason": "第十八条明确列出这些地点领域"
+ },
+ {
+  "sample_id": "tb-17",
+  "label": "REFUSED",
+  "reason": "称未包含，上下文有相关原则规定"
+ },
+ {
+  "sample_id": "tb-18",
+  "label": "ERROR",
+  "reason": "judge failed"
+ },
+ {
+  "sample_id": "tb-19",
+  "label": "REFUSED",
+  "reason": "回答称未包含，但上下文有相关规定"
+ },
+ {
+  "sample_id": "tb-20",
+  "label": "ERROR",
+  "reason": "judge failed"
+ },
+ {
+  "sample_id": "tb-21",
+  "label": "REFUSED",
+  "reason": "回答称文档未包含相关信息"
+ },
+ {
+  "sample_id": "tb-22",
+  "label": "REFUSED",
+  "reason": "回答称未包含，实际第十八条有规定"
+ },
+ {
+  "sample_id": "tb-23",
+  "label": "REFUSED",
+  "reason": "上下文第十七条明确要求签合同，回答误称未包含"
+ },
+ {
+  "sample_id": "tb-24",
+  "label": "REFUSED",
+  "reason": "回答称文档未包含相关信息"
+ },
+ {
+  "sample_id": "tb-25",
+  "label": "REFUSED",
+  "reason": "回答称文档未包含相关信息"
+ },
+ {
+  "sample_id": "tb-26",
+  "label": "REFUSED",
+  "reason": "答称文档未包含相关信息"
+ },
+ {
+  "sample_id": "tb-27",
+  "label": "SUPPORTED",
+  "reason": "依据第十八条，且正确指出未明确公告须在发行前"
+ },
+ {
+  "sample_id": "tb-28",
+  "label": "SUPPORTED",
+  "reason": "第二十一条明确支持该回答"
+ },
+ {
+  "sample_id": "tb-29",
+  "label": "REFUSED",
+  "reason": "回答称文档未包含，属拒答"
+ },
+ {
+  "sample_id": "tb-30",
+  "label": "SUPPORTED",
+  "reason": "上下文第八条明确支持"
+ },
+ {
+  "sample_id": "tb-31",
+  "label": "REFUSED",
+  "reason": "文档无相关内容，回答拒答"
+ },
+ {
+  "sample_id": "tb-32",
+  "label": "SUPPORTED",
+  "reason": "第十条明确公民有权制止"
+ },
+ {
+  "sample_id": "tb-33",
+  "label": "SUPPORTED",
+  "reason": "第八条明确规定必须预留"
+ },
+ {
+  "sample_id": "tb-34",
+  "label": "ERROR",
+  "reason": "judge failed"
+ },
+ {
+  "sample_id": "tb-35",
+  "label": "ERROR",
+  "reason": "judge failed"
+ },
+ {
+  "sample_id": "tb-36",
+  "label": "UNSUPPORTED",
+  "reason": "上下文未见供热起止日期"
+ },
+ {
+  "sample_id": "tb-37",
+  "label": "SUPPORTED",
+  "reason": "依据第十八条，回答准确"
+ },
+ {
+  "sample_id": "tb-38",
+  "label": "REFUSED",
+  "reason": "回答称未包含，但第十七条有立即抢修规定"
+ },
+ {
+  "sample_id": "tb-39",
+  "label": "SUPPORTED",
+  "reason": "上下文明确写明体育活动不少于一小时"
+ }
+]
