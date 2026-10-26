@@ -606,8 +606,21 @@ class AgenticReasoningService:
                 {
                     "role": "user",
                     "content": (
-                        "Decide whether the evidence can close the user's question. "
-                        "If not, propose targeted follow-up retrieval queries.\n"
+                        "Decide whether the evidence can answer the user's question.\n\n"
+                        "SUFFICIENT means: the evidence contains the information needed to "
+                        "answer the question that was actually asked. It does NOT require "
+                        "that the evidence cover every angle of the topic, nor that it "
+                        "restate the question's wording. If a reasonable reader could "
+                        "answer from it, it is sufficient. Example: for \"男的多少岁能结婚?\" "
+                        "the passage \"结婚年龄，男不得早于二十周岁\" is sufficient, even "
+                        "though it says nothing about the conditions or exceptions.\n\n"
+                        "Judge only what the question asks for. A question about one fact "
+                        "does not need the rest of the document. Do NOT lower the verdict "
+                        "because the evidence is partial about the general subject - mark "
+                        "it insufficient only when the specific thing asked is absent or "
+                        "the evidence contradicts itself.\n\n"
+                        "If it is genuinely insufficient, propose targeted follow-up "
+                        "retrieval queries.\n\n"
                         "Return JSON with keys: sufficient(boolean), coverage_ratio(number 0..1), "
                         "missing_terms(array of short strings), follow_up_queries(array), reason(string).\n\n"
                         "Input JSON: "

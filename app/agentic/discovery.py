@@ -135,9 +135,12 @@ class AgenticDiscovery:
         # the deployment's own corpus justifies the extra call per query.
         self.llm_rerank_enabled = _flag("RAG_LLM_RERANK_ENABLED", False)
         # Remove candidates the model judges irrelevant before the read plan sees them.
-        # BM25 scores cannot do this: measured on the Chinese-law corpus, top-6 scores
-        # are indistinguishable whether or not the answer is in the pool.
-        self.candidate_filter_enabled = _flag("RAG_CANDIDATE_FILTER_ENABLED", True)
+        # BM25 scores cannot do that, but the measured gain was modest and the stage adds
+        # a model call whose failure currently fails the whole request (the scorer must
+        # return one score per candidate, and it does not always). Off by default until
+        # it is both measured as beneficial AND robust; run
+        # `--mode deterministic` with RAG_CANDIDATE_FILTER_ENABLED=true to re-measure.
+        self.candidate_filter_enabled = _flag("RAG_CANDIDATE_FILTER_ENABLED", False)
         # HyDE + Rocchio feedback: highest value-per-cost step measured in the 2026
         # survey (docs/research/industry-rag-2026.md). Off by default so the A/B is
         # explicit; enable with RAG_HYDE_ENABLED=true.
