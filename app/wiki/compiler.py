@@ -461,6 +461,11 @@ class WikiCompiler:
             "is_latest_version": True,
             "superseded_by": None,
             "updated_at": datetime.now(timezone.utc).isoformat(),
+            # The questions this document answers, in a user's own words. Rendered into
+            # the page body, which is what the BM25 discovery layer indexes.
+            "synthetic_questions": as_str_list(
+                document.metadata.get("synthetic_questions")
+            ),
         }
 
     def _write_source_page(
@@ -553,6 +558,15 @@ class WikiCompiler:
                 lines.append(f"- `{chunk_id}` {passage}")
         else:
             lines.append("- No chunks available.")
+        # The questions this document answers, in ordinary language. The BM25 discovery
+        # layer indexes this body, so a user's everyday phrasing can match even when it
+        # shares no vocabulary with the statute's own wording. Measured on Chinese
+        # statutes: verbatim clause queries retrieve at hit@1 0.87, real user questions
+        # at 0.12 - this is the section that closes part of that gap.
+        questions = as_list(metadata.get("synthetic_questions"))
+        if questions:
+            lines.extend(["", "## Questions This Document Answers"])
+            lines.extend(f"- {question}" for question in questions)
         return "\n".join(lines).strip()
 
     def _render_schema(self) -> str:

@@ -152,18 +152,66 @@ class BM25Index:
             for term in empty_terms:
                 del target[term]
 
+    def document_frequencies(self) -> tuple[dict[str, int], int]:
+        """Term -> document frequency, and the corpus document count.
+
+        Exposed so pseudo-relevance feedback can drop terms that occur in most documents
+        (they discriminate nothing); computed from the existing postings, no extra index.
+        """
+        with self._lock:
+            return (
+                {term: len(postings) for term, postings in self._postings.items()},
+                len(self._doc_lengths),
+            )
+
     def search(
         self,
         query: str,
         top_k: int,
         allowed_doc_ids: set[str] | frozenset[str] | None = None,
     ) -> list[tuple[str, float]]:
+        return self.search_weighted(
+            query, top_k, allowed_doc_ids=allowed_doc_ids
+        )
+
+    def search_weighted(
+        self,
+        query: str,
+        top_k: int,
+        allowed_doc_ids: set[str] | frozenset[str] | None = None,
+        *,
+        term_weights: dict[str, float] | None = None,
+    ) -> list[tuple[str, float]]:
+        """BM25 search where query terms can carry weights.
+
+        Weighted queries are what make pseudo-relevance feedback possible without a
+        second model: HyDE-generated text is expanded into a weighted term set
+        (Rocchio) instead of being appended to the query string, which measurably adds
+        noise rather than signal - SIGIR'26 measured Recall@20 going 28.8 (BM25) ->
+        29.5 (naive concatenation) -> 34.7 (Rocchio feedback) on 14 datasets.
+
+        ``term_weights`` maps a term to a non-negative multiplier applied to that
+        term's BM25 contribution; absent terms weigh 1.0.
+        """
         with self._lock:
             if not self._doc_lengths:
                 return []
             query_tokens = self._tokenize(query)
-            if not query_tokens:
+            if term_weights:
+                # Terms introduced by feedback are already tokenised by their producer;
+                # only the original query is tokenised here.
+                merged: dict[str, float] = {}
+                for token in query_tokens:
+                    merged[token] = merged.get(token, 0.0) + 1.0
+                for term, weight in term_weights.items():
+                    if weight > 0:
+                        merged[term] = merged.get(term, 0.0) + weight
+                weights = merged
+            else:
+                weights = {token: 1.0 for token in query_tokens}
+            if not weights:
                 return []
+            query_tokens = list(weights)
             n_docs = len(self._doc_lengths)
             avg_length = self._total_length / n_docs if n_docs else 1.0
             use_title = self.config.title_weight > 0.0 and bool(self._title_postings)
@@ -233,6 +281,7 @@ class BM25Index:
                     continue
                 score = 0.0
                 for term in query_tokens:
+                    term_weight = weights.get(term, 1.0)
                     postings = term_freqs.get(term)
                     title_postings = title_freqs.get(term)
                     body_tf = postings.get(doc_id, 0) if postings else 0
@@ -270,7 +319,7 @@ class BM25Index:
                         term_score += (
                             self.config.title_weight * idf * numerator / denominator
                         )
-                    score += term_score
+                    score += term_weight * term_score
                 if use_bm25x:
                     # The query/document overlap ratio: how many DISTINCT query
                     # terms this document covers. Classic BM25 has no such term, so

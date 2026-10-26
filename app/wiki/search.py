@@ -291,13 +291,24 @@ class WikiSearcher:
                 "tokenizer": self.index.config.tokenizer,
             }
 
+    def tokenize(self, text: str) -> list[str]:
+        """The index's own tokenizer, so generated text uses the same terms."""
+        return self.index._tokenize(text)
+
+    def document_frequencies(self) -> tuple[dict[str, int], int]:
+        """``(term -> document frequency, document count)`` for Rocchio's cutoff."""
+        return self.index.document_frequencies()
+
     def search(
         self,
         query: str,
         top_k: int,
         kb_id: str = "default",
         metadata_filters: dict[str, object] | None = None,
+        *,
+        term_weights: dict[str, float] | None = None,
     ) -> list[SearchHit]:
+        """Search the wiki. ``term_weights`` enables weighted (Rocchio/HyDE) queries."""
         with self._lock:
             self._sync_if_stale()
             scope_id = WikiCompiler.scope_id(kb_id=kb_id)
@@ -324,8 +335,11 @@ class WikiSearcher:
                 allowed_doc_ids = kb_doc_ids
             if not allowed_doc_ids:
                 return []
-            results = self.index.search(
-                query, top_k=max(top_k * 4, 8), allowed_doc_ids=allowed_doc_ids
+            results = self.index.search_weighted(
+                query,
+                top_k=max(top_k * 4, 8),
+                allowed_doc_ids=allowed_doc_ids,
+                term_weights=term_weights,
             )
             ordered = sorted(
                 results,

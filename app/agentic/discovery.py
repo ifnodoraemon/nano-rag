@@ -24,6 +24,7 @@ from app.schemas.chat import ChatRequest
 from app.schemas.chunk import Chunk
 from app.retrieval.hits import SearchHit
 from app.agentic.candidate_filter import filter_candidates
+from app.agentic.hyde import build_hyde_weights
 from app.agentic.llm_rerank import RerankDocument, rerank_documents
 from app.agentic.query_expansion import expand_query, fuse_rankings
 from app.utils.coerce import as_dict, as_list, as_str, as_str_list
@@ -136,6 +137,10 @@ class AgenticDiscovery:
         # BM25 scores cannot do this: measured on the Chinese-law corpus, top-6 scores
         # are indistinguishable whether or not the answer is in the pool.
         self.candidate_filter_enabled = _flag("RAG_CANDIDATE_FILTER_ENABLED", True)
+        # HyDE + Rocchio feedback: highest value-per-cost step measured in the 2026
+        # survey (docs/research/industry-rag-2026.md). Off by default so the A/B is
+        # explicit; enable with RAG_HYDE_ENABLED=true.
+        self.hyde_enabled = _flag("RAG_HYDE_ENABLED", False)
         self.llm_rerank_top_n = _positive_int("RAG_LLM_RERANK_TOP_N", 10)
 
     async def discovery_candidates(
@@ -255,6 +260,20 @@ class AgenticDiscovery:
             * DISCOVERY_OVERFETCH_MULTIPLIER
             * max(1, depth)
         )
+        if self.hyde_enabled:
+            # HyDE + Rocchio: the model writes the passage that would answer the
+            # question, and that passage becomes TERM WEIGHTS rather than being
+            # appended to the query string. Measured (SIGIR'26, 14 datasets):
+            # Recall@20 28.8 BM25 -> 29.5 concatenation -> 34.7 Rocchio feedback.
+            hits = await self._discover_with_hyde(
+                query, kb_id=kb_id, filters=filters, fetch_k=fetch_k
+            )
+            return [
+                hit
+                for hit in hits
+                if (hit.chunk.metadata or {}).get("wiki_kind") == "source"
+            ]
+
         if not self.query_expansion_enabled:
             # BM25 scoring (and a possible incremental sync) is CPU-bound; keep it
             # off the event loop so concurrent requests stay responsive.
@@ -276,6 +295,71 @@ class AgenticDiscovery:
             for hit in hits
             if (hit.chunk.metadata or {}).get("wiki_kind") == "source"
         ]
+
+    async def _discover_with_hyde(
+        self,
+        query: str,
+        *,
+        kb_id: str,
+        filters: dict[str, object] | None,
+        fetch_k: int,
+    ) -> list[SearchHit]:
+        """One weighted BM25 query built from the query plus a hypothetical passage.
+
+        The original query keeps weight 1.0 for every term, so feedback can only add
+        signal - it can never erase what the user actually typed. RM3-style interpolation
+        over separate result lists is deliberately NOT used here: the reported gain comes
+        from term weighting inside one query, not from fusing several queries.
+        """
+        try:
+            term_weights = await build_hyde_weights(
+                query,
+                self.generation_client,
+                tokenize=self.wiki_searcher.tokenize,
+                document_frequencies=self.wiki_searcher.document_frequencies()[0],
+                n_docs=self.wiki_searcher.document_frequencies()[1],
+            )
+        except ModelOutputError:
+            raise
+        with self.tracing_manager.span(
+            "agent.hyde", {"agent.query": query, "agent.weighted_terms": len(term_weights)}
+        ):
+            # BM25 scoring is CPU-bound; keep it off the event loop.
+            weighted = await asyncio.to_thread(
+                self.wiki_searcher.search,
+                query,
+                top_k=fetch_k,
+                kb_id=kb_id,
+                metadata_filters=filters,
+                term_weights=term_weights,
+            )
+        if not self.query_expansion_enabled:
+            return weighted
+        # Both signals: the weighted query (semantic recall from the hypothetical
+        # passage) fused with keyword variants (literal recall). Fuse rather than pick,
+        # because they fail on different questions.
+        expanded = await self._discover_with_expansion(
+            query, kb_id=kb_id, filters=filters, fetch_k=fetch_k
+        )
+        by_id: dict[str, SearchHit] = {hit.chunk.doc_id: hit for hit in expanded}
+        for hit in weighted:
+            by_id.setdefault(hit.chunk.doc_id, hit)
+        fused = fuse_rankings(
+            [
+                [hit.chunk.doc_id for hit in weighted],
+                [hit.chunk.doc_id for hit in expanded],
+            ]
+        )
+        merged = [
+            SearchHit(chunk=by_id[doc_id].chunk, score=score) for doc_id, score in fused
+        ]
+        logger.info(
+            "hyde+expansion: %d weighted + %d expanded -> %d fused",
+            len(weighted),
+            len(expanded),
+            len(merged),
+        )
+        return merged[:fetch_k]
 
     async def _discover_with_expansion(
         self,
