@@ -80,9 +80,9 @@ If it applies everywhere or states no limit, return [].
 
 authority_rank: 1 if this looks like the most general / highest-level instrument for its
 subject (a national law, a group-wide policy, a master contract); 2, 3 ... for
-increasingly specific ones (regional rules, subsidiary policies, appendices). Judge from
-the document's own signals: who issued it, what it derives from, which it supersedes. If
-the document gives no signal, omit the field.
+increasingly specific ones (regional rules, subsidiary policies, appendices). Judge only
+from the document's own signals: who issued it, what it derives from, which it
+supersedes. If the document gives no signal, omit the field.
 
 Title: __TITLE__
 
@@ -110,8 +110,9 @@ QUERY_SCOPE_SCHEMA = {
 QUERY_SCOPE_PROMPT = """Does this question ask for the general rule, or about a specific
 place/entity/product?
 
-- general: "男的多少岁能结婚", "劳动合同最长试用期多久" - asks for the broadly applicable rule
-- specific: "宁夏的生育假多少天", "华东区的报销标准" - names a scope
+- general: asks for the rule that applies broadly, naming no particular place or entity
+- specific: names a place, region, entity, product or business unit, or asks about the
+  rules that apply to one
 - unspecified: it does not say
 
 Do not answer the question. Do not invent a scope that is not mentioned.

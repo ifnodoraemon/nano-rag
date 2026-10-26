@@ -70,13 +70,32 @@ async def test_the_table_of_contents_does_not_shift_the_cuts():
 
 
 def test_body_offset_skips_a_contents_page():
-    offset = _body_offset(STATUTE)
+    first = _find_label(STATUTE, "第一条", 0)
+    assert first is not None
+    offset = _body_offset(STATUTE, "第一条", [first])
     assert STATUTE[offset:].startswith("第一条")
 
 
-def test_body_offset_is_zero_without_a_contents_page():
+def test_body_offset_is_the_first_hit_without_a_contents_page():
     plain = "第一条 内容内容内容内容内容。\n\n第二条 内容内容内容内容内容。"
-    assert _body_offset(plain) == 0
+    first = _find_label(plain, "第一条", 0)
+    assert first is not None
+    assert _body_offset(plain, "第一条", [first]) == first
+
+
+def test_body_offset_has_no_vocabulary_of_its_own():
+    """A Latin contract's contents page is handled the same way as a Chinese statute's."""
+    contract = (
+        "SECTION 1 GENERAL\n\nSECTION 2 SCOPE\n\n"
+        "SECTION 1 GENERAL\n\nThis agreement is made between...\n\n"
+        "SECTION 2 SCOPE\n\nThe parties agree..."
+    )
+    first = _find_label(contract, "SECTION 1 GENERAL", 0)
+    assert first is not None
+    offset = _body_offset(contract, "SECTION 1 GENERAL", [first])
+    # Skips the contents listing and lands on the section that starts the body.
+    assert contract[offset:].startswith("SECTION 1 GENERAL")
+    assert "This agreement is made" in contract[offset:]
 
 
 def test_label_lookup_tolerates_nbsp_and_whitespace():

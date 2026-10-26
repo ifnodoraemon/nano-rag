@@ -25,6 +25,7 @@ against it, never rewritten.
 from __future__ import annotations
 
 import logging
+from collections.abc import Sequence
 from dataclasses import dataclass
 
 from app.core.exceptions import ModelOutputError
@@ -57,41 +58,46 @@ ARTICLE_ANCHOR_SCHEMA = {
     "required": ["articles"],
 }
 
-PROMPT = """This is a Chinese statute, regulation, contract or manual. List its articles -
-the smallest complete units a reader would cite individually (the 第一条/第二条 units, or
-their equivalent).
+PROMPT = """List the segments of this document - the smallest complete units a reader
+would cite individually. Whatever the document is (a statute, a contract, a manual, a
+policy, an agreement), it groups its content into units of some kind.
 
 Rules:
-- One entry per article, in document order.
-- The entry is the article's label: its number (第十七条), or if the document does not
-  number its articles, the first few characters of the article.
+- One entry per unit, in document order.
+- The entry is that unit's LABEL: its own designation if it has one (a number, a heading,
+  a section title), or its first few characters if it has none.
 - Copy the label exactly as the document writes it. Do not merge, skip or invent entries.
-- Do NOT quote the article text.
+- Do NOT quote the unit's body text.
 
-Return only JSON: {"articles": ["第一条", "第二条", ...]}
+Return only JSON: {"articles": ["<label>", "<label>", ...]}
 
 DOCUMENT:
 __TEXT__
 """
 
 
-def _body_offset(text: str) -> int:
+# A contents entry duplicates the first real label within this distance. Measured on
+# statutes whose contents pages list chapter headings: the first article's body is never
+# this close to its contents mention.
+CONTENTS_PROXIMITY = 400
+
+
+def _body_offset(text: str, first_label: str, label_offsets: Sequence[int]) -> int:
     """Where the body starts, past a table of contents if the document has one.
 
-    A contents page is recognised structurally, not semantically: it lists the same
-    chapter or article label twice, and the second occurrence is where the body begins.
-    Returns 0 for documents without contents.
+    Recognised structurally, with no vocabulary: if the document lists its own first
+    label twice in quick succession, the first occurrence is a contents entry and the
+    body starts at the second. This used to be written as ``text.find("第一条")``, which
+    worked for Chinese statutes and silently did nothing for a contract, a manual, or an
+    English document - a special case pretending to be a rule.
+
+    Returns 0 when there is no contents page.
     """
-    first = text.find("第一条")
-    if first < 0:
-        head = text.find("第一章")
-        return 0 if head < 0 else head
-    second = text.find("第一条", first + 1)
-    if second < 0:
-        return first
-    # Only treat the earlier hit as a contents entry if the span between the two is
-    # short - a real body repeats "第一条" thousands of characters later, if at all.
-    if second - first < 400:
+    if not label_offsets:
+        return 0
+    first = label_offsets[0]
+    second = _find_label(text, first_label, first + 1)
+    if second is not None and second - first < CONTENTS_PROXIMITY:
         return second
     return first
 
@@ -214,7 +220,11 @@ async def _split_once(
     # shifts every subsequent cut. The body starts after the LAST contents-like heading,
     # which is where the numbering restarts.
     positions: list[tuple[int, str]] = []
-    cursor = _body_offset(text)
+    first_label = anchors[0][1] if anchors else ""
+    first_hit = _find_label(text, first_label, 0) if first_label else None
+    cursor = _body_offset(
+        text, first_label, [first_hit] if first_hit is not None else []
+    )
     for _anchor, label in anchors:
         if not label:
             raise ModelOutputError(
