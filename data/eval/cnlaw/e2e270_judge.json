@@ -1,0 +1,1352 @@
+[
+ {
+  "sample_id": "tb-0",
+  "label": "SUPPORTED",
+  "reason": "C1明确一对夫妻可生育三个子女"
+ },
+ {
+  "sample_id": "tb-1",
+  "label": "SUPPORTED",
+  "reason": "条例明确一孩延长产假六十天"
+ },
+ {
+  "sample_id": "tb-2",
+  "label": "SUPPORTED",
+  "reason": "上下文第二十二条完全支持"
+ },
+ {
+  "sample_id": "tb-3",
+  "label": "SUPPORTED",
+  "reason": "上下文明确支持"
+ },
+ {
+  "sample_id": "tb-4",
+  "label": "UNSUPPORTED",
+  "reason": "C4无动物防疫条件合格证且缺C5"
+ },
+ {
+  "sample_id": "tb-5",
+  "label": "SUPPORTED",
+  "reason": "三条上下文均支持补偿规定"
+ },
+ {
+  "sample_id": "tb-6",
+  "label": "SUPPORTED",
+  "reason": "引用条款均支持工会提请有关部门处理"
+ },
+ {
+  "sample_id": "tb-7",
+  "label": "SUPPORTED",
+  "reason": "C1、C3有相应规定"
+ },
+ {
+  "sample_id": "tb-8",
+  "label": "SUPPORTED",
+  "reason": "上下文规定30日内书面通知工会"
+ },
+ {
+  "sample_id": "tb-9",
+  "label": "SUPPORTED",
+  "reason": "三个上下文均明确支持"
+ },
+ {
+  "sample_id": "tb-10",
+  "label": "SUPPORTED",
+  "reason": "三处上下文均载明女不得早于十八周岁"
+ },
+ {
+  "sample_id": "tb-11",
+  "label": "SUPPORTED",
+  "reason": "上下文明确口头或文字通知无效"
+ },
+ {
+  "sample_id": "tb-12",
+  "label": "UNSUPPORTED",
+  "reason": "上下文未提及相关禁用工具"
+ },
+ {
+  "sample_id": "tb-13",
+  "label": "UNSUPPORTED",
+  "reason": "上下文未含该批准与备案规定"
+ },
+ {
+  "sample_id": "tb-14",
+  "label": "UNSUPPORTED",
+  "reason": "上下文无相关条文"
+ },
+ {
+  "sample_id": "tb-15",
+  "label": "SUPPORTED",
+  "reason": "上下文第十五条明确支持"
+ },
+ {
+  "sample_id": "tb-16",
+  "label": "SUPPORTED",
+  "reason": "第十八条直接支持该表述"
+ },
+ {
+  "sample_id": "tb-17",
+  "label": "SUPPORTED",
+  "reason": "引用条款均对应支持"
+ },
+ {
+  "sample_id": "tb-18",
+  "label": "SUPPORTED",
+  "reason": "两上下文均明确规定登记上牌后方可上路"
+ },
+ {
+  "sample_id": "tb-19",
+  "label": "SUPPORTED",
+  "reason": "C1等明确要求驾驶人和乘坐人佩戴"
+ },
+ {
+  "sample_id": "tb-20",
+  "label": "UNSUPPORTED",
+  "reason": "引用未提及该处罚依据"
+ },
+ {
+  "sample_id": "tb-21",
+  "label": "SUPPORTED",
+  "reason": "上下文支持自主用人及公平就业，未提审批"
+ },
+ {
+  "sample_id": "tb-22",
+  "label": "REFUSED",
+  "reason": "拒答"
+ },
+ {
+  "sample_id": "tb-23",
+  "label": "SUPPORTED",
+  "reason": "两处引用均支持必须签约"
+ },
+ {
+  "sample_id": "tb-24",
+  "label": "SUPPORTED",
+  "reason": "条例规定曾工作过的单位应回避"
+ },
+ {
+  "sample_id": "tb-25",
+  "label": "SUPPORTED",
+  "reason": "第十七条明确五个工作日前通知"
+ },
+ {
+  "sample_id": "tb-26",
+  "label": "UNSUPPORTED",
+  "reason": "C2无此规定"
+ },
+ {
+  "sample_id": "tb-27",
+  "label": "SUPPORTED",
+  "reason": "条文支持该表述"
+ },
+ {
+  "sample_id": "tb-28",
+  "label": "SUPPORTED",
+  "reason": "直接对应第二十一条原文"
+ },
+ {
+  "sample_id": "tb-29",
+  "label": "UNSUPPORTED",
+  "reason": "罚款条款未见于C1"
+ },
+ {
+  "sample_id": "tb-30",
+  "label": "SUPPORTED",
+  "reason": "两处上下文均有相同规定"
+ },
+ {
+  "sample_id": "tb-31",
+  "label": "SUPPORTED",
+  "reason": "上下文第四条直接支持"
+ },
+ {
+  "sample_id": "tb-32",
+  "label": "SUPPORTED",
+  "reason": "C2、C5支持制止、举报及部门处罚"
+ },
+ {
+  "sample_id": "tb-33",
+  "label": "SUPPORTED",
+  "reason": "引用条款均支持须预留用地"
+ },
+ {
+  "sample_id": "tb-34",
+  "label": "SUPPORTED",
+  "reason": "引用条款均有明确依据"
+ },
+ {
+  "sample_id": "tb-35",
+  "label": "SUPPORTED",
+  "reason": "引用条文均支持回答"
+ },
+ {
+  "sample_id": "tb-36",
+  "label": "REFUSED",
+  "reason": "拒答"
+ },
+ {
+  "sample_id": "tb-37",
+  "label": "SUPPORTED",
+  "reason": "上下文第十八条完全支持"
+ },
+ {
+  "sample_id": "tb-38",
+  "label": "SUPPORTED",
+  "reason": "引用条文明确支持回答"
+ },
+ {
+  "sample_id": "tb-39",
+  "label": "SUPPORTED",
+  "reason": "上下文明确支持该规定"
+ },
+ {
+  "sample_id": "tb-40",
+  "label": "SUPPORTED",
+  "reason": "上下文明确学校每学年至少一次"
+ },
+ {
+  "sample_id": "tb-41",
+  "label": "REFUSED",
+  "reason": "拒答"
+ },
+ {
+  "sample_id": "tb-42",
+  "label": "UNSUPPORTED",
+  "reason": "承诺书及设计图上下文未提及"
+ },
+ {
+  "sample_id": "tb-43",
+  "label": "REFUSED",
+  "reason": "拒答"
+ },
+ {
+  "sample_id": "tb-44",
+  "label": "SUPPORTED",
+  "reason": "逐项对应第十七条"
+ },
+ {
+  "sample_id": "tb-45",
+  "label": "REFUSED",
+  "reason": "拒答"
+ },
+ {
+  "sample_id": "tb-46",
+  "label": "REFUSED",
+  "reason": "拒答"
+ },
+ {
+  "sample_id": "tb-47",
+  "label": "SUPPORTED",
+  "reason": "引用上下文均支持"
+ },
+ {
+  "sample_id": "tb-48",
+  "label": "UNSUPPORTED",
+  "reason": "首句及鉴定要求无依据"
+ },
+ {
+  "sample_id": "tb-49",
+  "label": "UNSUPPORTED",
+  "reason": "C1未提及监控保存期限"
+ },
+ {
+  "sample_id": "tb-50",
+  "label": "UNSUPPORTED",
+  "reason": "多项禁项未在C3中出现"
+ },
+ {
+  "sample_id": "tb-51",
+  "label": "REFUSED",
+  "reason": "拒答"
+ },
+ {
+  "sample_id": "tb-52",
+  "label": "UNSUPPORTED",
+  "reason": "引用C5无对应上下文"
+ },
+ {
+  "sample_id": "tb-53",
+  "label": "UNSUPPORTED",
+  "reason": "上下文未提及优先建设内容"
+ },
+ {
+  "sample_id": "tb-54",
+  "label": "REFUSED",
+  "reason": "拒答"
+ },
+ {
+  "sample_id": "tb-55",
+  "label": "REFUSED",
+  "reason": "拒答"
+ },
+ {
+  "sample_id": "tb-56",
+  "label": "UNSUPPORTED",
+  "reason": "上下文未包含该规定"
+ },
+ {
+  "sample_id": "tb-57",
+  "label": "UNSUPPORTED",
+  "reason": "C5未见该表述"
+ },
+ {
+  "sample_id": "tb-58",
+  "label": "SUPPORTED",
+  "reason": "上下文第十五条明确支持"
+ },
+ {
+  "sample_id": "tb-59",
+  "label": "SUPPORTED",
+  "reason": "上下文第十四条明确要求"
+ },
+ {
+  "sample_id": "tb-60",
+  "label": "SUPPORTED",
+  "reason": "第十二条原文支持"
+ },
+ {
+  "sample_id": "tb-61",
+  "label": "SUPPORTED",
+  "reason": "上下文第十三条明确支持"
+ },
+ {
+  "sample_id": "tb-62",
+  "label": "REFUSED",
+  "reason": "拒答"
+ },
+ {
+  "sample_id": "tb-63",
+  "label": "SUPPORTED",
+  "reason": "多个引用上下文可直接支持"
+ },
+ {
+  "sample_id": "tb-64",
+  "label": "SUPPORTED",
+  "reason": "上下文支持费用承担及政府免费服务"
+ },
+ {
+  "sample_id": "tb-65",
+  "label": "SUPPORTED",
+  "reason": "两条条例均明确同步配建养老服务设施"
+ },
+ {
+  "sample_id": "tb-66",
+  "label": "SUPPORTED",
+  "reason": "条文明确每日开放不得少于十六小时"
+ },
+ {
+  "sample_id": "tb-67",
+  "label": "SUPPORTED",
+  "reason": "条文明确提前三日公布"
+ },
+ {
+  "sample_id": "tb-68",
+  "label": "REFUSED",
+  "reason": "拒答"
+ },
+ {
+  "sample_id": "tb-69",
+  "label": "SUPPORTED",
+  "reason": "上下文支持该结婚年龄规定"
+ },
+ {
+  "sample_id": "tb-70",
+  "label": "SUPPORTED",
+  "reason": "上下文均规定少数民族女满十八周岁"
+ },
+ {
+  "sample_id": "tb-71",
+  "label": "REFUSED",
+  "reason": "拒答"
+ },
+ {
+  "sample_id": "tb-72",
+  "label": "SUPPORTED",
+  "reason": "引用条文均列出相关资金来源"
+ },
+ {
+  "sample_id": "tb-73",
+  "label": "UNSUPPORTED",
+  "reason": "C2未载明禁止强制集资"
+ },
+ {
+  "sample_id": "tb-74",
+  "label": "SUPPORTED",
+  "reason": "C1、C4均明确禁止晒粮堆物"
+ },
+ {
+  "sample_id": "tb-75",
+  "label": "REFUSED",
+  "reason": "拒答"
+ },
+ {
+  "sample_id": "tb-76",
+  "label": "UNSUPPORTED",
+  "reason": "常委会撤回程序未见"
+ },
+ {
+  "sample_id": "tb-77",
+  "label": "SUPPORTED",
+  "reason": "上下文第二十一条原文支持"
+ },
+ {
+  "sample_id": "tb-78",
+  "label": "UNSUPPORTED",
+  "reason": "分组会议陈述缺乏上下文支持"
+ },
+ {
+  "sample_id": "tb-79",
+  "label": "UNSUPPORTED",
+  "reason": "上下文无常委会撤回规定"
+ },
+ {
+  "sample_id": "tb-80",
+  "label": "REFUSED",
+  "reason": "拒答"
+ },
+ {
+  "sample_id": "tb-81",
+  "label": "UNSUPPORTED",
+  "reason": "C3、C5无对应内容"
+ },
+ {
+  "sample_id": "tb-82",
+  "label": "SUPPORTED",
+  "reason": "上下文明确禁止在路口、村头、荒山、林地等烧纸"
+ },
+ {
+  "sample_id": "tb-83",
+  "label": "SUPPORTED",
+  "reason": "两处法规均明确禁止"
+ },
+ {
+  "sample_id": "tb-84",
+  "label": "SUPPORTED",
+  "reason": "C1原文明确支持"
+ },
+ {
+  "sample_id": "tb-85",
+  "label": "SUPPORTED",
+  "reason": "引用上下文均支持各陈述"
+ },
+ {
+  "sample_id": "tb-86",
+  "label": "UNSUPPORTED",
+  "reason": "C1至C3多处无对应事实"
+ },
+ {
+  "sample_id": "tb-87",
+  "label": "SUPPORTED",
+  "reason": "上下文明确规定公共就业服务免费"
+ },
+ {
+  "sample_id": "tb-88",
+  "label": "SUPPORTED",
+  "reason": "上下文第二十五条明确支持免费服务"
+ },
+ {
+  "sample_id": "tb-89",
+  "label": "UNSUPPORTED",
+  "reason": "上下文未包含该禁止规定"
+ },
+ {
+  "sample_id": "tb-90",
+  "label": "SUPPORTED",
+  "reason": "上下文明确支持"
+ },
+ {
+  "sample_id": "tb-91",
+  "label": "SUPPORTED",
+  "reason": "上下文明确列出各层级金额"
+ },
+ {
+  "sample_id": "tb-92",
+  "label": "SUPPORTED",
+  "reason": "C1明确不得拒绝或拖延"
+ },
+ {
+  "sample_id": "tb-93",
+  "label": "SUPPORTED",
+  "reason": "上下文第八、十六、十九条支持该回答"
+ },
+ {
+  "sample_id": "tb-94",
+  "label": "SUPPORTED",
+  "reason": "第十条明确规定应提意见"
+ },
+ {
+  "sample_id": "tb-95",
+  "label": "SUPPORTED",
+  "reason": "核心陈述有C1-C3相应条文支持"
+ },
+ {
+  "sample_id": "tb-96",
+  "label": "SUPPORTED",
+  "reason": "条例第十三条明确要求2年以上驾龄"
+ },
+ {
+  "sample_id": "tb-97",
+  "label": "SUPPORTED",
+  "reason": "与第十四条内容一致"
+ },
+ {
+  "sample_id": "tb-98",
+  "label": "REFUSED",
+  "reason": "拒答"
+ },
+ {
+  "sample_id": "tb-99",
+  "label": "REFUSED",
+  "reason": "拒答"
+ },
+ {
+  "sample_id": "tb-100",
+  "label": "SUPPORTED",
+  "reason": "上下文第二十三条明确支持"
+ },
+ {
+  "sample_id": "tb-101",
+  "label": "UNSUPPORTED",
+  "reason": "引用上下文未见未到校或离校通知条款"
+ },
+ {
+  "sample_id": "tb-102",
+  "label": "SUPPORTED",
+  "reason": "上下文原文直接支持"
+ },
+ {
+  "sample_id": "tb-103",
+  "label": "SUPPORTED",
+  "reason": "两句均有上下文直接支持"
+ },
+ {
+  "sample_id": "tb-104",
+  "label": "SUPPORTED",
+  "reason": "上下文明确支持公开查询"
+ },
+ {
+  "sample_id": "tb-105",
+  "label": "SUPPORTED",
+  "reason": "上下文明确列出条件"
+ },
+ {
+  "sample_id": "tb-106",
+  "label": "SUPPORTED",
+  "reason": "第十七条原文一致"
+ },
+ {
+  "sample_id": "tb-107",
+  "label": "SUPPORTED",
+  "reason": "与C1第十条一致"
+ },
+ {
+  "sample_id": "tb-108",
+  "label": "SUPPORTED",
+  "reason": "第十五条明确支持该组织主体和参加要求"
+ },
+ {
+  "sample_id": "tb-109",
+  "label": "SUPPORTED",
+  "reason": "上下文第十八条有相同规定"
+ },
+ {
+  "sample_id": "tb-110",
+  "label": "REFUSED",
+  "reason": "拒答"
+ },
+ {
+  "sample_id": "tb-111",
+  "label": "REFUSED",
+  "reason": "拒答"
+ },
+ {
+  "sample_id": "tb-112",
+  "label": "REFUSED",
+  "reason": "拒答"
+ },
+ {
+  "sample_id": "tb-113",
+  "label": "REFUSED",
+  "reason": "拒答"
+ },
+ {
+  "sample_id": "tb-114",
+  "label": "REFUSED",
+  "reason": "拒答"
+ },
+ {
+  "sample_id": "tb-115",
+  "label": "UNSUPPORTED",
+  "reason": "处分责任表述在C1中无依据"
+ },
+ {
+  "sample_id": "tb-116",
+  "label": "SUPPORTED",
+  "reason": "完全对应第二十五条"
+ },
+ {
+  "sample_id": "tb-117",
+  "label": "SUPPORTED",
+  "reason": "条例第十四条明确支持"
+ },
+ {
+  "sample_id": "tb-118",
+  "label": "REFUSED",
+  "reason": "拒答"
+ },
+ {
+  "sample_id": "tb-119",
+  "label": "SUPPORTED",
+  "reason": "与第二十条完全一致"
+ },
+ {
+  "sample_id": "tb-120",
+  "label": "SUPPORTED",
+  "reason": "第十六条明确支持"
+ },
+ {
+  "sample_id": "tb-121",
+  "label": "SUPPORTED",
+  "reason": "第十九条明确规定不少于2年"
+ },
+ {
+  "sample_id": "tb-122",
+  "label": "UNSUPPORTED",
+  "reason": "第二句无处分通报依据"
+ },
+ {
+  "sample_id": "tb-123",
+  "label": "SUPPORTED",
+  "reason": "上下文明确禁止设置最低消费额"
+ },
+ {
+  "sample_id": "tb-124",
+  "label": "SUPPORTED",
+  "reason": "上下文明确要求标注份量等信息"
+ },
+ {
+  "sample_id": "tb-125",
+  "label": "SUPPORTED",
+  "reason": "两处引用均直接支持回答"
+ },
+ {
+  "sample_id": "tb-126",
+  "label": "SUPPORTED",
+  "reason": "两条引用均明确支持"
+ },
+ {
+  "sample_id": "tb-127",
+  "label": "UNSUPPORTED",
+  "reason": "质询案撤回无依据"
+ },
+ {
+  "sample_id": "tb-128",
+  "label": "UNSUPPORTED",
+  "reason": "C1、C5未支持该一般表决规则"
+ },
+ {
+  "sample_id": "tb-129",
+  "label": "SUPPORTED",
+  "reason": "C1明确二十四小时内清除"
+ },
+ {
+  "sample_id": "tb-130",
+  "label": "SUPPORTED",
+  "reason": "C2明确主人应随时清理宠物粪便"
+ },
+ {
+  "sample_id": "tb-131",
+  "label": "SUPPORTED",
+  "reason": "上下文明确15日内完成场地平整"
+ },
+ {
+  "sample_id": "tb-132",
+  "label": "SUPPORTED",
+  "reason": "上下文明确禁止该行为"
+ },
+ {
+  "sample_id": "tb-133",
+  "label": "SUPPORTED",
+  "reason": "第十三条明确设立该资金并救济"
+ },
+ {
+  "sample_id": "tb-134",
+  "label": "SUPPORTED",
+  "reason": "上下文明确记载该规定"
+ },
+ {
+  "sample_id": "tb-135",
+  "label": "SUPPORTED",
+  "reason": "C1第二十二条支持查询权"
+ },
+ {
+  "sample_id": "tb-136",
+  "label": "UNSUPPORTED",
+  "reason": "C4未明确各环节部门分工"
+ },
+ {
+  "sample_id": "tb-137",
+  "label": "SUPPORTED",
+  "reason": "C1第二十条明确支持"
+ },
+ {
+  "sample_id": "tb-138",
+  "label": "SUPPORTED",
+  "reason": "上下文明确支持推迟五日"
+ },
+ {
+  "sample_id": "tb-139",
+  "label": "REFUSED",
+  "reason": "拒答"
+ },
+ {
+  "sample_id": "tb-140",
+  "label": "SUPPORTED",
+  "reason": "各引用均支持相应陈述"
+ },
+ {
+  "sample_id": "tb-141",
+  "label": "UNSUPPORTED",
+  "reason": "C2未包含该课程设置内容"
+ },
+ {
+  "sample_id": "tb-142",
+  "label": "SUPPORTED",
+  "reason": "上下文第十三条明确支持"
+ },
+ {
+  "sample_id": "tb-143",
+  "label": "SUPPORTED",
+  "reason": "上下文第十四条明确支持"
+ },
+ {
+  "sample_id": "tb-144",
+  "label": "SUPPORTED",
+  "reason": "上下文第十一条明确支持"
+ },
+ {
+  "sample_id": "tb-145",
+  "label": "SUPPORTED",
+  "reason": "三条均与引用上下文一致"
+ },
+ {
+  "sample_id": "tb-146",
+  "label": "UNSUPPORTED",
+  "reason": "上下文未提及监控录像保存期限"
+ },
+ {
+  "sample_id": "tb-147",
+  "label": "REFUSED",
+  "reason": "拒答"
+ },
+ {
+  "sample_id": "tb-148",
+  "label": "SUPPORTED",
+  "reason": "上下文明确支持自愿原则"
+ },
+ {
+  "sample_id": "tb-149",
+  "label": "SUPPORTED",
+  "reason": "上下文第十二条完全支持该回答"
+ },
+ {
+  "sample_id": "tb2-0",
+  "label": "SUPPORTED",
+  "reason": "第十四条完全对应"
+ },
+ {
+  "sample_id": "tb2-1",
+  "label": "SUPPORTED",
+  "reason": "条例第十五条明确规定十五日内决定"
+ },
+ {
+  "sample_id": "tb2-2",
+  "label": "SUPPORTED",
+  "reason": "第十六条明确要求先沉淀"
+ },
+ {
+  "sample_id": "tb2-3",
+  "label": "UNSUPPORTED",
+  "reason": "C1未规定保存二年"
+ },
+ {
+  "sample_id": "tb2-4",
+  "label": "SUPPORTED",
+  "reason": "第二十条明确不得销售"
+ },
+ {
+  "sample_id": "tb2-5",
+  "label": "SUPPORTED",
+  "reason": "内容与产品质量法第二十七条一致"
+ },
+ {
+  "sample_id": "tb2-6",
+  "label": "SUPPORTED",
+  "reason": "第十三条明确五个工作日内备案"
+ },
+ {
+  "sample_id": "tb2-7",
+  "label": "SUPPORTED",
+  "reason": "第十四条明确支持"
+ },
+ {
+  "sample_id": "tb2-8",
+  "label": "SUPPORTED",
+  "reason": "第十七条原文支持"
+ },
+ {
+  "sample_id": "tb2-9",
+  "label": "SUPPORTED",
+  "reason": "上下文均明确禁止同一周期重复检查"
+ },
+ {
+  "sample_id": "tb2-10",
+  "label": "SUPPORTED",
+  "reason": "依据第九条原文"
+ },
+ {
+  "sample_id": "tb2-11",
+  "label": "SUPPORTED",
+  "reason": "第八条原文明确支持"
+ },
+ {
+  "sample_id": "tb2-12",
+  "label": "UNSUPPORTED",
+  "reason": "C2未含临时建筑不得改永久"
+ },
+ {
+  "sample_id": "tb2-13",
+  "label": "SUPPORTED",
+  "reason": "上下文明确支持"
+ },
+ {
+  "sample_id": "tb2-14",
+  "label": "REFUSED",
+  "reason": "拒答"
+ },
+ {
+  "sample_id": "tb2-15",
+  "label": "SUPPORTED",
+  "reason": "各引用均支持对应陈述"
+ },
+ {
+  "sample_id": "tb2-16",
+  "label": "SUPPORTED",
+  "reason": "上下文原文有该规定"
+ },
+ {
+  "sample_id": "tb2-17",
+  "label": "SUPPORTED",
+  "reason": "上下文直接支持该陈述"
+ },
+ {
+  "sample_id": "tb2-18",
+  "label": "SUPPORTED",
+  "reason": "第十二条原文一致"
+ },
+ {
+  "sample_id": "tb2-19",
+  "label": "SUPPORTED",
+  "reason": "第十一条明确列出邀请单位"
+ },
+ {
+  "sample_id": "tb2-20",
+  "label": "SUPPORTED",
+  "reason": "第十一条原文直接支持"
+ },
+ {
+  "sample_id": "tb2-21",
+  "label": "SUPPORTED",
+  "reason": "上下文第十七条明确支持"
+ },
+ {
+  "sample_id": "tb2-22",
+  "label": "SUPPORTED",
+  "reason": "上下文第十七条明确支持"
+ },
+ {
+  "sample_id": "tb2-23",
+  "label": "UNSUPPORTED",
+  "reason": "上下文未提选区最多三名代表"
+ },
+ {
+  "sample_id": "tb2-24",
+  "label": "SUPPORTED",
+  "reason": "引用条文明确支持培训义务"
+ },
+ {
+  "sample_id": "tb2-25",
+  "label": "SUPPORTED",
+  "reason": "C1第十条明确支持"
+ },
+ {
+  "sample_id": "tb2-26",
+  "label": "REFUSED",
+  "reason": "拒答"
+ },
+ {
+  "sample_id": "tb2-27",
+  "label": "SUPPORTED",
+  "reason": "引用上下文均支持禁止停放"
+ },
+ {
+  "sample_id": "tb2-28",
+  "label": "SUPPORTED",
+  "reason": "C1明确规定小区内不鸣笛"
+ },
+ {
+  "sample_id": "tb2-29",
+  "label": "SUPPORTED",
+  "reason": "C1和C7明确支持该规定"
+ },
+ {
+  "sample_id": "tb2-30",
+  "label": "SUPPORTED",
+  "reason": "C1、C2均明确监控资料保存不少于30日"
+ },
+ {
+  "sample_id": "tb2-31",
+  "label": "REFUSED",
+  "reason": "拒答"
+ },
+ {
+  "sample_id": "tb2-32",
+  "label": "UNSUPPORTED",
+  "reason": "C1未含重点目标安检条款"
+ },
+ {
+  "sample_id": "tb2-33",
+  "label": "UNSUPPORTED",
+  "reason": "C1未支持广东按月发放"
+ },
+ {
+  "sample_id": "tb2-34",
+  "label": "SUPPORTED",
+  "reason": "引用条文明确支持资助和补贴"
+ },
+ {
+  "sample_id": "tb2-35",
+  "label": "REFUSED",
+  "reason": "拒答"
+ },
+ {
+  "sample_id": "tb2-36",
+  "label": "REFUSED",
+  "reason": "拒答"
+ },
+ {
+  "sample_id": "tb2-37",
+  "label": "UNSUPPORTED",
+  "reason": "上下文未提及9月底及1至7月"
+ },
+ {
+  "sample_id": "tb2-38",
+  "label": "SUPPORTED",
+  "reason": "条例第十五条明确为3个月内"
+ },
+ {
+  "sample_id": "tb2-39",
+  "label": "SUPPORTED",
+  "reason": "第十四条原文完全一致"
+ },
+ {
+  "sample_id": "tb2-40",
+  "label": "REFUSED",
+  "reason": "拒答"
+ },
+ {
+  "sample_id": "tb2-41",
+  "label": "SUPPORTED",
+  "reason": "第二十条明确规定"
+ },
+ {
+  "sample_id": "tb2-42",
+  "label": "REFUSED",
+  "reason": "拒答"
+ },
+ {
+  "sample_id": "tb2-43",
+  "label": "SUPPORTED",
+  "reason": "C1第十五条明确支持三个月内移交"
+ },
+ {
+  "sample_id": "tb2-44",
+  "label": "SUPPORTED",
+  "reason": "第十三条明确10个工作日内出具证明"
+ },
+ {
+  "sample_id": "tb2-45",
+  "label": "SUPPORTED",
+  "reason": "上下文第十二条原文支持"
+ },
+ {
+  "sample_id": "tb2-46",
+  "label": "REFUSED",
+  "reason": "拒答"
+ },
+ {
+  "sample_id": "tb2-47",
+  "label": "REFUSED",
+  "reason": "拒答"
+ },
+ {
+  "sample_id": "tb2-48",
+  "label": "SUPPORTED",
+  "reason": "与第十四条一致"
+ },
+ {
+  "sample_id": "tb2-49",
+  "label": "SUPPORTED",
+  "reason": "上下文第十三条明确船票定价程序"
+ },
+ {
+  "sample_id": "tb2-50",
+  "label": "SUPPORTED",
+  "reason": "与第十六条原文一致"
+ },
+ {
+  "sample_id": "tb2-51",
+  "label": "SUPPORTED",
+  "reason": "引用均能支持门前三包及清洁责任"
+ },
+ {
+  "sample_id": "tb2-52",
+  "label": "REFUSED",
+  "reason": "拒答"
+ },
+ {
+  "sample_id": "tb2-53",
+  "label": "REFUSED",
+  "reason": "拒答"
+ },
+ {
+  "sample_id": "tb2-54",
+  "label": "SUPPORTED",
+  "reason": "上下文明确支持该规定"
+ },
+ {
+  "sample_id": "tb2-55",
+  "label": "SUPPORTED",
+  "reason": "上下文均直接支持"
+ },
+ {
+  "sample_id": "tb2-56",
+  "label": "SUPPORTED",
+  "reason": "引用内容与两条上下文相符"
+ },
+ {
+  "sample_id": "tb2-57",
+  "label": "SUPPORTED",
+  "reason": "上下文明确禁止强迫指定服务"
+ },
+ {
+  "sample_id": "tb2-58",
+  "label": "REFUSED",
+  "reason": "拒答"
+ },
+ {
+  "sample_id": "tb2-59",
+  "label": "SUPPORTED",
+  "reason": "上下文明确禁止拒收"
+ },
+ {
+  "sample_id": "tb2-60",
+  "label": "REFUSED",
+  "reason": "拒答"
+ },
+ {
+  "sample_id": "tb2-61",
+  "label": "SUPPORTED",
+  "reason": "引用条文均禁止排污和倾倒垃圾"
+ },
+ {
+  "sample_id": "tb2-62",
+  "label": "UNSUPPORTED",
+  "reason": "上下文无相应禁止条款"
+ },
+ {
+  "sample_id": "tb2-63",
+  "label": "SUPPORTED",
+  "reason": "上下文第十三条明确支持"
+ },
+ {
+  "sample_id": "tb2-64",
+  "label": "SUPPORTED",
+  "reason": "上下文第十五条明确支持"
+ },
+ {
+  "sample_id": "tb2-65",
+  "label": "SUPPORTED",
+  "reason": "第十七条原文直接支持"
+ },
+ {
+  "sample_id": "tb2-66",
+  "label": "SUPPORTED",
+  "reason": "上下文明确禁放区域及酒店告知劝阻义务"
+ },
+ {
+  "sample_id": "tb2-67",
+  "label": "SUPPORTED",
+  "reason": "上下文明确支持"
+ },
+ {
+  "sample_id": "tb2-68",
+  "label": "SUPPORTED",
+  "reason": "上下文第十条明确支持"
+ },
+ {
+  "sample_id": "tb2-69",
+  "label": "SUPPORTED",
+  "reason": "上下文第二十五条明确支持"
+ },
+ {
+  "sample_id": "tb2-70",
+  "label": "UNSUPPORTED",
+  "reason": "C2未包含该表述"
+ },
+ {
+  "sample_id": "tb2-71",
+  "label": "SUPPORTED",
+  "reason": "第三十二条明确每学期至少一次"
+ },
+ {
+  "sample_id": "tb2-72",
+  "label": "SUPPORTED",
+  "reason": "引用条款均支持该回答"
+ },
+ {
+  "sample_id": "tb2-73",
+  "label": "REFUSED",
+  "reason": "拒答"
+ },
+ {
+  "sample_id": "tb2-74",
+  "label": "SUPPORTED",
+  "reason": "禁刻划及罚50元均有依据"
+ },
+ {
+  "sample_id": "tb2-75",
+  "label": "SUPPORTED",
+  "reason": "C1第十二条明确支持"
+ },
+ {
+  "sample_id": "tb2-76",
+  "label": "SUPPORTED",
+  "reason": "C1明确燃油保障及费用负担"
+ },
+ {
+  "sample_id": "tb2-77",
+  "label": "SUPPORTED",
+  "reason": "原文第十三条明确支持"
+ },
+ {
+  "sample_id": "tb2-78",
+  "label": "SUPPORTED",
+  "reason": "上下文有完全对应条文"
+ },
+ {
+  "sample_id": "tb2-79",
+  "label": "SUPPORTED",
+  "reason": "上下文第十条有明确规定"
+ },
+ {
+  "sample_id": "tb2-80",
+  "label": "SUPPORTED",
+  "reason": "上下文明确1.6%比例"
+ },
+ {
+  "sample_id": "tb2-81",
+  "label": "SUPPORTED",
+  "reason": "上下文有原文依据"
+ },
+ {
+  "sample_id": "tb2-82",
+  "label": "SUPPORTED",
+  "reason": "上下文明确支持"
+ },
+ {
+  "sample_id": "tb2-83",
+  "label": "SUPPORTED",
+  "reason": "第五条明确要求避免公交及时就医"
+ },
+ {
+  "sample_id": "tb2-84",
+  "label": "SUPPORTED",
+  "reason": "第十六条原文直接支持"
+ },
+ {
+  "sample_id": "tb2-85",
+  "label": "UNSUPPORTED",
+  "reason": "C2未载明隔离停课报告"
+ },
+ {
+  "sample_id": "tb2-86",
+  "label": "SUPPORTED",
+  "reason": "上下文有明确对应条款"
+ },
+ {
+  "sample_id": "tb2-87",
+  "label": "SUPPORTED",
+  "reason": "第十七条原文支持"
+ },
+ {
+  "sample_id": "tb2-88",
+  "label": "SUPPORTED",
+  "reason": "上下文第二十条直接支持该规定"
+ },
+ {
+  "sample_id": "tb2-89",
+  "label": "SUPPORTED",
+  "reason": "第十九条规定电子公告信息留存六十日以上"
+ },
+ {
+  "sample_id": "tb2-90",
+  "label": "UNSUPPORTED",
+  "reason": "C1未包含该禁止条款"
+ },
+ {
+  "sample_id": "tb2-91",
+  "label": "UNSUPPORTED",
+  "reason": "上下文无七日内开会规定"
+ },
+ {
+  "sample_id": "tb2-92",
+  "label": "REFUSED",
+  "reason": "拒答"
+ },
+ {
+  "sample_id": "tb2-93",
+  "label": "SUPPORTED",
+  "reason": "C1第十八条明确支持"
+ },
+ {
+  "sample_id": "tb2-94",
+  "label": "SUPPORTED",
+  "reason": "上下文第十八条直接支持"
+ },
+ {
+  "sample_id": "tb2-95",
+  "label": "SUPPORTED",
+  "reason": "上下文第十九条原文支持"
+ },
+ {
+  "sample_id": "tb2-96",
+  "label": "REFUSED",
+  "reason": "拒答"
+ },
+ {
+  "sample_id": "tb2-97",
+  "label": "SUPPORTED",
+  "reason": "C1和C3均规定一般路段不低于1.8米"
+ },
+ {
+  "sample_id": "tb2-98",
+  "label": "SUPPORTED",
+  "reason": "上下文支持夜间施工限制及例外审批"
+ },
+ {
+  "sample_id": "tb2-99",
+  "label": "SUPPORTED",
+  "reason": "C1第十条明确九十日内提交"
+ },
+ {
+  "sample_id": "tb2-100",
+  "label": "SUPPORTED",
+  "reason": "上下文第十条明确支持"
+ },
+ {
+  "sample_id": "tb2-101",
+  "label": "SUPPORTED",
+  "reason": "条文明确支持"
+ },
+ {
+  "sample_id": "tb2-102",
+  "label": "SUPPORTED",
+  "reason": "上下文明确要求销售农机须有合格证"
+ },
+ {
+  "sample_id": "tb2-103",
+  "label": "SUPPORTED",
+  "reason": "第十三条明确临时使用需临时牌证"
+ },
+ {
+  "sample_id": "tb2-104",
+  "label": "SUPPORTED",
+  "reason": "引用条款明确支持"
+ },
+ {
+  "sample_id": "tb2-105",
+  "label": "SUPPORTED",
+  "reason": "上下文明确支持申请部门及材料要求"
+ },
+ {
+  "sample_id": "tb2-106",
+  "label": "SUPPORTED",
+  "reason": "第七条明确列出四级"
+ },
+ {
+  "sample_id": "tb2-107",
+  "label": "SUPPORTED",
+  "reason": "上下文第十四条明确支持"
+ },
+ {
+  "sample_id": "tb2-108",
+  "label": "SUPPORTED",
+  "reason": "上下文第十一条明确支持"
+ },
+ {
+  "sample_id": "tb2-109",
+  "label": "SUPPORTED",
+  "reason": "第十六条明确禁止该行为"
+ },
+ {
+  "sample_id": "tb2-110",
+  "label": "SUPPORTED",
+  "reason": "上下文第二十条明确支持"
+ },
+ {
+  "sample_id": "tb2-111",
+  "label": "UNSUPPORTED",
+  "reason": "上下文无该条款"
+ },
+ {
+  "sample_id": "tb2-112",
+  "label": "REFUSED",
+  "reason": "拒答"
+ },
+ {
+  "sample_id": "tb2-113",
+  "label": "UNSUPPORTED",
+  "reason": "上下文无免费提供图集内容"
+ },
+ {
+  "sample_id": "tb2-114",
+  "label": "SUPPORTED",
+  "reason": "C1第十条规定十五日内注射并领证"
+ },
+ {
+  "sample_id": "tb2-115",
+  "label": "UNSUPPORTED",
+  "reason": "缺少上下文C5，公安机关无据"
+ },
+ {
+  "sample_id": "tb2-116",
+  "label": "SUPPORTED",
+  "reason": "第十二条明确支持"
+ },
+ {
+  "sample_id": "tb2-117",
+  "label": "UNSUPPORTED",
+  "reason": "上下文未见供暖20℃规定"
+ },
+ {
+  "sample_id": "tb2-118",
+  "label": "REFUSED",
+  "reason": "拒答"
+ },
+ {
+  "sample_id": "tb2-119",
+  "label": "UNSUPPORTED",
+  "reason": "C1未提供处罚条款依据"
+ }
+]
