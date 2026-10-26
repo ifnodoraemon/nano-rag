@@ -23,6 +23,7 @@ source_modified_at: null
 is_latest_version: true
 superseded_by: null
 updated_at: '2026-10-22T02:44:32.027242+00:00'
+synthetic_questions: []
 ---
 
 # employee_handbook

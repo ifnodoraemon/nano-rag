@@ -23,6 +23,7 @@ from app.ingestion.parse_cache import ParseCache, build_fingerprint, content_has
 from app.ingestion.token_ledger import TokenLedger, collect_tokens
 from app.ingestion.metadata import build_source_key, extract_document_metadata
 from app.ingestion.graph_extractor import GraphExtractor
+from app.wiki.article_index import split_into_articles
 from app.wiki.compiler import WikiCompiler
 from app.wiki.doc2query import generate_questions
 from app.wiki.search import WikiSearcher
@@ -149,6 +150,10 @@ class IngestionPipeline:
         self.graph_extractor = GraphExtractor(generation_client)
         # Index the questions each document answers, so everyday phrasing can match.
         self.doc2query_enabled = _strict_bool_env("RAG_DOC2QUERY_ENABLED", "true")
+        # Index each article of a long document separately. The document page carries a
+        # summary (~15% of the source on the measured corpus); without article pages the
+        # rest is invisible to the lexical index.
+        self.article_index_enabled = _strict_bool_env("RAG_ARTICLE_INDEX_ENABLED", "true")
         self.model_chunking_enabled = _strict_bool_env(
             "RAG_MODEL_CHUNKING_ENABLED", "true"
         )
@@ -264,6 +269,8 @@ class IngestionPipeline:
                     # not overlap. Done per document, once, at ingest.
                     if self.doc2query_enabled:
                         await self._attach_synthetic_questions(prepared_documents)
+                    if self.article_index_enabled:
+                        await self._write_article_pages(prepared_documents)
                     await asyncio.to_thread(
                         self.wiki_compiler.upsert_documents,
                         [
@@ -682,6 +689,41 @@ class IngestionPipeline:
             elif node.text.strip():
                 parts.append(node.text.strip())
         return "\n\n".join(parts).strip()
+
+    async def _write_article_pages(
+        self, prepared_documents: list[PreparedDocument]
+    ) -> None:
+        """Split each document into articles and index them as their own pages.
+
+        One model call per document, bounded by the ingest concurrency. A document that
+        yields no articles is indexed only at document level - the article split is an
+        addition, not a replacement, so that is not a degraded state.
+        """
+        limit = _ingest_concurrency()
+
+        async def one(prepared: PreparedDocument) -> None:
+            async with asyncio.Semaphore(limit):
+                articles = await split_into_articles(
+                    prepared.document.content,
+                    self.generation_client,
+                    title=prepared.document.title,
+                )
+                if not articles:
+                    return
+                writer = self.wiki_compiler
+                if writer is None:
+                    raise ConfigurationError(
+                        "article indexing is enabled but no wiki compiler is configured"
+                    )
+                await asyncio.to_thread(
+                    writer.write_article_pages,
+                    prepared.document,
+                    [(article.label, article.text) for article in articles],
+                )
+
+        async with asyncio.TaskGroup() as group:
+            for prepared in prepared_documents:
+                group.create_task(one(prepared))
 
     async def _attach_synthetic_questions(
         self, prepared_documents: list[PreparedDocument]

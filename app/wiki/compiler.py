@@ -57,6 +57,10 @@ class WikiCompiler:
         self.sources_dir = self.root_dir / "sources"
         self.topics_dir = self.root_dir / "topics"
         self.indexes_dir = self.root_dir / "indexes"
+        # One page per article of a long document. The document page is a summary
+        # (~1,049 of 5,446 characters on the measured corpus); without these pages the
+        # remaining 80% of every statute is invisible to the lexical index.
+        self.articles_dir = self.root_dir / "articles"
         self._ensure_structure()
         self.cleanup_stale_staging()
         self._cleanup_legacy_staging()
@@ -422,6 +426,7 @@ class WikiCompiler:
         self.sources_dir.mkdir(parents=True, exist_ok=True)
         self.topics_dir.mkdir(parents=True, exist_ok=True)
         self.indexes_dir.mkdir(parents=True, exist_ok=True)
+        self.articles_dir.mkdir(parents=True, exist_ok=True)
         schema_path = self.root_dir / "SCHEMA.md"
         if not schema_path.exists():
             schema_path.write_text(self._render_schema(), encoding="utf-8")
@@ -568,6 +573,38 @@ class WikiCompiler:
             lines.extend(["", "## Questions This Document Answers"])
             lines.extend(f"- {question}" for question in questions)
         return "\n".join(lines).strip()
+
+    def write_article_pages(
+        self,
+        document: Document,
+        articles: list[tuple[str, str]],
+    ) -> int:
+        """Write one wiki page per article; return how many were written.
+
+        Article pages are index entries, not documents: each carries the parent
+        ``doc_id`` so a hit resolves to the document the read plan and citations work
+        with. Pages from a previous ingest of the same document are removed first, so a
+        re-parse that yields fewer articles cannot leave stale entries matching queries.
+        """
+        kb_id = str(document.metadata.get("kb_id", "default"))
+        for stale in self.articles_dir.glob(f"{document.doc_id}--*.md"):
+            stale.unlink(missing_ok=True)
+        written = 0
+        for index, (label, text) in enumerate(articles):
+            slug = hashlib.sha256(label.encode("utf-8")).hexdigest()[:10]
+            path = self.articles_dir / f"{document.doc_id}--{index:04d}-{slug}.md"
+            metadata = {
+                "kind": "article",
+                "doc_id": document.doc_id,
+                "article_label": label,
+                "article_index": index,
+                "title": f"{document.title} {label}",
+                "source_path": document.source_path,
+                "kb_id": kb_id,
+            }
+            self._write_page(path, metadata, text)
+            written += 1
+        return written
 
     def _render_schema(self) -> str:
         return (

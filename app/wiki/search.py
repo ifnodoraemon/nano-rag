@@ -55,6 +55,7 @@ class WikiSearcher:
     def __init__(self, root_dir: Path) -> None:
         self.root_dir = root_dir
         self.sources_dir = self.root_dir / "sources"
+        self.articles_dir = self.root_dir / "articles"
         self.topics_dir = self.root_dir / "topics"
         self.indexes_dir = self.root_dir / "indexes"
         self.index = BM25Index(
@@ -182,7 +183,12 @@ class WikiSearcher:
         frontmatter" on every search and on every process start.
         """
         snapshot: dict[str, int] = {}
-        for directory in (self.sources_dir, self.topics_dir, self.indexes_dir):
+        for directory in (
+            self.sources_dir,
+            self.articles_dir,
+            self.topics_dir,
+            self.indexes_dir,
+        ):
             if not directory.exists():
                 continue
             for path in directory.iterdir():
@@ -205,7 +211,12 @@ class WikiSearcher:
         the sync window (or by an explicit sync() from the writing process).
         """
         signature: list[tuple[str, int]] = []
-        for directory in (self.sources_dir, self.topics_dir, self.indexes_dir):
+        for directory in (
+            self.sources_dir,
+            self.articles_dir,
+            self.topics_dir,
+            self.indexes_dir,
+        ):
             try:
                 signature.append((str(directory), directory.stat().st_mtime_ns))
             except OSError:
@@ -388,6 +399,8 @@ class WikiSearcher:
     def _index_page(self, path: Path) -> None:
         if path.parent == self.sources_dir:
             self._index_source_page(path)
+        elif path.parent == self.articles_dir:
+            self._index_article_page(path)
         elif path.parent == self.topics_dir:
             self._index_topic_page(path)
         elif path.parent == self.indexes_dir:
@@ -458,6 +471,41 @@ class WikiSearcher:
                 body=body,
                 kind="source",
                 metadata=metadata,
+            ),
+        )
+
+    def _index_article_page(self, page_path: Path) -> None:
+        """Index one article of a long document as its own retrieval unit.
+
+        The doc_id is the PARENT document's, prefixed so BM25 keeps the two entries
+        apart. Callers that resolve hits to documents read ``metadata['doc_id']``, so an
+        article hit still points at the document the read plan needs.
+        """
+        metadata, body = WikiCompiler.read_frontmatter(page_path)
+        if not metadata:
+            raise RetrievalError(
+                f"wiki article page {page_path} has unreadable frontmatter; "
+                "the page is corrupt and must be recompiled"
+            )
+        parent_doc_id = str(metadata.get("doc_id", ""))
+        if not parent_doc_id:
+            raise RetrievalError(
+                f"wiki article page {page_path} has no parent doc_id; the page is corrupt"
+            )
+        kb_id = str(metadata.get("kb_id", "default"))
+        label = str(metadata.get("article_label", page_path.stem))
+        self._register_document(
+            page_path,
+            f"wiki:article:{parent_doc_id}:{metadata.get('article_index', 0)}",
+            WikiDocument(
+                doc_id=parent_doc_id,
+                title=f"{metadata.get('title', '')}",
+                source_path=str(metadata.get("source_path", "")),
+                kb_id=kb_id,
+                page_path=str(page_path.relative_to(self.root_dir.parent)),
+                body=body,
+                kind="article",
+                metadata={**metadata, "wiki_kind": "article", "article_label": label},
             ),
         )
 

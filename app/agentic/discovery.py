@@ -241,6 +241,20 @@ class AgenticDiscovery:
             self.trace_store.save_raw(final_trace)
             return contexts, final_trace
 
+    @staticmethod
+    def _readable_kinds(hit: SearchHit) -> bool:
+        """Whether a hit maps to a deep-readable source.
+
+        Source pages and article pages both do; topic/index pages are aggregates with
+        no artifact of their own. An article hit carries its parent's doc_id, so the read
+        plan receives a document either way - the article only made it easier to find.
+        """
+        return str((hit.chunk.metadata or {}).get("wiki_kind", "")) in {
+            "source",
+            "article",
+            "document" if not (hit.chunk.metadata or {}).get("wiki_kind") else "",
+        }
+
     async def _discover(
         self,
         query: str,
@@ -271,7 +285,7 @@ class AgenticDiscovery:
             return [
                 hit
                 for hit in hits
-                if (hit.chunk.metadata or {}).get("wiki_kind") == "source"
+                if self._readable_kinds(hit)
             ]
 
         if not self.query_expansion_enabled:
@@ -293,7 +307,7 @@ class AgenticDiscovery:
         return [
             hit
             for hit in hits
-            if (hit.chunk.metadata or {}).get("wiki_kind") == "source"
+            if self._readable_kinds(hit)
         ]
 
     async def _discover_with_hyde(
@@ -402,9 +416,11 @@ class AgenticDiscovery:
             source_hits = [
                 hit
                 for hit in hits
-                if (hit.chunk.metadata or {}).get("wiki_kind") == "source"
+                if self._readable_kinds(hit)
             ]
             for hit in source_hits:
+                # An article hit and a document hit can both fire for the same document;
+                # keeping the first is enough because both resolve to the same doc_id.
                 hits_by_id.setdefault(hit.chunk.doc_id, hit)
             rankings.append([hit.chunk.doc_id for hit in source_hits])
         fused = fuse_rankings(rankings)
