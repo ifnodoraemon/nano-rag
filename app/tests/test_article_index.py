@@ -147,3 +147,62 @@ async def test_a_short_but_real_article_is_kept():
 async def test_a_very_short_document_yields_no_articles():
     articles = await split_into_articles("太短", _Client(["第一条"]), title="x")  # type: ignore[arg-type]
     assert articles == []
+
+
+class _TruncatingClient:
+    """Fails with a length cap for wide windows, then answers normally."""
+
+    def __init__(self, wide_threshold: int) -> None:
+        self.wide_threshold = wide_threshold
+        self.calls: list[int] = []
+
+    async def generate(self, messages, **kwargs):  # noqa: ANN001, ANN003
+        import json
+
+        from app.core.exceptions import ModelGatewayError
+
+        prompt = str(messages[0]["content"])
+        # Measure the DOCUMENT portion, not the fixed prompt template around it.
+        text_len = prompt.split("DOCUMENT:", 1)[-1]
+        self.calls.append(len(text_len))
+        if len(text_len) > self.wide_threshold:
+            raise ModelGatewayError(
+                "generation truncated (finish_reason=length) for model x"
+            )
+        # Return the first label the window actually starts with, in the shape the
+        # prompt asks for; the test is about the retry, not about parsing.
+        first_line = text_len.strip().split("\n", 1)[0][:24]
+        return {
+            "content": json.dumps(
+                {"articles": [{"label": first_line, "opens_with": first_line}]},
+                ensure_ascii=False,
+            )
+        }
+
+
+@pytest.mark.asyncio
+async def test_a_length_cap_is_retried_with_a_smaller_window():
+    """Three of four real official documents aborted on this; the cap is recoverable."""
+    client = _TruncatingClient(wide_threshold=2000)
+    # A realistic long document: numbered units throughout, as a real statute has.
+    long_doc = "\n\n".join(
+        f"第{i}条 " + "内容内容内容。" * 20 for i in range(1, 401)
+    )
+    articles = await split_into_articles(long_doc, client, title="某条例")  # type: ignore[arg-type]
+    assert articles, "the retry must produce a split, not fail the ingest"
+    assert len(client.calls) >= 2, "the first attempt must have been too wide"
+    assert max(client.calls) > min(client.calls), "the retried window is smaller"
+
+
+@pytest.mark.asyncio
+async def test_a_non_length_error_still_raises():
+    """A gateway fault must not be mistaken for a long document."""
+
+    from app.core.exceptions import ModelGatewayError
+
+    class _Failing:
+        async def generate(self, messages, **kwargs):  # noqa: ANN001, ANN003
+            raise ModelGatewayError("upstream returned 502")
+
+    with pytest.raises(ModelGatewayError, match="502"):
+        await split_into_articles("第一条 " + "内容内容。" * 500, _Failing(), title="x")  # type: ignore[arg-type]

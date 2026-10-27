@@ -28,7 +28,7 @@ import logging
 from collections.abc import Sequence
 from dataclasses import dataclass
 
-from app.core.exceptions import ModelOutputError
+from app.core.exceptions import ModelGatewayError, ModelOutputError
 from app.model_client.generation import GenerationClient
 
 logger = logging.getLogger(__name__)
@@ -44,7 +44,15 @@ HEADING_LIKE_CHARS = 40
 # Sentence terminators in the scripts this system sees; a heading carries none.
 SENTENCE_MARKS = ("。", "；", "！", "？", ".", ";", "!", "?")
 # Above this the document is split into several requests rather than one huge prompt.
-MAX_DOCUMENT_CHARS = 24_000
+# Window size for one split request. This bounds the OUTPUT as much as the input: the
+# model returns one label per article, so a 24,000-character window could ask for several
+# hundred labels and the reply was truncated at the token cap - which failed the ingest
+# outright on three of four real Chinese official documents. The window is sized so the
+# expected reply is a few dozen labels.
+MAX_DOCUMENT_CHARS = 8_000
+# Floor for the retry-on-truncation loop. Below this the window holds one article and
+# shrinking further would only split it.
+MIN_WINDOW_CHARS = 1_500
 MAX_ARTICLES = 600
 
 # Only the labels are requested. Asking for a verbatim snippet per article made the
@@ -149,18 +157,42 @@ def _locate_unit(text: str, label: str, opening: str, start: int) -> int | None:
 
 
 def _find_label(text: str, label: str, start: int) -> int | None:
-    """Offset of ``label`` at or after ``start``, tolerating whitespace variants.
+    r"""Offset of ``label`` at or after ``start``, tolerating layout characters.
 
-    The source mixes NBSP and ordinary spaces inside the number ("第十七条\xa0 国防"),
-    so an exact search misses.* A regex built from the label with every whitespace run
-    loosened finds it while still requiring the same characters in the same order.
+    Two kinds of difference are layout rather than content, and both made real documents
+    fail to split:
+
+    - whitespace: the source mixes NBSP and spaces inside a number ("第十七条\xa0 国防"),
+      and a form writes "1. 应用范围*" where the model transcribes "1.应用范围*（可多选）";
+    - punctuation that marks a form field rather than carrying meaning: "\*", ":", ".",
+      the full-width brackets a checkbox list uses.
+
+    The pattern therefore loosens runs of whitespace AND of those layout characters,
+    while still requiring every content character in the same order. A label that differs
+    in its actual words still fails, which is what should happen.
     """
     import re
 
-    parts = label.split()
+    # Split the label into CONTENT runs, separated by the layout characters above. Each
+    # run must appear in order; the separators between them are loosened. Splitting on
+    # whitespace alone missed labels that carry no spaces at all ("1.应用范围*（可多选）"),
+    # which then had to match character for character including the asterisk.
+    layout = set("\u00a0\t \n\r*.,:：;；、-—_()（）[]【】")
+    parts: list[str] = []
+    current: list[str] = []
+    for ch in label:
+        if ch in layout:
+            if current:
+                parts.append("".join(current))
+                current = []
+        else:
+            current.append(ch)
+    if current:
+        parts.append("".join(current))
     if not parts:
         return None
-    pattern = re.compile(r"[\s\u00a0]*".join(re.escape(part) for part in parts))
+    gap = r"[\s\u00a0\*\.,:：;；、\-—_()（）\[\]【】]*"
+    pattern = re.compile(gap.join(re.escape(part) for part in parts))
     match = pattern.search(text, start)
     return match.start() if match else None
 
@@ -186,20 +218,42 @@ async def split_into_articles(
 
     Raises when the model's anchors do not resolve: a plan built on paraphrased anchors
     would silently reassemble the document into something the user never wrote.
+
+    A reply that hits the output token cap is the one recoverable failure, and it is
+    retried with a smaller window - that cap is a property of how much the model had to
+    write, not of anything wrong with the document. Every other error propagates.
     """
     text = document_text.strip()
     if len(text) < MIN_ARTICLE_CHARS:
         return []
-    if len(text) <= MAX_DOCUMENT_CHARS:
-        return await _split_once(text, generation_client, title=title)
-
-    # Long documents: split in windows, but at a window boundary that the model chooses
-    # so an article is not cut across two requests.
     articles: list[Article] = []
     offset = 0
     while offset < len(text):
-        window = text[offset : offset + MAX_DOCUMENT_CHARS]
-        articles.extend(await _split_once(window, generation_client, title=title))
+        # Shrink the window and retry when the model's reply hits its token cap. A cap
+        # is a KNOWN, recoverable condition - the reply is simply longer than the budget
+        # - and a smaller window asks for fewer labels. Left alone it failed the whole
+        # ingest: three of four real official documents aborted, because the reasoning
+        # model's deliberation pushed the reply past the cap. Any other error still
+        # raises, so a genuine gateway fault cannot be mistaken for a long document.
+        window_chars = MAX_DOCUMENT_CHARS
+        while True:
+            window = text[offset : offset + window_chars]
+            try:
+                articles.extend(
+                    await _split_once(window, generation_client, title=title)
+                )
+                break
+            except ModelGatewayError as exc:
+                if "finish_reason=length" not in str(exc) or window_chars <= MIN_WINDOW_CHARS:
+                    raise
+                window_chars = max(MIN_WINDOW_CHARS, window_chars // 2)
+                logger.warning(
+                    "article split for %r hit the output cap at %d chars; retrying "
+                    "with %d",
+                    title,
+                    len(window),
+                    window_chars,
+                )
         offset += len(window)
         if len(articles) > MAX_ARTICLES:
             raise ModelOutputError(
@@ -217,7 +271,7 @@ async def _split_once(
     result = await generation_client.generate(
         [{"role": "user", "content": _render(text)}],
         temperature=0,
-        max_tokens=16_000,
+        max_tokens=24_000,
         response_format={
             "type": "json_schema",
             "json_schema": {"name": "articles", "schema": ARTICLE_ANCHOR_SCHEMA},
