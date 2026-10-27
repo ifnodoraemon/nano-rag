@@ -1012,8 +1012,10 @@ class AgenticReasoningService:
                     **record.step_latencies,
                     "generation_seconds": generation_seconds,
                     "agent_end_to_end_seconds": end_to_end_seconds,
-                    "audit_seconds": list(audit_seconds or []),
-                    "audit_calls": len(audit_seconds or []),
+                    # Per-round values live in retrieval_params.agent.audit_seconds:
+                    # this dict is typed dict[str, float], so a list here made the WHOLE
+                    # trace record fail validation and be dropped on read - one wrong
+                    # field silently discarded the evidence for every question.
                 },
                 "citation_integrity": citation_integrity,
                 "answerable": answerable,
