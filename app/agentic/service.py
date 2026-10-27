@@ -47,7 +47,11 @@ ANSWER_SCHEMA = {
                 },
                 "extracted_answer": {
                     "type": "string",
-                    "description": "带引用的极简答案，例如：xxx为xxx [C1]。",
+                    "description": (
+                        "带引用的极简答案，例如：xxx为xxx [C1]。"
+                        "当 is_answerable 为 false 时，这里填写一句完整的、"
+                        "用【用户提问的语言】写成的说明，指出文档中缺少什么。"
+                    ),
                 },
                 "supporting_claims": {
                     "type": "array",
@@ -445,16 +449,26 @@ class AgenticReasoningService:
                 raise ModelOutputError(
                     "answer_structure.missing_entities must be an array"
                 )
-            missing = [str(item).strip() for item in raw_missing if str(item).strip()]
-            if missing:
-                ans = f"文档中未包含关于“{'、'.join(missing)}”的相关信息。"
-            else:
-                ans = "文档中未包含相关信息。"
-            return (
-                f"Final Answer:\n{ans}\n\n"
-                "Supporting Claims:\n- [insufficiency] 上下文未覆盖问题核心实体。",
-                False,
-            )
+            # Validated for shape only: the abstention metrics read missing_entities,
+            # while the user-visible sentence comes from the model below.
+            [str(item).strip() for item in raw_missing if str(item).strip()]
+            # The refusal text comes from the model, not from a format string here.
+            # A template in this function made every refusal Chinese: the model answered
+            # a US Code corpus in English and the system replied "文档中未包含关于...",
+            # because the sentence was assembled in code and no prompt could change it.
+            # missing_entities remains the structured signal the abstention metrics read.
+            stated = parsed.get("extracted_answer")
+            ans = stated.strip() if isinstance(stated, str) else ""
+            if not ans:
+                raise ModelOutputError(
+                    "an unanswerable verdict must carry its own explanation in "
+                    "extracted_answer, written in the question's language; the system "
+                    "does not synthesise refusal wording"
+                )
+            # No marker text appended: it would be a language of its own and would leak
+            # into the user-visible answer. The machine-readable signal is the returned
+            # False, which the answerability metrics already read.
+            return (f"Final Answer:\n{ans}", False)
         extracted = parsed.get("extracted_answer")
         if not isinstance(extracted, str) or not extracted.strip():
             raise ModelOutputError(

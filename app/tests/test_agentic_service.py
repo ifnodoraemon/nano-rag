@@ -172,13 +172,32 @@ def test_render_structured_answer_answerable() -> None:
 
 
 def test_render_structured_answer_unanswerable() -> None:
+    """The model writes the refusal, in the question's language.
+
+    A format string here once made every refusal Chinese: a US Code question in English
+    was answered "文档中未包含关于..." because the sentence was assembled in code, where no
+    prompt could reach it. The system no longer invents refusal wording.
+    """
     service = _service(FakeGenerationClient())
     answer, answerable = service._render_structured_answer(
-        '{"is_answerable":false,"missing_entities":["术语X"],'
-        '"extracted_answer":"","supporting_claims":[]}'
+        '{"is_answerable":false,"missing_entities":["term X"],'
+        '"extracted_answer":"The provided documents do not mention term X.",'
+        '"supporting_claims":[]}'
     )
-    assert "术语X" in answer
-    assert "[insufficiency]" in answer
+    assert answerable is False
+    assert "The provided documents do not mention term X." in answer
+    assert "文档中未包含" not in answer
+
+
+def test_an_unanswerable_verdict_must_carry_its_own_explanation() -> None:
+    """Otherwise the system would have to synthesise wording - which is how it once
+    produced Chinese refusals for English questions."""
+    service = _service(FakeGenerationClient())
+    with pytest.raises(ModelOutputError, match="its own explanation"):
+        service._render_structured_answer(
+            '{"is_answerable":false,"missing_entities":["term X"],'
+            '"extracted_answer":"","supporting_claims":[]}'
+        )
 
 
 def test_render_structured_answer_rejects_contract_violations() -> None:
