@@ -27,7 +27,12 @@ class GenerationClient(GatewayClient):
                 config.settings,
                 "generation_seconds",
                 env_name="GENERATION_TIMEOUT_SECONDS",
-                default=120,
+                # A reasoning model writing a long structured reply can spend well over
+                # two minutes: 120s produced 499s at the gateway (the client closing the
+                # connection first), which surfaces as an unrelated provider error. The
+                # 16k-token article splits are comfortably under this, and the retry
+                # ladder below still bounds a genuinely stuck provider.
+                default=300,
             ),
             "generation",
         )
