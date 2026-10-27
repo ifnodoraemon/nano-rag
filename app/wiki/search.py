@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import os
 import threading
+from dataclasses import replace
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -11,6 +12,7 @@ from app.agentic.scope import ScopePreference, document_matches
 from app.core.exceptions import ConfigurationError, RetrievalError
 from app.retrieval.bm25 import BM25Config, BM25Index
 from app.retrieval.filters import match_metadata_filters
+from app.retrieval.title_weight import resolve_title_weight
 from app.schemas.chunk import Chunk
 from app.retrieval.hits import SearchHit
 from app.retrieval.tokenizer import resolve_tokenizer_mode
@@ -62,13 +64,18 @@ class WikiSearcher:
         self.articles_dir = self.root_dir / "articles"
         self.topics_dir = self.root_dir / "topics"
         self.indexes_dir = self.root_dir / "indexes"
+        # None means "let the corpus decide"; an explicit value is an operator override.
+        self._title_weight_override = self._title_weight_override_value()
+        self._title_diversity: float | None = None
         self.index = BM25Index(
             BM25Config(
                 max_documents=self._max_documents(),
                 tokenizer=self._tokenizer_mode(),
                 k1=self._k1_config(),
                 b=self._b_config(),
-                title_weight=self._title_weight_config(),
+                # Placeholder until pages are indexed; _reweight_title() derives the
+                # real value from the titles that actually exist.
+                title_weight=self._title_weight_override or 0.0,
                 variant=self._scoring_variant_config(),
             )
         )
@@ -138,13 +145,13 @@ class WikiSearcher:
         return raw
 
     @staticmethod
-    def _title_weight_config() -> float:
-        """Weight of the title field relative to the body (0 disables it).
-
-        Measured with scripts/sweep_bm25_params.py; a title-only match used to be
-        invisible because the index only ever saw the page body.
-        """
-        return _float_env("RAG_BM25_TITLE_WEIGHT", 0.0, minimum=0.0)
+    def _title_weight_override_value() -> float | None:
+        """Operator override for the title weight, or None to let the corpus decide."""
+        raw = os.getenv("RAG_BM25_TITLE_WEIGHT")
+        if raw is None or not raw.strip():
+            return None
+        value = _float_env("RAG_BM25_TITLE_WEIGHT", 0.0, minimum=0.0)
+        return value
 
     @staticmethod
     def _k1_config() -> float:
@@ -249,6 +256,9 @@ class WikiSearcher:
         self._last_dir_signature = self._dir_signature()
         current = self._collect_page_mtimes()
         if current == self._page_mtimes:
+            # Nothing changed, but the weight may still be the placeholder from
+            # construction (e.g. a second process starting against an unchanged wiki).
+            self._reweight_title()
             return
         removed = set(self._page_mtimes) - set(current)
         for path_str in removed:
@@ -257,6 +267,28 @@ class WikiSearcher:
             if self._page_mtimes.get(path_str) != mtime:
                 self._index_page(Path(path_str))
         self._page_mtimes = current
+        self._reweight_title()
+
+    def _reweight_title(self) -> None:
+        """Set the title weight from the corpus that was actually indexed.
+
+        A constant encodes a guess about the corpus: a title-weighted field helps where
+        titles are distinctive (a Chinese regulation is named after its subject) and hurts
+        where they are taxonomy labels shared by many documents (US Code groups) - measured
+        +2.6pt and -2.3..-5.3pt respectively. The distinguishing statistic is computed from
+        the indexed titles themselves, so no per-corpus configuration is needed.
+
+        An explicit RAG_BM25_TITLE_WEIGHT always wins; this is a default, not an authority.
+        """
+        if self._title_weight_override is not None:
+            return
+        titles = [document.title for document in self.documents.values()]
+        weight, diversity = resolve_title_weight(titles)
+        if weight != self.index.config.title_weight:
+            # BM25Config is a frozen-ish dataclass; replace rather than mutate so the
+            # weight change is visible in the config the index reports.
+            self.index.config = replace(self.index.config, title_weight=weight)
+        self._title_diversity = diversity
 
     def sync(self, *, force: bool = True) -> None:
         """Incrementally re-index on-disk page changes.
@@ -289,6 +321,10 @@ class WikiSearcher:
             for path_str in sorted(snapshot):
                 self._index_page(Path(path_str))
             self._page_mtimes = snapshot
+            # A full rebuild must derive the title weight too: this is the path that
+            # runs at startup, so skipping it would leave every process on the
+            # constructor's placeholder until the first incremental sync.
+            self._reweight_title()
             self._last_sync_monotonic = time.monotonic()
             self._last_dir_signature = self._dir_signature()
 
