@@ -38,7 +38,18 @@ logger = logging.getLogger(__name__)
 # would be overfitting a 200-query benchmark.
 RRF_K = 60
 
-MAX_VARIANT_CHARS = 60
+# A keyword query is a handful of WORDS, in any language - but "word" is only countable
+# where the language delimits words with spaces. A single character budget cannot serve
+# both: 60 characters is a reasonable keyword query in Chinese and a truncated sentence in
+# English, which is exactly why an English corpus failed 28 of 196 queries with "variant
+# longer than 60 characters" - the guard was rejecting valid expansions.
+#
+# So the budget is per-script: a spaced script is measured in words (a keyword query is a
+# handful of them however long the words are), an unspaced script in characters (it has no
+# word boundary to count, and a run of 100 characters is a sentence whatever it would be
+# called).
+MAX_VARIANT_WORDS = 12
+MAX_UNSPACED_VARIANT_CHARS = 60
 
 EXPANSION_SCHEMA = {
     "type": "object",
@@ -110,12 +121,15 @@ async def expand_query(
         text = " ".join(item.split()).strip()
         if not text or text.casefold() == query.casefold():
             continue
-        if len(text) > MAX_VARIANT_CHARS:
-            # A variant longer than this is a sentence, which is exactly what
-            # expansion was supposed to replace.
+        # Measure in the unit the script actually has: words where spaces delimit them,
+        # characters where they do not. Counting words alone would let a 100-character
+        # Chinese sentence through as "one word"; counting characters alone rejects valid
+        # English keyword queries.
+        too_long, budget = _variant_exceeds_budget(text)
+        if too_long:
             raise ModelOutputError(
-                f"query expansion returned a {len(text)}-character variant "
-                f"(> {MAX_VARIANT_CHARS}) for query {query!r}: {text!r}"
+                f"query expansion returned a {len(text)}-character variant that exceeds "
+                f"its budget of {budget} for query {query!r}: {text!r}"
             )
         if text.casefold() not in {variant.casefold() for variant in variants}:
             variants.append(text)
@@ -129,6 +143,25 @@ async def expand_query(
 # plausible key name. These aliases are accepted and logged; anything else is a
 # contract violation and raises.
 KEYWORD_KEYS = ("keywords", "variants", "queries", "keyword_queries")
+
+
+def _variant_exceeds_budget(text: str) -> tuple[bool, str]:
+    """Whether a variant is too long, judged in the unit its script provides.
+
+    Where spaces delimit words, count words: "bank dispute substitute check refund" is a
+    normal keyword query at 43 characters and would be rejected by a 60-character cap in
+    a longer phrasing, while the same cap is generous in Chinese. Where the script does not
+    delimit words, count characters - a run of 100 characters is a sentence whatever you
+    would call its "words".
+    """
+    words = text.split()
+    spaced = len(words) > 1 or not any(ord(ch) > 127 for ch in text)
+    if spaced:
+        return len(words) > MAX_VARIANT_WORDS, f"{MAX_VARIANT_WORDS} words"
+    return (
+        len(text) > MAX_UNSPACED_VARIANT_CHARS,
+        f"{MAX_UNSPACED_VARIANT_CHARS} characters (unspaced script)",
+    )
 
 
 def _keywords_of(payload: dict) -> list | None:

@@ -4,7 +4,8 @@ from __future__ import annotations
 import pytest
 
 from app.agentic.query_expansion import (
-    MAX_VARIANT_CHARS,
+    MAX_UNSPACED_VARIANT_CHARS,
+    MAX_VARIANT_WORDS,
     expand_query,
     fuse_rankings,
 )
@@ -54,7 +55,7 @@ async def test_expansion_caps_the_number_of_variants():
 async def test_a_sentence_variant_fails_loudly():
     """A long variant defeats the purpose: BM25 is asked a question again."""
     client = _Client('{"keywords": ["' + "很长的句子" * 20 + '"]}')
-    with pytest.raises(ModelOutputError, match="character variant"):
+    with pytest.raises(ModelOutputError, match="exceeds its budget"):
         await expand_query("q", client)  # type: ignore[arg-type]
 
 
@@ -110,4 +111,43 @@ def test_fusion_of_one_list_is_that_list():
 
 
 def test_variant_length_limit_is_sane():
-    assert MAX_VARIANT_CHARS >= 20
+    assert MAX_UNSPACED_VARIANT_CHARS >= 20
+
+
+@pytest.mark.asyncio
+async def test_a_multi_word_english_keyword_query_is_accepted():
+    """60 characters is a sentence in English but a normal keyword query in Chinese.
+
+    An English corpus failed 28 of 196 queries because the guard counted characters: the
+    variants it rejected were valid keyword queries, just longer in characters because
+    English words are longer.
+    """
+    # Taken from the variants an English corpus actually produced and the old cap
+    # rejected: 63-66 characters, 7-9 words - a normal keyword query, not a sentence.
+    client = _Client(
+        '{"keywords": ["bank substitute check dispute investigation deadline", '
+        '"substitute check claim refund twenty days", "bank investigate claim 10 days"]}'
+    )
+    variants = await expand_query("how long does my bank have to investigate", client)  # type: ignore[arg-type]
+    assert len(variants) == 3, "all are valid keyword queries"
+    assert all(len(v.split()) <= MAX_VARIANT_WORDS for v in variants)
+    # The invariant that matters: a long English keyword query is judged by its word
+    # count, not its character count. A 66-character, 9-word variant - the shape the old
+    # cap rejected - must pass, while the same rule must still stop a 40-word run-on.
+    from app.agentic.query_expansion import _variant_exceeds_budget
+
+    long_query = "how long does my bank have to investigate a substitute check dispute"
+    assert len(long_query) > 60, "the old character cap would have rejected this"
+    assert _variant_exceeds_budget(long_query)[0] is False, "but it is a valid keyword query"
+    assert _variant_exceeds_budget("word " * 40)[0] is True, "a run-on is still rejected"
+
+
+@pytest.mark.asyncio
+async def test_an_endless_english_variant_still_fails():
+    client = _Client('{"keywords": ["' + "word " * 40 + '"]}')
+    with pytest.raises(ModelOutputError, match="exceeds its budget"):
+        await expand_query("q", client)  # type: ignore[arg-type]
+
+
+def test_the_word_budget_is_small_enough_to_be_a_keyword_query():
+    assert MAX_VARIANT_WORDS <= 20
