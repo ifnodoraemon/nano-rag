@@ -24,8 +24,17 @@ logger = logging.getLogger(__name__)
 # manifest, so a page fed to the planner must not be cut mid-sentence: the clause that
 # matters is often the one after the truncation point.
 MAX_WIKI_CONTEXT_CHARS = 2200
-DEFAULT_MAX_DOCUMENTS = 50000
-DEFAULT_MAX_PAGES_PER_KB = 20000
+# Capacity of the in-process BM25 index, in PAGES (a source page plus one page per
+# article). Measured on 595 Chinese statutes: 24,705 pages, 363 MB resident, ~147 MB per
+# 10,000 pages. Article-level indexing multiplies page count by roughly 40x, so the
+# earlier default of 50,000 was exhausted by about 1,200 statutes - ingest then failed
+# loudly (by design: capacity never drops documents silently), but at a size ordinary
+# corpora reach. The default is now set from measured memory rather than guessed, so a
+# deployment hitting it has a real memory problem rather than a stale constant.
+DEFAULT_MAX_DOCUMENTS = 200_000
+# Per-KB source page quota. Unrelated to memory: it counts SOURCE pages to bound one
+# tenant's share of the index.
+DEFAULT_MAX_PAGES_PER_KB = 20_000
 
 
 @dataclass

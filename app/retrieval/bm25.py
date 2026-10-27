@@ -5,8 +5,17 @@ import threading
 from collections import Counter
 from dataclasses import dataclass
 
+import logging
+
 from app.core.exceptions import RetrievalError
 from app.retrieval.tokenizer import DEFAULT_TOKENIZER, tokenize
+
+logger = logging.getLogger(__name__)
+
+# Report index growth once it passes this share of the configured capacity. Resident
+# memory scales with indexed pages (~147 MB per 10,000 measured), so approaching the
+# limit is a statement about RAM that an operator should hear before the failure.
+_CAPACITY_WARN_RATIO = 0.5
 
 
 @dataclass
@@ -105,11 +114,24 @@ class BM25Index:
         with self._lock:
             if doc_id in self._doc_lengths:
                 self._remove_locked(doc_id)
-            if len(self._doc_lengths) >= self.config.max_documents:
+            count = len(self._doc_lengths)
+            if count >= self.config.max_documents:
                 raise RetrievalError(
                     f"BM25 index capacity reached ({self.config.max_documents} "
                     f"documents); cannot add {doc_id!r}. Raise the capacity "
                     "configuration instead of silently dropping documents."
+                )
+            # Warn well before the wall. Each indexed page costs measurable resident
+            # memory (~147 MB per 10,000 pages measured), so hitting capacity is a
+            # signal about RAM, and an operator should hear about it while there is
+            # still headroom rather than at the failure.
+            threshold = int(self.config.max_documents * _CAPACITY_WARN_RATIO)
+            if count and count % max(1, threshold // 4) == 0 and count >= threshold:
+                logger.warning(
+                    "BM25 index at %d/%d documents (%.0f%% of capacity)",
+                    count,
+                    self.config.max_documents,
+                    100.0 * count / self.config.max_documents,
                 )
             tokens = self._tokenize(text)
             self._doc_lengths[doc_id] = len(tokens)
