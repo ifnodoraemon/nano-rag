@@ -72,9 +72,9 @@ Nano RAG 的核心原则是：**真实输入、真实索引、真实模型、真
 - 摄入解析：内置 parser registry，支持 Markdown、TXT、HTML、CSV/TSV、JSON/JSONL、YAML、XML、DOCX、XLSX、PPTX、数字版 PDF、本地媒体文件；旧版 DOC/XLS/PPT、扫描 PDF 和图片重文档通过已配置的多模态 document parser 解析
 - 文档结构：保留章节、条款、定义、表格 summary、表格 row-level chunk、来源 hash、文件版本元数据、parser 名称、chunk_strategy 和索引 schema 版本
 - 图片索引：图片文件默认生成视觉媒体 chunk；如果配置了多模态 document parser 且能抽出文字，会同时生成文本/结构 chunk
-- agentic 检索：wiki BM25 发现 → 确定性版本过滤（按 `source_key` 取最新）→ LLM 结构化读计划（json_schema）→ 深读选中的 parsed artifact → 上下文构建；每个阶段进 trace
-- 证据治理：生成结果带 structured supporting claims，并在后处理里标记 claim 是否有引用支撑、缺失数字和缺失术语
-- 模型路径：**一个 provider 走天下**——查询理解、阅读计划、证据审计、图抽取、答案生成由同一个生成模型完成，文档解析由该 provider 的多模态模型完成。**不配置 embedding 模型、不配置 rerank 模型、也没有任何本地解析**
+- agentic 检索：统一查询计划 → 分字段 BM25 → 完整版本目录选择 → 节点阅读计划 → 原文深读、树导航、引用展开或表格计算 → 证据审计及有界补读；支持集合扫描和 Map-Reduce
+- 证据治理：审计、生成和校验共享不可变的原文节选与图片快照；同模型逐句验证主张及实体、数值、单位和条件，程序核对引用和原文范围；trace 记录每轮材料、所有调用用量和端到端耗时
+- 模型路径：**一个 env 配置的模型完成全部语义任务**，包括解析、知识编译、查询理解、阅读计划、图抽取、证据审计、生成和主张校验。模型 ID 无代码默认值；解析模型为空时继承生成模型，显式配置不同 ID 会报错。**无 embedding 模型、无独立 rerank 模型、无本地文本解析**
 - 前端：React + Vite 源码位于 `frontend/` 子模块，Docker 构建为 nginx 静态站点并代理后端
 
 ## 目录
@@ -91,17 +91,20 @@ nano-rag/
 
 ## Docker 配置
 
-### 只有两项需要你填
+### 模型配置来自 env
 
 ```bash
 python scripts/init_env.py           # 一键生成 docker/.env（含随机密钥）
 python scripts/init_env.py --check   # 随时检查还缺什么
 ```
 
-生成后只需补两个值：
+生成后填写 API 凭据和 `GENERATION_MODEL_ALIAS`。模型名没有代码默认值；解析能力默认复用该模型。
+同一模型可通过不同协议适配器或代理地址提供解析与生成能力；模型 ID 必须保持一致。
 
 | 变量 | 用途 | 何时必需 |
 | --- | --- | --- |
+| `GENERATION_MODEL_ALIAS` | 你的模型 ID；所有推理阶段复用 | 总是 |
+| `DOCUMENT_PARSER_MODEL` | 留空继承上述 ID；不同 ID 拒绝启动 | 可留空 |
 | `GENERATION_API_KEY` | 生成模型：对话、阅读计划、证据审计、**图抽取**都走它 | 总是（文本摄入也要图抽取） |
 | `DOCUMENT_PARSER_API_KEY` | 多模态文档解析 | 只在摄入 PDF / 图片 / Office 时；纯 md/txt 不需要 |
 
@@ -125,6 +128,10 @@ python scripts/init_env.py --check   # 随时检查还缺什么
 | 跑测试 / 检索评测 / dedup / 分词 A/B / 引用校验 | **什么都不需要**（无 LLM 调用） |
 | 真实问答（端到端） | `GENERATION_API_KEY` |
 | 摄入 PDF / 图片 / Office | 再加 `DOCUMENT_PARSER_API_KEY` |
+
+统一查询规划、节点导航、摄入知识编译和主张校验默认开启；scope 排序实验默认关闭。`RAG_LEXICAL_BACKEND=sqlite` 可选用 SQLite FTS5 磁盘索引，默认使用内存 BM25。请求默认最多 4 轮检索、32 次模型调用，分别由 `RAG_MAX_RETRIEVAL_LOOPS` 和 `RAG_MAX_MODEL_CALLS` 配置。
+
+旧语料重新摄入后才会获得段落问题、别名和树摘要。详细功能、配置、迁移与验证口径见[单模型实现及 RAGFlow 对比](docs/research/ragflow-comparison-and-implementation-2026-10-30.md)。
 
 ### 启动
 
@@ -164,11 +171,11 @@ Gemini 示例：
 ```bash
 GENERATION_API_KEY=<your-gemini-key>
 GENERATION_API_BASE_URL=https://generativelanguage.googleapis.com/v1beta/openai
-GENERATION_MODEL_ALIAS=gemini-flash-latest
+GENERATION_MODEL_ALIAS=<YOUR_MODEL_ID>
 
 DOCUMENT_PARSER_API_KEY=<your-parser-key>
 DOCUMENT_PARSER_API_BASE_URL=https://generativelanguage.googleapis.com
-DOCUMENT_PARSER_MODEL=gemini-flash-latest
+DOCUMENT_PARSER_MODEL=
 ```
 
 ## 公开 RAG 评测
@@ -191,12 +198,12 @@ Qwen 示例：
 ```bash
 GENERATION_API_KEY=<your-dashscope-key>
 GENERATION_API_BASE_URL=https://dashscope-intl.aliyuncs.com/compatible-mode/v1
-GENERATION_MODEL_ALIAS=qwen-plus
+GENERATION_MODEL_ALIAS=<YOUR_MODEL_ID>
 
 DOCUMENT_PARSER_PROVIDER=qwen
 DOCUMENT_PARSER_API_KEY=<your-dashscope-key>
 DOCUMENT_PARSER_API_BASE_URL=https://dashscope-intl.aliyuncs.com/compatible-mode/v1
-DOCUMENT_PARSER_MODEL=qwen-vl-plus
+DOCUMENT_PARSER_MODEL=
 ```
 
 Qwen vLLM 自托管示例：
@@ -204,12 +211,12 @@ Qwen vLLM 自托管示例：
 ```bash
 GENERATION_API_KEY=EMPTY
 GENERATION_API_BASE_URL=http://vllm:8000/v1
-GENERATION_MODEL_ALIAS=Qwen/Qwen2.5-VL-7B-Instruct
+GENERATION_MODEL_ALIAS=<YOUR_MODEL_ID>
 
 DOCUMENT_PARSER_PROVIDER=qwen
 DOCUMENT_PARSER_API_KEY=EMPTY
 DOCUMENT_PARSER_API_BASE_URL=http://vllm:8000/v1
-DOCUMENT_PARSER_MODEL=Qwen/Qwen2.5-VL-7B-Instruct
+DOCUMENT_PARSER_MODEL=
 ```
 
 如果没有有效 provider key，系统不会切到 mock；`/health/detail` 会显示 degraded，并在具体能力下返回上游错误。

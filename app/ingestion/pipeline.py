@@ -151,6 +151,7 @@ class IngestionPipeline:
         self.graph_extractor = GraphExtractor(generation_client)
         # Index the questions each document answers, so everyday phrasing can match.
         self.doc2query_enabled = _strict_bool_env("RAG_DOC2QUERY_ENABLED", "true")
+        self.knowledge_compilation_enabled = _strict_bool_env("RAG_KNOWLEDGE_COMPILATION_ENABLED", "true")
         # Index each article of a long document separately. The document page carries a
         # summary (~15% of the source on the measured corpus); without article pages the
         # rest is invisible to the lexical index.
@@ -169,6 +170,14 @@ class IngestionPipeline:
             build_fingerprint(
                 parser_provider=getattr(document_parser, "provider", None),
                 parser_model=getattr(document_parser, "alias", None),
+                generation_model=getattr(generation_client, "alias", None),
+                semantic_version="nodes-v2:" + hashlib.sha256(json.dumps({
+                    "compilation": self.knowledge_compilation_enabled,
+                    "article_index": self.article_index_enabled,
+                    "scope": self.scope_extraction_enabled,
+                    "model_chunking": self.model_chunking_enabled,
+                    "prompts": getattr(config, "prompts", {}),
+                }, sort_keys=True).encode()).hexdigest(),
                 # The chunk knobs live in environment variables, not in
                 # settings.yaml; reading a non-existent settings key made the
                 # fingerprint constant, so changing chunking silently reused both
@@ -248,6 +257,13 @@ class IngestionPipeline:
                         shutil.copy2, artifact_path, backup_dir / f"{doc_id}.json"
                     )
             try:
+                # Enrich before the durable commit so restored indexes retain the
+                # same node questions, aliases and summary provenance after restart.
+                if self.wiki_compiler and prepared_documents:
+                    if self.doc2query_enabled or self.knowledge_compilation_enabled:
+                        await self._attach_synthetic_questions(prepared_documents)
+                    if self.scope_extraction_enabled:
+                        await self._attach_document_scope(prepared_documents)
                 for prepared in prepared_documents:
                     doc_id = prepared.document.doc_id
                     artifact_tmp = await asyncio.to_thread(
@@ -274,12 +290,8 @@ class IngestionPipeline:
                     # Chinese statutes a verbatim clause query retrieves at hit@1 0.87
                     # while a real user question retrieves at 0.12 - the words simply do
                     # not overlap. Done per document, once, at ingest.
-                    if self.doc2query_enabled:
-                        await self._attach_synthetic_questions(prepared_documents)
                     if self.article_index_enabled:
                         await self._write_article_pages(prepared_documents)
-                    if self.scope_extraction_enabled:
-                        await self._attach_document_scope(prepared_documents)
                     await asyncio.to_thread(
                         self.wiki_compiler.upsert_documents,
                         [
@@ -704,9 +716,10 @@ class IngestionPipeline:
     ) -> None:
         """Record each document's own scope statement in its metadata."""
         limit = _ingest_concurrency()
+        semaphore = asyncio.Semaphore(limit)
 
         async def one(prepared: PreparedDocument) -> None:
-            async with asyncio.Semaphore(limit):
+            async with semaphore:
                 scope = await describe_document_scope(
                     prepared.document.content,
                     self.generation_client,
@@ -731,9 +744,10 @@ class IngestionPipeline:
         addition, not a replacement, so that is not a degraded state.
         """
         limit = _ingest_concurrency()
+        semaphore = asyncio.Semaphore(limit)
 
         async def one(prepared: PreparedDocument) -> None:
-            async with asyncio.Semaphore(limit):
+            async with semaphore:
                 articles = await split_into_articles(
                     prepared.document.content,
                     self.generation_client,
@@ -750,6 +764,7 @@ class IngestionPipeline:
                     writer.write_article_pages,
                     prepared.document,
                     [(article.label, article.text) for article in articles],
+                    chunks=prepared.chunks,
                 )
 
         async with asyncio.TaskGroup() as group:
@@ -767,9 +782,14 @@ class IngestionPipeline:
         quiet degradation this project forbids.
         """
         limit = _ingest_concurrency()
+        semaphore = asyncio.Semaphore(limit)
 
         async def one(prepared: PreparedDocument) -> None:
-            async with asyncio.Semaphore(limit):
+            async with semaphore:
+                if self.knowledge_compilation_enabled:
+                    from app.wiki.knowledge import compile_knowledge
+                    await compile_knowledge(prepared.document, prepared.chunks, self.generation_client)
+                    return
                 questions = await generate_questions(
                     prepared.document.content,
                     self.generation_client,
@@ -954,6 +974,7 @@ class IngestionPipeline:
                 "table_node_id": node.node_id,
                 "table_row_index": row_index,
                 "table_headers": [headers.get(col, f"col_{col + 1}") for col in sorted(headers)],
+                "table_columns": {str(headers.get(col, f"col_{col + 1}")): col for col in sorted(headers)},
                 "table_row": row,
             }
             row_metadata.update(

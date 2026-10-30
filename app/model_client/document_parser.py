@@ -95,6 +95,7 @@ class DocumentParserClient:
         return (
             os.getenv("DOCUMENT_PARSER_MODEL")
             or self.config.models.get("document_parser", {}).get("default_alias")
+            or self.config.models.get("generation", {}).get("default_alias")
         )
 
     def _resolve_base_url(self) -> str:

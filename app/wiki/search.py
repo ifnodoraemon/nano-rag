@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import logging
 import os
+import json
+import math
 import threading
 from dataclasses import replace
 import time
@@ -86,8 +88,15 @@ class WikiSearcher:
                 # real value from the titles that actually exist.
                 title_weight=self._title_weight_override or 0.0,
                 variant=self._scoring_variant_config(),
+                field_weights=self._field_weights_config(),
             )
         )
+        backend = os.getenv("RAG_LEXICAL_BACKEND", "memory").strip().lower()
+        if backend == "sqlite":
+            from app.retrieval.sqlite_index import SQLiteBM25Index
+            self.index = SQLiteBM25Index(self.index.config)
+        elif backend != "memory":
+            raise ConfigurationError("RAG_LEXICAL_BACKEND must be memory or sqlite")
         self.documents: dict[str, WikiDocument] = {}
         self._page_mtimes: dict[str, int] = {}
         self._path_doc_ids: dict[str, str] = {}
@@ -109,6 +118,20 @@ class WikiSearcher:
         self._last_dir_signature: tuple[tuple[str, int], ...] | None = None
         self._lock = threading.RLock()
         self.refresh()
+
+    @staticmethod
+    def _field_weights_config() -> dict[str, float]:
+        defaults = BM25Config().field_weights
+        try:
+            overrides = json.loads(os.getenv("RAG_BM25_FIELD_WEIGHTS") or "{}")
+            if not isinstance(overrides, dict) or set(overrides) - set(defaults):
+                raise ValueError("allowed fields: context, aliases, questions")
+            for value in overrides.values():
+                if isinstance(value, bool) or not isinstance(value, (float, int)) or not math.isfinite(value) or value < 0:
+                    raise ValueError("field weights must be finite nonnegative numbers")
+            return {**defaults, **overrides}
+        except (ValueError, TypeError) as exc:
+            raise ConfigurationError(f"invalid RAG_BM25_FIELD_WEIGHTS: {exc}") from exc
 
     @staticmethod
     def _sync_interval_config() -> float:
@@ -411,9 +434,11 @@ class WikiSearcher:
                     doc_id
                     for doc_id in kb_doc_ids
                     if (document := self.documents.get(doc_id)) is not None
-                    and match_metadata_filters(document.metadata, metadata_filters)
+                    and match_metadata_filters(
+                        self._document_provenance.get(doc_id, document.metadata), metadata_filters
+                    )
                     and (
-                        document.kind in {"topic", "source"}
+                        document.kind in {"topic", "source", "article"}
                         or doc_id == index_doc_id
                     )
                 }
@@ -421,6 +446,7 @@ class WikiSearcher:
                 allowed_doc_ids = kb_doc_ids
             if not allowed_doc_ids:
                 return []
+            page_budget = top_k
             ranking = self._rank_pages(
                 query,
                 allowed_doc_ids=allowed_doc_ids,
@@ -430,7 +456,33 @@ class WikiSearcher:
                 scope_verdict=scope_verdict,
             )
             if granularity == "document":
-                ranking = self._one_page_per_document(ranking)
+                # A long document can occupy more than the fixed overfetch with
+                # article siblings. Widen until enough distinct documents exist
+                # or the allowed pages are exhausted.
+                while (len(self._one_page_per_document(ranking)) < top_k
+                       and len(ranking) >= max(page_budget * 4, 8)
+                       and len(ranking) < len(allowed_doc_ids)):
+                    page_budget *= 2
+                    ranking = self._rank_pages(query, allowed_doc_ids=allowed_doc_ids,
+                        top_k=page_budget, term_weights=term_weights,
+                        scope_preference=scope_preference, scope_verdict=scope_verdict)
+                selected = self._one_page_per_document(ranking)[:top_k]
+                hits = [self._hit_for_page(page_id, score) for page_id, score in selected]
+                by_document = {hit.chunk.doc_id: hit for hit in hits}
+                for page_id, score in ranking:
+                    page = self.documents.get(page_id)
+                    target = by_document.get(page.doc_id) if page is not None else None
+                    if target is None:
+                        continue
+                    matched = self._hit_for_page(page_id, score).chunk.metadata
+                    metadata = target.chunk.metadata
+                    metadata["matched_node_ids"] = list(dict.fromkeys([
+                        *metadata.get("matched_node_ids", []), *matched.get("matched_node_ids", [])]))[:24]
+                    seeds = metadata.setdefault("matched_pages", [])
+                    if len(seeds) < 24:
+                        seeds.append({"page_id": page_id, "score": score,
+                                      "node_ids": matched.get("matched_node_ids", [])})
+                return hits
             return [
                 self._hit_for_page(page_id, score)
                 for page_id, score in ranking[:top_k]
@@ -520,6 +572,7 @@ class WikiSearcher:
                 source_path=document.page_path,
                 title=document.title,
                 metadata={
+                    **provenance,
                     "kb_id": document.kb_id,
                     "wiki_kind": document.kind,
                     "wiki_status": provenance.get("status"),
@@ -531,10 +584,33 @@ class WikiSearcher:
                     "version": provenance.get("version"),
                     "is_latest_version": provenance.get("is_latest_version"),
                     "superseded_by": provenance.get("superseded_by"),
+                    "matched_node_ids": document.metadata.get("node_ids", []),
+                    "matched_text": document.body if document.kind == "article" else "",
+                    "article_label": document.metadata.get("article_label"),
+                    "article_start": document.metadata.get("article_start"),
+                    "article_end": document.metadata.get("article_end"),
                 },
             ),
             score=score,
         )
+
+    def versions_for(self, source_key: str, kb_id: str) -> list[SearchHit]:
+        """Resolve versions from the full catalog, even if a version did not match words."""
+        with self._lock:
+            self._sync_if_stale()
+            return [self._hit_for_page(page_id, 0.0)
+                    for page_id, doc in self.documents.items()
+                    if doc.kind == "source" and doc.kb_id == kb_id
+                    and doc.metadata.get("source_key") == source_key]
+
+    def source_documents(self, kb_id: str, filters: dict | None = None) -> list[SearchHit]:
+        """A deterministic catalog scan for collection questions and coverage accounting."""
+        with self._lock:
+            self._sync_if_stale()
+            return [self._hit_for_page(page_id, 0.0)
+                    for page_id, doc in sorted(self.documents.items())
+                    if doc.kind == "source" and doc.kb_id == kb_id
+                    and match_metadata_filters(doc.metadata, filters)]
 
     # ------------------------------------------------------------------ #
     # Per-page indexing                                                   #
@@ -603,7 +679,17 @@ class WikiSearcher:
         # The page title carries the document's own summary, which is a much
         # denser signal per token than body text; it is indexed as a separate
         # field so it can be weighted without duplicating it into the body.
-        self.index.add_document(doc_id, document.body, document.title)
+        # Generated questions must not inflate raw-body term counts or its length.
+        raw_body = document.body
+        if document.metadata.get("synthetic_questions"):
+            raw_body = raw_body.rsplit("\n## Questions This Document Answers\n", 1)[0]
+        self.index.add_document(doc_id, raw_body, document.title, fields={
+            "context": " ".join([str(document.metadata.get("context_prefix") or document.title),
+                                  str(document.metadata.get("retrieval_summary") or ""),
+                                  " ".join(document.metadata.get("applies_to") or [])]),
+            "aliases": " ".join(document.metadata.get("aliases") or []),
+            "questions": " ".join(document.metadata.get("questions")
+                                   or document.metadata.get("synthetic_questions") or [])})
 
     def _index_source_page(self, page_path: Path) -> None:
         metadata, body = WikiCompiler.read_frontmatter(page_path)

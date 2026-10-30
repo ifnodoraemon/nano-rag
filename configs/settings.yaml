@@ -1,5 +1,6 @@
 agent:
-  max_retrieval_loops: 2
+  max_retrieval_loops: 4
+  max_model_calls: 32
   max_subqueries: 4
   # Agentic (wiki) retrieval engine. The wiki discovery layer is the retrieval
   # engine (RAG_WIKI_ENABLED=true is required; there is no dense fallback).

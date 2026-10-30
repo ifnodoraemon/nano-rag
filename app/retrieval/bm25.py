@@ -3,7 +3,7 @@ from __future__ import annotations
 import math
 import threading
 from collections import Counter
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 
 import logging
 
@@ -40,6 +40,8 @@ class BM25Config:
     # explicit query/document overlap ratio. Both are computable from the inverted
     # index, so no model is involved.
     variant: str = "bm25"
+    field_weights: dict[str, float] = field(default_factory=lambda: {
+        "context": 0.5, "aliases": 0.8, "questions": 0.35})
 
 
 class BM25Index:
@@ -73,6 +75,7 @@ class BM25Index:
         self._total_title_length = 0
         self._total_length = 0
         self._lock = threading.RLock()
+        self._fields: dict[str, BM25Index] = {}
 
     def _term_entropy(self, postings: dict[str, int], n_docs: int) -> float:
         """Normalised entropy of a term's tf distribution across the documents.
@@ -110,7 +113,8 @@ class BM25Index:
         with self._lock:
             return len(self._doc_lengths)
 
-    def add_document(self, doc_id: str, text: str, title: str = "") -> None:
+    def add_document(self, doc_id: str, text: str, title: str = "",
+                     fields: dict[str, str] | None = None) -> None:
         with self._lock:
             if doc_id in self._doc_lengths:
                 self._remove_locked(doc_id)
@@ -152,12 +156,23 @@ class BM25Index:
                     title_postings = {}
                     self._title_postings[term] = title_postings
                 title_postings[doc_id] = tf
+            for name, value in (fields or {}).items():
+                if name not in self._fields and self.config.field_weights.get(name, 0) > 0:
+                    child = BM25Index(replace(self.config, title_weight=0, field_weights={}))
+                    for existing in self._doc_lengths:
+                        if existing != doc_id:
+                            child.add_document(existing, "")
+                    self._fields[name] = child
+            for name, child in self._fields.items():
+                child.add_document(doc_id, (fields or {}).get(name, ""))
 
     def remove_document(self, doc_id: str) -> None:
         with self._lock:
             self._remove_locked(doc_id)
 
     def _remove_locked(self, doc_id: str) -> None:
+        for child in self._fields.values():
+            child.remove_document(doc_id)
         length = self._doc_lengths.pop(doc_id, None)
         if length is None:
             return
@@ -246,6 +261,13 @@ class BM25Index:
             candidates: set[str] = set()
             term_freqs: dict[str, dict[str, int]] = {}
             title_freqs: dict[str, dict[str, int]] = {}
+            field_scores: dict[str, float] = {}
+            for name, child in self._fields.items():
+                weight = self.config.field_weights.get(name, 0)
+                for key, value in child.search_weighted(query, self.config.max_documents,
+                        allowed_doc_ids=allowed_doc_ids, term_weights=term_weights):
+                    field_scores[key] = field_scores.get(key, 0) + weight * value
+            candidates.update(field_scores)
             for term in set(query_tokens):
                 postings = self._postings.get(term)
                 if postings:
@@ -299,9 +321,8 @@ class BM25Index:
             scores: list[tuple[str, float]] = []
             for doc_id in candidates:
                 doc_length = self._doc_lengths.get(doc_id)
-                if not doc_length:
-                    continue
-                score = 0.0
+                doc_length = doc_length or 1
+                score = field_scores.get(doc_id, 0.0)
                 for term in query_tokens:
                     term_weight = weights.get(term, 1.0)
                     postings = term_freqs.get(term)
@@ -371,3 +392,7 @@ class BM25Index:
             self._doc_lengths.clear()
             self._postings.clear()
             self._total_length = 0
+            self._title_postings.clear()
+            self._title_lengths.clear()
+            self._total_title_length = 0
+            self._fields.clear()

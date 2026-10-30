@@ -66,10 +66,12 @@ class AsyncJsonProviderClient:
             self._client = None
 
     async def post_json(self, path: str, payload: dict[str, Any]) -> dict[str, Any]:
+        from app.core.usage import begin_provider_attempt
         self.provider.require_ready(require_model=False)
         attempts = self._max_attempts()
         last_error: Exception | None = None
         for attempt in range(1, attempts + 1):
+            accounting = begin_provider_attempt(path, attempt)
             try:
                 response = await self._get_client().post(
                     f"{self.provider.base_url}{path}",
@@ -77,6 +79,7 @@ class AsyncJsonProviderClient:
                     json=payload,
                 )
                 status_code = int(getattr(response, "status_code", 200))
+                accounting["status"] = status_code
                 if self._should_retry_status(status_code) and attempt < attempts:
                     delay = self._retry_sleep(attempt, response=response)
                     # Release the discarded response: a retried 429/5xx storm

@@ -1,0 +1,98 @@
+{
+  "review_date": "2026-10-29",
+  "reviewed_commit": "e63d405",
+  "scope": "Deterministic offline probes, not a live quality benchmark",
+  "live_model_calls": 0,
+  "observations": {
+    "article_filters": {
+      "without_filter": [
+        [
+          "doc-policy",
+          "article"
+        ]
+      ],
+      "matching_doc_type_filter": [],
+      "matching_date_filter": []
+    },
+    "depth": {
+      "search_fetch_k": [
+        48,
+        96
+      ],
+      "round1_candidate_ids": [
+        "doc-001",
+        "doc-002",
+        "doc-003",
+        "doc-004",
+        "doc-005",
+        "doc-006",
+        "doc-007",
+        "doc-008",
+        "doc-009",
+        "doc-010",
+        "doc-011",
+        "doc-012"
+      ],
+      "round2_candidate_ids": [
+        "doc-001",
+        "doc-002",
+        "doc-003",
+        "doc-004",
+        "doc-005",
+        "doc-006",
+        "doc-007",
+        "doc-008",
+        "doc-009",
+        "doc-010",
+        "doc-011",
+        "doc-012"
+      ],
+      "new_round2_candidates": 0
+    },
+    "prefix": {
+      "source_length": 6958,
+      "context_length": 6000,
+      "source_contains_answer": true,
+      "context_contains_answer": false,
+      "excerpt_exhausted": true
+    },
+    "chunk_selection": {
+      "raw_chunks": 25,
+      "selected_chunks": 24,
+      "last_chunk_selected": false,
+      "visible_sources": [
+        "a.md"
+      ],
+      "answer_source_visible": false
+    },
+    "audit_synthesis_views": {
+      "same_view": false,
+      "auditor_has_deadline": true,
+      "synthesis_has_deadline": false,
+      "auditor_offsets": [
+        0,
+        1898
+      ],
+      "synthesis_offsets": [
+        0
+      ]
+    },
+    "graph_auto": {
+      "normal_trace_expands": false,
+      "expander_calls": 0
+    },
+    "stale_version": {
+      "include_stale": false,
+      "input_is_latest": false,
+      "selected_doc_ids": [
+        "old-version"
+      ]
+    },
+    "citation_semantics": {
+      "wrong_answer": "The refund deadline is 99 days [C1].",
+      "integrity_score": 1,
+      "citation_precision": 1,
+      "issue_count": 0
+    }
+  }
+}

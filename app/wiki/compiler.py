@@ -478,6 +478,8 @@ class WikiCompiler:
             "synthetic_questions": as_str_list(
                 document.metadata.get("synthetic_questions")
             ),
+            "knowledge_tree": document.metadata.get("knowledge_tree", []),
+            "knowledge_compilation": document.metadata.get("knowledge_compilation"),
         }
 
     def _write_source_page(
@@ -585,6 +587,7 @@ class WikiCompiler:
         self,
         document: Document,
         articles: list[tuple[str, str]],
+        *, chunks: list[Chunk] | None = None,
     ) -> int:
         """Write one wiki page per article; return how many were written.
 
@@ -597,7 +600,10 @@ class WikiCompiler:
         for stale in self.articles_dir.glob(f"{document.doc_id}--*.md"):
             stale.unlink(missing_ok=True)
         written = 0
+        cursor = 0
         for index, (label, text) in enumerate(articles):
+            matched_chunks = [c for c in (chunks or []) if c.text.strip()
+                              and (c.text.strip() in text or text.strip() in c.text)]
             slug = hashlib.sha256(label.encode("utf-8")).hexdigest()[:10]
             path = self.articles_dir / f"{document.doc_id}--{index:04d}-{slug}.md"
             metadata = {
@@ -608,10 +614,22 @@ class WikiCompiler:
                 "title": f"{document.title} {label}",
                 "source_path": document.source_path,
                 "kb_id": kb_id,
+                "node_ids": [c.chunk_id for c in (chunks or [])
+                             if c.text.strip() and (c.text.strip() in text or text.strip() in c.text)],
+                "article_start": document.content.find(text, cursor),
+                "context_prefix": " / ".join([document.title, label]),
+                "questions": [q["question"] for c in matched_chunks
+                              for q in c.metadata.get("question_anchors", [])
+                              if q.get("answer_quote") and q["answer_quote"] in text],
+                "aliases": [a for c in matched_chunks for a in c.metadata.get("retrieval_aliases", [])],
+                "retrieval_summary": " ".join(c.metadata.get("retrieval_summary", "") for c in matched_chunks),
                 # An article is exactly as authoritative as its parent document.
                 "applies_to": as_str_list(document.metadata.get("applies_to")),
                 "authority_rank": document.metadata.get("authority_rank"),
             }
+            start = int(metadata["article_start"])
+            metadata["article_end"] = start + len(text) if start >= 0 else None
+            cursor = start + len(text) if start >= 0 else cursor
             self._write_page(path, metadata, text)
             written += 1
         return written

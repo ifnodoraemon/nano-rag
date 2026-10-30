@@ -174,6 +174,7 @@ class AppConfig:
         model = (
             os.getenv("DOCUMENT_PARSER_MODEL")
             or section.get("default_alias")
+            or self.models.get("generation", {}).get("default_alias")
             or ""
         )
         base_url = (
@@ -197,6 +198,15 @@ class AppConfig:
             "configured": enabled and not missing,
             "missing": missing,
         }
+
+    def validate_model_identity(self) -> None:
+        """Different wire protocols are allowed; different model identities are not."""
+        parser = self.document_parser_configured
+        generation = self.models["generation"]["default_alias"]
+        if not str(generation or "").strip():
+            raise ConfigurationError("GENERATION_MODEL_ALIAS must be configured in env")
+        if parser["enabled"] and parser["model"] != generation:
+            raise ConfigurationError("DOCUMENT_PARSER_MODEL must equal GENERATION_MODEL_ALIAS: single-model RAG")
 
 
     @property
@@ -346,12 +356,15 @@ class AppContainer:
     async def close(self) -> None:
         await self.generation_client.close()
         await self.document_parser.close()
+        if self.wiki_searcher is not None and hasattr(self.wiki_searcher.index, "close"):
+            self.wiki_searcher.index.close()
         if self.graph_store is not None:
             self.graph_store.close()
 
     @classmethod
     def from_env(cls) -> "AppContainer":
         config = load_config()
+        config.validate_model_identity()
         graph_store = build_graph_store(config)
         generation_client = GenerationClient(config)
         document_parser = DocumentParserClient(config)

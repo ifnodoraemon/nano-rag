@@ -300,7 +300,7 @@ def test_document_parser_base_url_strips_openai_suffix(tmp_path) -> None:
                 "base_url": "https://generativelanguage.googleapis.com/v1beta/openai",
                 "api_key": "secret",
             },
-            "generation": {"default_alias": "gemini-3.1-pro-preview"},
+            "generation": {"default_alias": "configured-model"},
             "document_parser": {
                 "enabled": True,
                 "base_url": "https://generativelanguage.googleapis.com/v1beta/openai",
@@ -393,10 +393,10 @@ async def test_document_parser_uses_direct_resumable_upload(monkeypatch, tmp_pat
                 "base_url": "https://generativelanguage.googleapis.com/v1beta/openai",
                 "api_key": "parser-secret",
             },
-            "generation": {"default_alias": "gemini-3.1-pro-preview"},
+            "generation": {"default_alias": "configured-model"},
             "document_parser": {
                 "enabled": True,
-                "default_alias": "gemini-3.1-pro-preview",
+                "default_alias": "configured-model",
                 "base_url": "https://generativelanguage.googleapis.com",
                 "api_key": "parser-secret",
             },
@@ -486,7 +486,7 @@ async def test_document_parser_batches_large_pdf_pages(monkeypatch, tmp_path) ->
             "document_parser": {
                 "enabled": True,
                 "provider": "gemini",
-                "default_alias": "gemini-3.1-pro-preview",
+                "default_alias": "configured-model",
                 "base_url": "https://generativelanguage.googleapis.com",
                 "api_key": "parser-secret",
             },
@@ -573,7 +573,7 @@ async def test_document_parser_batch_failure_fails_whole_document(
             "document_parser": {
                 "enabled": True,
                 "provider": "gemini",
-                "default_alias": "gemini-3.1-pro-preview",
+                "default_alias": "configured-model",
                 "base_url": "https://generativelanguage.googleapis.com",
                 "api_key": "parser-secret",
             },
@@ -629,7 +629,7 @@ async def test_document_parser_uses_qwen_openai_compatible_file_part(
             "document_parser": {
                 "enabled": True,
                 "provider": "qwen",
-                "default_alias": "qwen-vl-plus",
+                "default_alias": "configured-model",
                 "base_url": "https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
                 "api_key": "dashscope-secret",
             },
@@ -649,7 +649,7 @@ async def test_document_parser_uses_qwen_openai_compatible_file_part(
     )
     assert call["headers"]["Authorization"] == "Bearer dashscope-secret"
     payload = call["json"]
-    assert payload["model"] == "qwen-vl-plus"
+    assert payload["model"] == "configured-model"
     file_part = payload["messages"][0]["content"][1]
     assert file_part["type"] == "file"
     assert file_part["file"]["filename"] == "notice.pdf"
@@ -689,7 +689,7 @@ async def test_document_parser_uses_vllm_image_url_part(monkeypatch, tmp_path) -
             "document_parser": {
                 "enabled": True,
                 "provider": "vllm",
-                "default_alias": "Qwen/Qwen2.5-VL-7B-Instruct",
+                "default_alias": "configured-model",
                 "base_url": "http://vllm:8000/v1",
                 "api_key": "EMPTY",
             },

@@ -90,6 +90,7 @@ class PromptBuilder:
         query: str,
         contexts: list[dict[str, object]],
         agent_state: dict[str, object] | None = None,
+        *, media_parts: list[dict[str, Any]] | None = None,
     ) -> list[dict[str, Any]]:
         conflict_notice = ""
         if any(_is_conflict_context(item) for item in contexts):
@@ -117,7 +118,7 @@ class PromptBuilder:
             f"{LANGUAGE_CONTRACT}\n"
         )
 
-        media_parts = list(self._collect_media_parts(contexts))
+        media_parts = self.collect_media_parts(contexts) if media_parts is None else media_parts
         if not media_parts:
             return [
                 {"role": "system", "content": self.system_prompt},
@@ -130,7 +131,7 @@ class PromptBuilder:
             {"role": "user", "content": user_parts},
         ]
 
-    def _collect_media_parts(
+    def collect_media_parts(
         self, contexts: list[dict[str, object]]
     ) -> list[dict[str, Any]]:
         parts: list[dict[str, Any]] = []
@@ -224,6 +225,11 @@ class PromptBuilder:
             f"- evidence_complete: {evidence_complete}\n"
             f"- missing_terms: {', '.join(missing_terms) or 'none'}\n"
             f"{self._render_reading_plan(agent_state.get('reading_plan'))}"
+            f"- collection_coverage: {json.dumps(agent_state.get('tool_events', []), ensure_ascii=False)}\n"
+            f"- coverage_status: {json.dumps(agent_state.get('collection_coverage', {}), ensure_ascii=False)}\n"
+            f"- retrieval_plan: {json.dumps(agent_state.get('query_plan'), ensure_ascii=False)}\n"
+            "对于集合问题，只能在扫描覆盖范围内作结论；文档覆盖不等于全文内容已读全。\n"
+            "集合覆盖不完整时，is_answerable 必须为 false，并用用户语言解释已覆盖范围与缺口。\n"
             f"{policy}\n"
         )
 
@@ -278,6 +284,8 @@ class PromptBuilder:
                 rendered = self._render_context(item)
                 remaining = self._context_max_chars - used
                 if remaining <= 0:
+                    if item.get("_evidence_frozen"):
+                        raise ConfigurationError("frozen evidence exceeds the prompt context budget")
                     logger.warning(
                         "prompt context budget reached at %d chars; dropping remaining %s contexts",
                         self._context_max_chars,
@@ -285,6 +293,8 @@ class PromptBuilder:
                     )
                     break
                 if len(rendered) > remaining:
+                    if item.get("_evidence_frozen"):
+                        raise ConfigurationError("frozen evidence exceeds the prompt context budget")
                     # Truncate the *current* item into the space that is left
                     # instead of skipping it: breaking out here dropped the
                     # highest-priority evidence (primary) and kept smaller
@@ -311,9 +321,13 @@ class PromptBuilder:
         if modality != "text":
             media_uri = item.get("media_uri") or "n/a"
             mime_type = item.get("mime_type") or "n/a"
-            body = f"[{modality} attachment: {media_uri} ({mime_type})]"
-        elif isinstance(body, str) and len(body) > self._context_item_max_chars:
+            body = f"[{modality} attachment: {media_uri} ({mime_type})]\n{body}"
+        elif (not item.get("_evidence_frozen") and isinstance(body, str)
+              and len(body) > self._context_item_max_chars):
             body = body[: self._context_item_max_chars - 3].rstrip() + "..."
+        map_facts = item.get("map_facts")
+        navigation_hint = (f"(map summaries, navigation only: {json.dumps([f.get('summary') for f in map_facts], ensure_ascii=False)}) "
+                           if isinstance(map_facts, list) else "")
         return (
             f"[{item.get('citation_label') or item.get('chunk_id', 'unknown')}] "
             f"(evidence={item.get('evidence_role') or 'supporting'}) "
@@ -322,6 +336,7 @@ class PromptBuilder:
             f"(section={item.get('section_path') or 'n/a'}, doc_type={item.get('doc_type') or 'n/a'}) "
             f"(effective_date={item.get('effective_date') or 'n/a'}, version={item.get('version') or 'n/a'}, freshness={item.get('freshness_tier') or 'n/a'}) "
             f"(claim_role={item.get('claim_role') or 'n/a'}, certainty={item.get('certainty') or 'n/a'}, scope={item.get('claim_scope') or 'n/a'}) "
+            f"{navigation_hint}"
             f"{body}"
         )
 

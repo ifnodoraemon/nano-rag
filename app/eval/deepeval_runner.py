@@ -507,4 +507,8 @@ def _cost_metrics(results: list[dict]) -> dict[str, object]:
     return {
         "tokens_per_query_avg": round(sum(totals) / len(totals), 4),
         "tokens_per_query_total": sum(totals),
+        "cost_usage_complete_records": sum(
+            (r.get("generation_usage") or {}).get("usage_complete") is True for r in results),
+        "cost_is_lower_bound": any(
+            (r.get("generation_usage") or {}).get("usage_complete") is not True for r in results),
     }

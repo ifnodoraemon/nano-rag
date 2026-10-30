@@ -62,7 +62,7 @@ def test_rerun_preserves_operator_provider_keys(init_env) -> None:
     env_path.parent.mkdir(parents=True, exist_ok=True)
     env_path.write_text(
         "GENERATION_API_KEY=my-real-key\n"
-        "GENERATION_MODEL_ALIAS=qwen-plus\n"
+        "GENERATION_MODEL_ALIAS=configured-model\n"
         "RAG_API_KEYS=existing-business\n"
         "RAG_ADMIN_API_KEYS=existing-admin\n"
         "POSTGRES_PASSWORD=existing-db\n",
@@ -73,7 +73,7 @@ def test_rerun_preserves_operator_provider_keys(init_env) -> None:
 
     values = _read(env_path)
     assert values["GENERATION_API_KEY"] == "my-real-key"
-    assert values["GENERATION_MODEL_ALIAS"] == "qwen-plus"
+    assert values["GENERATION_MODEL_ALIAS"] == "configured-model"
     assert values["RAG_API_KEYS"] == "existing-business"
     assert values["POSTGRES_PASSWORD"] == "existing-db"
 
@@ -84,7 +84,7 @@ def test_legacy_compose_names_are_migrated_not_lost(init_env) -> None:
     env_path.write_text(
         "COMPOSE_GENERATION_API_KEY=legacy-key\n"
         "COMPOSE_DOCUMENT_PARSER_API_KEY=legacy-parser\n"
-        "COMPOSE_GENERATION_MODEL_ALIAS=qwen-plus\n",
+        "COMPOSE_GENERATION_MODEL_ALIAS=configured-model\n",
         encoding="utf-8",
     )
 
@@ -94,7 +94,7 @@ def test_legacy_compose_names_are_migrated_not_lost(init_env) -> None:
     # Values survive, names become canonical.
     assert values["GENERATION_API_KEY"] == "legacy-key"
     assert values["DOCUMENT_PARSER_API_KEY"] == "legacy-parser"
-    assert values["GENERATION_MODEL_ALIAS"] == "qwen-plus"
+    assert values["GENERATION_MODEL_ALIAS"] == "configured-model"
     assert not any(key.startswith("COMPOSE_") for key in values)
     # Generated secrets are added by the migration.
     assert values["RAG_ADMIN_API_KEYS"]
@@ -125,7 +125,7 @@ def test_check_rejects_identical_business_and_admin_keys(init_env, capsys) -> No
     module, env_path = init_env
     env_path.parent.mkdir(parents=True, exist_ok=True)
     env_path.write_text(
-        "GENERATION_API_KEY=k\nDOCUMENT_PARSER_API_KEY=k\n"
+        "GENERATION_API_KEY=k\nDOCUMENT_PARSER_API_KEY=k\nGENERATION_MODEL_ALIAS=configured-model\n"
         "RAG_API_KEYS=same\nRAG_ADMIN_API_KEYS=same\nPOSTGRES_PASSWORD=p\n",
         encoding="utf-8",
     )
@@ -140,7 +140,7 @@ def test_check_rejects_multiple_business_keys(init_env, capsys) -> None:
     module, env_path = init_env
     env_path.parent.mkdir(parents=True, exist_ok=True)
     env_path.write_text(
-        "GENERATION_API_KEY=k\nDOCUMENT_PARSER_API_KEY=k\n"
+        "GENERATION_API_KEY=k\nDOCUMENT_PARSER_API_KEY=k\nGENERATION_MODEL_ALIAS=configured-model\n"
         "RAG_API_KEYS=a,b\nRAG_ADMIN_API_KEYS=admin\nPOSTGRES_PASSWORD=p\n",
         encoding="utf-8",
     )
@@ -153,7 +153,7 @@ def test_check_passes_when_ready(init_env) -> None:
     module, env_path = init_env
     env_path.parent.mkdir(parents=True, exist_ok=True)
     env_path.write_text(
-        "GENERATION_API_KEY=k\nDOCUMENT_PARSER_API_KEY=k\n"
+        "GENERATION_API_KEY=k\nDOCUMENT_PARSER_API_KEY=k\nGENERATION_MODEL_ALIAS=configured-model\n"
         "RAG_API_KEYS=business\nRAG_ADMIN_API_KEYS=admin\nPOSTGRES_PASSWORD=p\n",
         encoding="utf-8",
     )
@@ -165,7 +165,7 @@ def test_placeholder_values_do_not_count_as_supplied(init_env) -> None:
     module, env_path = init_env
     env_path.parent.mkdir(parents=True, exist_ok=True)
     env_path.write_text(
-        "GENERATION_API_KEY=<your-key-here>\nDOCUMENT_PARSER_API_KEY=k\n"
+        "GENERATION_API_KEY=<your-key-here>\nDOCUMENT_PARSER_API_KEY=k\nGENERATION_MODEL_ALIAS=configured-model\n"
         "RAG_API_KEYS=business\nRAG_ADMIN_API_KEYS=admin\nPOSTGRES_PASSWORD=p\n",
         encoding="utf-8",
     )
@@ -187,7 +187,7 @@ def test_probe_reports_rejected_key(init_env, monkeypatch, capsys) -> None:
     env_path.parent.mkdir(parents=True, exist_ok=True)
     env_path.write_text(
         "GENERATION_API_KEY=AIzaSyPlausibleLookingKey1234567890abc\n"
-        "DOCUMENT_PARSER_API_KEY=k\n"
+        "DOCUMENT_PARSER_API_KEY=k\nGENERATION_MODEL_ALIAS=configured-model\n"
         "RAG_API_KEYS=business\nRAG_ADMIN_API_KEYS=admin\nPOSTGRES_PASSWORD=p\n",
         encoding="utf-8",
     )
@@ -211,7 +211,7 @@ def test_probe_accepts_working_key(init_env, monkeypatch, capsys) -> None:
     module, env_path = init_env
     env_path.parent.mkdir(parents=True, exist_ok=True)
     env_path.write_text(
-        "GENERATION_API_KEY=k1\nDOCUMENT_PARSER_API_KEY=k2\n"
+        "GENERATION_API_KEY=k1\nDOCUMENT_PARSER_API_KEY=k2\nGENERATION_MODEL_ALIAS=configured-model\n"
         "RAG_API_KEYS=business\nRAG_ADMIN_API_KEYS=admin\nPOSTGRES_PASSWORD=p\n",
         encoding="utf-8",
     )
@@ -239,7 +239,7 @@ def test_probe_does_not_fail_on_unreachable_network(init_env, monkeypatch, capsy
     module, env_path = init_env
     env_path.parent.mkdir(parents=True, exist_ok=True)
     env_path.write_text(
-        "GENERATION_API_KEY=k1\nDOCUMENT_PARSER_API_KEY=k2\n"
+        "GENERATION_API_KEY=k1\nDOCUMENT_PARSER_API_KEY=k2\nGENERATION_MODEL_ALIAS=configured-model\n"
         "RAG_API_KEYS=business\nRAG_ADMIN_API_KEYS=admin\nPOSTGRES_PASSWORD=p\n",
         encoding="utf-8",
     )

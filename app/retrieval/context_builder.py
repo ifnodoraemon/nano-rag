@@ -182,6 +182,7 @@ def build_contexts(
     bucket_order: list[str] | None = None,
     query: str | None = None,
     max_text_chars: int | None = None,
+    truncate: bool = True,
 ) -> list[dict[str, object]]:
     contexts = []
     seen_keys: set[str] = set()
@@ -201,9 +202,12 @@ def build_contexts(
         )
         context_entry: dict[str, object] = {
             "chunk_id": hit.chunk.chunk_id,
+            "doc_id": hit.chunk.doc_id,
             "node_id": metadata.get("node_id") or hit.chunk.chunk_id,
             "_dedupe_key": dedupe_key,
-            "text": _truncate_text(context_text, max_text_chars),
+            "text": _truncate_text(context_text, max_text_chars) if truncate else context_text,
+            "context_original_chars": len(context_text),
+            "context_truncated": truncate and len(context_text) > max_text_chars,
             "source": hit.chunk.source_path,
             "title": section_path_text or hit.chunk.title,
             "score": round(hit.score, 6),

@@ -40,6 +40,10 @@ class TraceRecord(BaseModel):
     prompt_messages: list[dict] = Field(default_factory=list)
     generation_finish_reason: str | None = None
     generation_usage: dict[str, object] = Field(default_factory=dict)
+    synthesis_usage: dict[str, object] = Field(default_factory=dict)
+    model_calls: list[dict] = Field(default_factory=list)
+    provider_attempts: list[dict] = Field(default_factory=list)
+    grounded_claims: list[dict] = Field(default_factory=list)
     retrieval_params: dict[str, object] = Field(default_factory=dict)
     step_latencies: dict[str, float] = Field(default_factory=dict)
     # Deterministic citation audit (app/generation/citation_check.py): does every

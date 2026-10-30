@@ -41,7 +41,7 @@ def test_capability_gateway_requires_explicit_capability_config(monkeypatch) -> 
     monkeypatch.delenv("DOCUMENT_PARSER_API_KEY", raising=False)
     config = _config(
         model_gateway={"base_url": "http://localhost:4000", "api_key": "secret"},
-        document_parser={"default_alias": "gemini-flash-latest"},
+        document_parser={"default_alias": "configured-model"},
     )
     with pytest.raises(ConfigurationError, match="DOCUMENT_PARSER_API_BASE_URL"):
         config.gateway_for("document_parser")
@@ -52,7 +52,7 @@ def test_generation_gateway_prefers_capability_specific_env(monkeypatch) -> None
     monkeypatch.setenv("GENERATION_API_KEY", "gen-secret")
     config = _config(
         model_gateway={"base_url": "http://localhost:4000", "api_key": "secret"},
-        generation={"default_alias": "gemini-flash-latest"},
+        generation={"default_alias": "configured-model"},
     )
     assert config.gateway_for("generation") == {
         "base_url": "http://gen.example.com/v1",

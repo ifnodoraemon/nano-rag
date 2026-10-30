@@ -33,7 +33,9 @@ reading plan, never in a cross-encoder.
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass, field
+import os
+from dataclasses import dataclass, field, replace
+from app.retrieval.tokenizer import tokenize, resolve_tokenizer_mode
 
 # Sentence units for passage selection: a clause split on sentence punctuation,
 # or a line. Statutes put one article per unit, so an article stays intact and
@@ -48,9 +50,6 @@ _ANCHOR_RE = re.compile(
     r"^\s*(?:[一二三四五六七八九十]{1,2}\s*[、．.]|（[一二三四五六七八九十]{1,2}）)"
 )
 
-# Characters of a sentence quoted back for term matching. The sentence is kept
-# whole; this only bounds the matching work on a very long paragraph.
-_SCORE_WINDOW = 240
 # A term match keeps this much text on either side, so a passage carries the
 # condition ("自竣工验收之日起") that gives the matched clause its meaning.
 _PASSAGE_LEAD = 60
@@ -187,7 +186,12 @@ def _normalize_terms(terms: list[str]) -> list[str]:
     """Trim and dedupe (case-insensitively), keeping the caller's order."""
     seen: set[str] = set()
     out: list[str] = []
-    for term in terms:
+    mode = resolve_tokenizer_mode(os.getenv("RAG_BM25_TOKENIZER"))
+    lexical = list(dict.fromkeys(piece for term in terms for piece in tokenize(str(term or ""), mode)))
+    if len(lexical) > 256:
+        lexical = [lexical[i * (len(lexical)-1) // 255] for i in range(256)]
+    expanded = [*terms, *lexical]
+    for term in expanded:
         normalized = str(term or "").strip()
         key = normalized.casefold()
         if not normalized or key in seen:
@@ -364,14 +368,33 @@ class EvidenceDriller:
         a reader that cannot see a context cannot report on it honestly).
         """
         usable = self.total_chars if budget is None else min(budget, self.total_chars)
-        selected = contexts[: self.max_contexts]
+        # Reserve a turn for every source before a long document's siblings.
+        # Inside each document prioritize actual term matches, not prefix order.
+        terms = _normalize_terms(watch_terms)
+        groups: dict[str, list[dict]] = {}
+        for context in contexts:
+            key = str(context.get("doc_id") or context.get("source")
+                      or context.get("chunk_id") or id(context))
+            groups.setdefault(key, []).append(context)
+        for group in groups.values():
+            group.sort(key=lambda c: self._analyse(c, terms).weight, reverse=True)
+        selected = []
+        for i in range(max((len(g) for g in groups.values()), default=0)):
+            for group in groups.values():
+                if i < len(group):
+                    selected.append(group[i])
+                if len(selected) >= self.max_contexts:
+                    break
+            if len(selected) >= self.max_contexts:
+                break
         if not selected:
             return []
-        terms = _normalize_terms(watch_terms)
         entries = [self._analyse(context, terms) for context in selected]
         shares = self._allocate(entries, usable)
         return [
-            self._pick(entry, share) for entry, share in zip(entries, shares, strict=True)
+            replace(self._pick(entry, share), exhausted=False)
+            if context.get("context_truncated") else self._pick(entry, share)
+            for context, entry, share in zip(selected, entries, shares, strict=True)
         ]
 
     def visible_ratio(self, excerpts: list[EvidenceExcerpt]) -> float:
@@ -391,20 +414,30 @@ class EvidenceDriller:
         ]
         hits: list[tuple[int, int, int] | None] = []
         weight = 0
+        matched_terms: set[str] = set()
         for begin, end in spans:
-            window_end = min(end, begin + _SCORE_WINDOW)
+            # Locate matches throughout a source unit. An English paragraph may
+            # be one span: scoring only its prefix made its tail unreachable.
+            window_end = end
             window = text[begin:window_end].casefold()
             distinct = 0
             first = -1
             last = -1
             for term in terms:
-                position = window.find(term.casefold())
+                if re.fullmatch(r"[A-Za-z0-9_]+", term):
+                    match = re.search(r"(?<![a-z0-9_])" + re.escape(term.casefold())
+                                      + r"(?![a-z0-9_])", window)
+                    position = match.start() if match else -1
+                else:
+                    position = window.find(term.casefold())
                 if position < 0:
                     continue
                 distinct += 1
+                matched_terms.add(term.casefold())
                 first = position if first < 0 else min(first, position)
                 last = max(last, position + len(term))
-            weight += distinct
+            # Repeated boilerplate cannot buy more of the evidence budget.
+            weight = len(matched_terms)
             hits.append((distinct, begin + first, begin + last) if distinct else None)
         return _Entry(
             label=_optional_str(context.get("citation_label")),
@@ -494,6 +527,28 @@ class EvidenceDriller:
             # its tail outrank the article in the document that did match.
             return self._head(entry, share)
         ranges = self._select_ranges(entry, share)
+        if sum(end - begin for begin, end in ranges) > share:
+            # Widened neighboring units may overlap or individually exceed
+            # their share. Rebuild bounded windows around the strongest anchors
+            # rather than cutting their tails (which can hold the answer).
+            indices = self._ranked_matches(entry)[:4]
+            anchors = set()
+            for index in indices:
+                begin, end = entry.spans[index]
+                body = entry.text[begin:end].casefold()
+                for term in entry.terms:
+                    first, last = body.find(term.casefold()), body.rfind(term.casefold())
+                    if first >= 0:
+                        anchors.update((begin + first, begin + last))
+            positions = sorted(anchors)
+            count = min(4, len(positions), share)
+            chosen = [positions[i * (len(positions)-1) // max(1, count-1)] for i in range(count)]
+            bounded = []
+            for rank, anchor in enumerate(chosen):
+                room = share // count + (rank < share % count)
+                start = max(0, min(anchor - room // 2, len(entry.text) - room))
+                bounded.append((start, min(len(entry.text), start + room)))
+            ranges = _merge_ranges(bounded)
         if not ranges:
             return self._head(entry, share)
         passages = self._passages(entry, ranges)

@@ -194,6 +194,7 @@ class GraphIndex:
         )
         return {
             "chunk_id": node.node_id,
+            "doc_id": node.doc_id,
             "node_id": node.node_id,
             "text": text,
             "source": document.source_path,

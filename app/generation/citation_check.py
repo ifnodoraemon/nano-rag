@@ -40,6 +40,19 @@ CITATION_LABEL_RE = re.compile(r"C\d+")
 # one "sentence" and made sentence-level citation scoring meaningless.
 SENTENCE_SPLIT_RE = re.compile(r"(?<=[。！？；])|(?<=[.!?;])(?=\s|$)|(?<=\n)")
 NUMBER_RE = re.compile(r"\d[\d,]*(?:\.\d+)?")
+NUMBER_UNIT_RE = re.compile(r"(\d[\d,]*(?:\.\d+)?)\s*([A-Za-z]{1,32}|[%‰])\b")
+
+
+def normalize_citation_label(value: str) -> str:
+    """Normalize one citation's display brackets while retaining its identity."""
+    value = value.strip()
+    if value.startswith("[") and value.endswith("]"):
+        value = value[1:-1].strip()
+    if not CITATION_LABEL_RE.fullmatch(value):
+        raise ValueError("a claim must identify exactly one source label")
+    return value
+
+
 # Chinese numerals, as the corpus writes them ("一百八十厘米", "十五日"). Without this the
 # checker compared "180" against "一百八十" as different claims and reported a support
 # failure for an answer that was right: the model had converted the source's numeral form.
@@ -328,6 +341,19 @@ def check_citations(
                         sentence=sentence[:200],
                     )
                 )
+
+        # A number bound to a different unit elsewhere is not supporting evidence.
+        # Unknown or paraphrased units are left to the same-model entailment check.
+        source_pairs = {(_normalize_number(n), unit.casefold())
+                        for n, unit in NUMBER_UNIT_RE.findall(haystack)}
+        for raw_number, raw_unit in NUMBER_UNIT_RE.findall(sentence):
+            pair = (_normalize_number(raw_number), raw_unit.casefold())
+            if any(unit == pair[1] for _, unit in source_pairs) and pair not in source_pairs:
+                sentence_ok = False
+                ungrounded_numbers += 1
+                issues.append(CitationIssue(kind="numeric_binding", label=labels[0],
+                    detail=f"{raw_number} {raw_unit} is not bound together in the cited evidence",
+                    sentence=sentence[:200]))
 
         if check_quotes:
             normalized_haystack = re.sub(r"\s+", "", haystack)

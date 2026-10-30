@@ -80,7 +80,7 @@ async def test_health_route(monkeypatch) -> None:
             document_parser_configured={
                 "enabled": True,
                 "provider": "gemini",
-                "model": "gemini-3.1-pro-preview",
+                "model": "configured-model",
                 "base_url": "https://generativelanguage.googleapis.com",
                 "configured": True,
                 "missing": [],
@@ -168,7 +168,7 @@ async def test_health_detail_uses_cache_for_repeated_probes(monkeypatch) -> None
             document_parser_configured={
                 "enabled": True,
                 "provider": "gemini",
-                "model": "gemini-3.1-pro-preview",
+                "model": "configured-model",
                 "base_url": "https://generativelanguage.googleapis.com",
                 "configured": True,
                 "missing": [],
@@ -243,7 +243,7 @@ async def test_health_route_marks_gateway_4xx_as_degraded(monkeypatch) -> None:
             document_parser_configured={
                 "enabled": True,
                 "provider": "gemini",
-                "model": "gemini-3.1-pro-preview",
+                "model": "configured-model",
                 "base_url": "https://generativelanguage.googleapis.com",
                 "configured": True,
                 "missing": [],
@@ -324,7 +324,7 @@ async def test_health_route_does_not_degrade_when_langfuse_is_disabled(monkeypat
             document_parser_configured={
                 "enabled": True,
                 "provider": "gemini",
-                "model": "gemini-3.1-pro-preview",
+                "model": "configured-model",
                 "base_url": "https://generativelanguage.googleapis.com",
                 "configured": True,
                 "missing": [],
@@ -392,7 +392,7 @@ async def test_health_route_respects_auth_disabled_override(monkeypatch) -> None
             document_parser_configured={
                 "enabled": True,
                 "provider": "gemini",
-                "model": "gemini-3.1-pro-preview",
+                "model": "configured-model",
                 "base_url": "https://generativelanguage.googleapis.com",
                 "configured": True,
                 "missing": [],
@@ -459,7 +459,7 @@ async def test_health_route_reports_configured_auth(monkeypatch) -> None:
             document_parser_configured={
                 "enabled": True,
                 "provider": "gemini",
-                "model": "gemini-3.1-pro-preview",
+                "model": "configured-model",
                 "base_url": "https://generativelanguage.googleapis.com",
                 "configured": True,
                 "missing": [],

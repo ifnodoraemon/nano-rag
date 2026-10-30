@@ -192,7 +192,7 @@ def sanitize_metadata_filters(
     cleaned = {
         key: value
         for key, value in filters.items()
-        if not str(key).endswith("_mode")
+        if not str(key).endswith("_mode") and not str(key).startswith("_")
     }
     return cleaned or None
 

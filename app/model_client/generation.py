@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import logging
 import os
+from time import perf_counter
+from app.core.usage import model_stage, record_model_call, reserve_model_call
 from typing import TYPE_CHECKING, Any
 
 from app.core.timeouts import timeout_seconds
@@ -21,6 +23,8 @@ logger = logging.getLogger(__name__)
 
 class GenerationClient(GatewayClient):
     def __init__(self, config: AppConfig) -> None:
+        if not str(config.models.get("generation", {}).get("default_alias") or "").strip():
+            raise ConfigurationError("GENERATION_MODEL_ALIAS must be configured in env")
         super().__init__(
             config,
             timeout_seconds(
@@ -50,6 +54,15 @@ class GenerationClient(GatewayClient):
     async def generate(
         self, messages: list[dict[str, Any]], model_alias: str | None = None, **kwargs: Any
     ) -> dict[str, Any]:
+        if model_alias is not None and model_alias != self.alias:
+            raise ConfigurationError("all generation tasks must use the configured single model")
+        stage = kwargs.pop("usage_stage", "generation")
+        with model_stage(stage):
+            return await self._generate_contract(messages, model_alias, **kwargs)
+
+    async def _generate_contract(
+        self, messages: list[dict[str, Any]], model_alias: str | None = None, **kwargs: Any
+    ) -> dict[str, Any]:
         if self.max_tokens > 0:
             kwargs.setdefault("max_tokens", self.max_tokens)
 
@@ -73,7 +86,7 @@ class GenerationClient(GatewayClient):
             _contract_name(response_format),
         )
         retried = await self._generate_once(
-            _with_json_only_instruction(messages), model_alias, **kwargs
+            _with_json_only_instruction(messages), model_alias, _accounting_retry="json_contract", **kwargs
         )
         if _parses_as_json(retried["content"]):
             retried["structured_retry"] = True
@@ -88,7 +101,12 @@ class GenerationClient(GatewayClient):
     async def _generate_once(
         self, messages: list[dict[str, Any]], model_alias: str | None = None, **kwargs: Any
     ) -> dict[str, Any]:
+        started = perf_counter()
+        reserve_model_call()
+        retry_reason = kwargs.pop("_accounting_retry", None)
         data = await self.provider_client.chat_completions(messages, model_alias or self.alias, **kwargs)
+        record_model_call(str(data.get("model") or self.alias), data.get("usage"), started,
+                          retry_reason=retry_reason)
         choices = data.get("choices", [])
         if not choices:
             raise ModelGatewayError(

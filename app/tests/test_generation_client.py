@@ -13,7 +13,7 @@ def _client() -> GenerationClient:
         settings={"timeout": {"generation_seconds": 5}},
         models={
             "generation": {
-                "default_alias": "gemini-flash-lite-latest",
+                "default_alias": "configured-model",
                 "base_url": "http://localhost:4000/v1",
                 "api_key": "secret",
             }
@@ -42,7 +42,7 @@ async def test_generate_passes_through_kwargs_and_returns_shape() -> None:
                 {"message": {"content": '{"answer": "answer"}'}, "finish_reason": "stop"}
             ],
             "usage": {"total_tokens": 3},
-            "model": "gemini-flash-lite-latest",
+            "model": "configured-model",
         }
 
     client.provider_client.chat_completions = fake_chat_completions  # type: ignore[method-assign]
@@ -60,11 +60,11 @@ async def test_generate_passes_through_kwargs_and_returns_shape() -> None:
         "type": "json_schema",
         "json_schema": {"name": "x", "strict": True},
     }
-    assert captured["model_alias"] == "gemini-flash-lite-latest"
+    assert captured["model_alias"] == "configured-model"
     assert response["content"] == '{"answer": "answer"}' 
     assert response["finish_reason"] == "stop"
     assert response["usage"] == {"total_tokens": 3}
-    assert response["model"] == "gemini-flash-lite-latest"
+    assert response["model"] == "configured-model"
     assert "raw" in response
 
 

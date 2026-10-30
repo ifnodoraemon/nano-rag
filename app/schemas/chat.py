@@ -62,3 +62,4 @@ class ChatResponse(BaseModel):
     supporting_claims: list[SupportingClaim] = []
     trace_id: str | None = None
     usage: dict[str, object] | None = None
+    grounded_claims: list[dict] = Field(default_factory=list)

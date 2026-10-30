@@ -43,7 +43,8 @@ CLAIM_TYPE_PREFIX_RE = re.compile(
 )
 class AnswerFormatter:
     def format(
-        self, answer: str, contexts: list[dict[str, object]], trace_id: str | None
+        self, answer: str, contexts: list[dict[str, object]], trace_id: str | None,
+        *, grounded_claims: list[dict] | None = None,
     ) -> ChatResponse:
         answer_body, supporting_claims = self._extract_answer_plan(answer.strip())
         ordered_contexts = sorted(
@@ -56,6 +57,9 @@ class AnswerFormatter:
         citations_by_chunk: dict[str, Citation] = {}
         citations_by_label: dict[str, Citation] = {}
         context_text_by_label: dict[str, str] = {}
+        verified_anchors = {}
+        for claim in grounded_claims or []:
+            verified_anchors.setdefault(claim["label"], claim)
         for context in ordered_contexts:
             chunk_id = str(context["chunk_id"])
             if chunk_id not in citations_by_chunk:
@@ -63,6 +67,17 @@ class AnswerFormatter:
                     answer_body,
                     str(context.get("text", "") or ""),
                 )
+                anchor = verified_anchors.get(context.get("citation_label"))
+                if anchor is not None:
+                    span_text, span_start, span_end = anchor["quote"], anchor["span_start"], anchor["span_end"]
+                elif context.get("_evidence_frozen"):
+                    span_start = span_end = None
+                    for passage in context.get("evidence_excerpt", {}).get("passages", []):
+                        local = passage["text"].find(span_text) if span_text else -1
+                        if local >= 0:
+                            span_start = passage["offset"] + local
+                            span_end = span_start + len(span_text)
+                            break
                 citation = Citation(
                     citation_label=str(context.get("citation_label"))
                     if context.get("citation_label") is not None

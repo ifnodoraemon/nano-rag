@@ -31,7 +31,10 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from app.core.config import AppContainer
+from app.core.config import AppContainer, load_config
+from app.agentic.discovery import AgenticDiscovery
+from app.wiki.compiler import WikiCompiler
+from app.wiki.search import WikiSearcher
 from app.core.exceptions import ConfigurationError, RetrievalError, StoreError
 from app.core.logging import configure_logging
 from app.eval.dataset import (
@@ -76,6 +79,7 @@ def _document_from_hit(hit: SearchHit) -> RetrievedDocument:
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--dataset", required=True, help="path to a retrieval JSONL dataset")
+    parser.add_argument("--llm", action="store_true", help="explicitly enable live model-assisted discovery")
     parser.add_argument("--output", default=None, help="report path (default: EVAL_REPORT_DIR)")
     parser.add_argument("--cutoffs", default="1,4,12", help="comma-separated cutoffs")
     parser.add_argument(
@@ -115,19 +119,36 @@ async def _run(args: argparse.Namespace) -> int:
         int(item) for item in str(args.cutoffs).split(",") if str(item).strip()
     )
 
-    container = AppContainer.from_env()
+    container = AppContainer.from_env() if args.llm else None
+    if container is None:
+        config = load_config()
+        if not config.wiki_enabled:
+            raise ConfigurationError("retrieval evaluation requires the wiki index")
+        compiler = WikiCompiler(config.wiki_dir)
+        compiler.bootstrap_from_parsed_dir(config.parsed_dir)
+        searcher = WikiSearcher(config.wiki_dir)
+        discovery = AgenticDiscovery(config=config, wiki_searcher=searcher,
+            generation_client=None, trace_store=None, tracing_manager=None)
+        discovery.query_expansion_enabled = False
+        discovery.scope_preference_enabled = False
+        discovery.hyde_enabled = False
+        discovery.llm_rerank_enabled = False
+        discovery.candidate_filter_enabled = False
+    else:
+        searcher = container.wiki_searcher
+        discovery = container.chat_pipeline.agentic_discovery
     try:
-        if container.wiki_searcher is None:
+        if searcher is None:
             raise ConfigurationError(
                 "retrieval evaluation needs the wiki discovery layer "
                 "(RAG_WIKI_ENABLED=true)"
             )
-        available = container.wiki_searcher.stats()
+        available = searcher.stats()
         logger.info("discovery index: %s", available)
 
         async def discover(record):  # noqa: ANN001, ANN202
             filters = merge_metadata_filters(record.metadata_filters, None)
-            staged = await container.chat_pipeline.agentic_discovery.discovery_candidates(
+            staged = await discovery.discovery_candidates(
                 record.query,
                 record.kb_id,
                 filters,
@@ -144,7 +165,10 @@ async def _run(args: argparse.Namespace) -> int:
         discover, records, cutoffs, concurrency=args.concurrency
     )
     finally:
-        await container.close()
+        if container is not None:
+            await container.close()
+        elif hasattr(searcher.index, "close"):
+            searcher.index.close()
 
     output_path = (
         resolve_data_path(args.output)

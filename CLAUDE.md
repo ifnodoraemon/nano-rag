@@ -20,7 +20,7 @@ Enterprise RAG system with a real-data runtime: no frontend hardcoded business d
 - **Frontend**: React 19 + TypeScript + Vite, served by nginx in Docker
 - **Discovery index**: document-level BM25 over the compiled wiki (no vector DB, no embedding model)
 - **Graph store**: native PostgreSQL (document structure for optional graph expansion)
-- **Model Providers**: ONE provider, two capabilities of the same family: a generation model does all the reasoning (query understanding, reading plan, evidence audit, graph extraction, answers) and a multimodal model parses every document. No embedding model, no rerank model, no local text extraction, no Bifrost/LiteLLM runtime layer.
+- **Model**: exactly one env-configured model identity across generation, knowledge compilation, audits and document parsing. `GENERATION_MODEL_ALIAS` is required and has no built-in model ID; an empty parser model inherits it, and a different parser ID is rejected. Protocol adapters and API endpoints may differ while serving the same model. No embedding model, no rerank model, no local text extraction, no Bifrost/LiteLLM runtime layer.
 - **Tracing**: OpenTelemetry HTTP export to Langfuse
 - **Testing**: pytest + pytest-asyncio, TypeScript build/lint
 - **Evaluation**: deterministic eval plus optional deepeval metrics
@@ -48,7 +48,7 @@ scripts/        # run_eval.py, run_benchmark.py, live_smoke.py
 
 ### Ingestion Pipeline
 
-Document -> multimodal model parser (only parsing path) -> normalizer -> chunker -> metadata -> committed parsed artifact + PostgreSQL graph rows + wiki discovery page
+Document -> configured model parser (only parsing path) -> normalizer -> chunker -> metadata + grounded node questions/aliases/tree summaries -> committed parsed artifact + PostgreSQL graph rows + fielded wiki discovery pages
 
 Ingest is incremental by content, not by timestamp. A file whose committed artifact already records the same SHA-256 and the same ingest fingerprint (parser provider/model + chunk configuration + artifact schema) is skipped without parsing or re-indexing, and reported in `unchanged_doc_ids` (job field `unchanged_documents`) so a skip is never confusable with "found nothing". `force=true` re-ingests deliberately. Parsed text is also kept in a content-addressed cache (`data/parsed/.parse_cache/<fingerprint>/<hash>.json`), so identical bytes at a *new* path are parsed once too; entries are namespaced by the fingerprint, which makes a parser or chunking change unable to read stale output.
 
@@ -56,13 +56,13 @@ Document identity is content-addressed on ingest: a file that arrives under a ne
 
 ### Retrieval (Agentic Discovery) Pipeline
 
-Query -> wiki BM25 discovery (document-level) -> deterministic version filter (latest wins per source_key) -> LLM read plan (structured json_schema) -> deep-read selected parsed artifacts -> context builder (+ optional PostgreSQL graph expansion)
+Query/history -> unified query plan -> fielded wiki BM25 discovery -> global version catalog -> LLM node reading plan -> source reads / tree navigation / reference and table tools -> immutable text and media evidence snapshot -> evidence audit and bounded corrective reads
 
-There is no embedding call and no dense/hybrid retrieval path. Discovery and the read plan each run on the configured generation gateway and are visible in the trace.
+There is no embedding call and no dense/hybrid retrieval path. Discovery itself is lexical; all model stages use the configured generation client. Memory BM25 is the default; SQLite FTS5 is an optional disk backend with its own native scoring. Collection scans distinguish document, content and row coverage. Request traces retain each round, the evidence actually shown, every model call and HTTP retry, aggregate usage completeness, and end-to-end latency.
 
 ### Generation Pipeline
 
-Context + query -> prompt builder -> configured generation gateway -> answer formatter with citations
+Frozen evidence + query -> prompt builder -> configured model answer -> same-model claim verification + exact source anchors -> answer formatter with citations
 
 ## Commands
 
@@ -85,10 +85,15 @@ Do not use non-Docker commands to start the app for runtime validation.
 - `MODEL_GATEWAY_MODE` - `live`; `mock` is not supported by the real-data runtime
 - `GENERATION_API_BASE_URL` - generation provider endpoint
 - `GENERATION_API_KEY` - generation provider key
-- `GENERATION_MODEL_ALIAS` - generation model alias; default examples are Gemini or Qwen
+- `GENERATION_MODEL_ALIAS` - required model ID from env; no hardcoded model default
 - `DOCUMENT_PARSER_API_BASE_URL` - document parser endpoint
 - `DOCUMENT_PARSER_API_KEY` - document parser key (required: the only parsing path)
 - `DOCUMENT_PARSER_PROVIDER` - `gemini` or `qwen`; `qwen` covers DashScope and OpenAI-compatible vLLM
+- `DOCUMENT_PARSER_MODEL` - empty inherits `GENERATION_MODEL_ALIAS`; a different ID is rejected
+- `RAG_QUERY_PLAN_ENABLED` / `RAG_NODE_NAVIGATION_ENABLED` / `RAG_KNOWLEDGE_COMPILATION_ENABLED` / `RAG_CLAIM_VERIFICATION_ENABLED` - enabled by default; all use the same model
+- `RAG_LEXICAL_BACKEND` - `memory` (default) or `sqlite`; neither adds a retrieval model
+- `RAG_MAX_RETRIEVAL_LOOPS` / `RAG_MAX_MODEL_CALLS` - request budgets, default 4 rounds and 32 model calls
+- `RAG_QUERY_CACHE_ENTRIES` / `RAG_QUERY_CACHE_TTL_SECONDS` - scoped query-plan cache, defaults 256 and 300 seconds; capacity 0 disables it
 - `RAG_GRAPH_BACKEND` - `postgres` (standard Docker runtime) or `artifact` (bare local scripts, no database); also `none`/`disabled`
 - `PG_URI` - PostgreSQL connection string for the graph store (defaults to the in-network `postgres` service)
 - `RAG_WIKI_ENABLED` - the BM25 discovery layer; must be `true` (it is the retrieval engine, with no dense fallback)
@@ -98,12 +103,14 @@ Do not use non-Docker commands to start the app for runtime validation.
 - `RAG_WIKI_MAX_PAGES_PER_KB` - per-KB source page quota enforced at ingest (default 20000)
 - `GENERATION_MAX_TOKENS` - generation output cap (0 = unset; invalid values fail startup)
 - `RAG_INGEST_JOB_TTL_DAYS` - finished ingest-job record retention (default 7; 0 = keep forever)
-- `RAG_INGEST_CONCURRENCY` - documents prepared at once during ingest (default 4; each is two model round trips). `1` restores serial behaviour
+- `RAG_INGEST_CONCURRENCY` - documents prepared at once during ingest (default 4); model calls depend on enabled compilation stages. `1` restores serial behaviour
 - `RAG_PARSE_CACHE_ENABLED` - content-addressed parse cache (default `true`); off means every file is re-parsed by the model
 - `RAG_API_KEYS` - backend business API keys (single key: nginx injects exactly one; `RAG_ADMIN_API_KEYS` must differ)
 - `RAG_PROXY_API_KEY` - derived from `RAG_API_KEYS` by compose; override only if the browser-facing key must differ
 
 Configuration surface is deliberately two-tier: exactly two *external* credentials (generation, and the multimodal document parser, which is the only parsing path) plus `scripts/init_env.py`, which generates every internal secret (business/admin keys, postgres password) with `secrets.token_hex`. Derived values are never configured twice: `PG_URI` comes from `POSTGRES_*`, `RAG_PROXY_API_KEY` from `RAG_API_KEYS`. Legacy names (`COMPOSE_*`, `MODEL_GATEWAY_*`, `PG_PASSWORD`) are still recognised and migrated in place. Internal components (redis, postgres) are `expose`-only, so they need no operator-managed credentials.
+
+Model and semantic configuration are included in the ingest fingerprint. Re-ingest existing corpora to obtain node questions, aliases and tree summaries. See [implementation and RAGFlow comparison](docs/research/ragflow-comparison-and-implementation-2026-10-30.md) for feature boundaries and validation.
 
 ## Code Conventions
 

@@ -224,6 +224,12 @@ def check(probe: bool = False) -> int:
     for name in ["GENERATION_API_KEY", "DOCUMENT_PARSER_API_KEY"]:
         if not _has_real_value(_lookup(values, name)):
             problems.append(f"{name} is not filled in - this is the one you must provide")
+    model = _lookup(values, "GENERATION_MODEL_ALIAS")
+    if not _has_real_value(model):
+        problems.append("GENERATION_MODEL_ALIAS is not filled in - set your model id in env")
+    parser_model = _lookup(values, "DOCUMENT_PARSER_MODEL")
+    if _has_real_value(parser_model) and parser_model != model:
+        problems.append("DOCUMENT_PARSER_MODEL must equal GENERATION_MODEL_ALIAS")
     if any(key.startswith("COMPOSE_") for key in values):
         problems.append(
             "this file uses the legacy COMPOSE_* names - run "
@@ -319,7 +325,7 @@ def write(force: bool) -> int:
                 "https://generativelanguage.googleapis.com/v1beta/openai",
             ),
             generation_model=keep_or_new(
-                "GENERATION_MODEL_ALIAS", "gemini-flash-latest"
+                "GENERATION_MODEL_ALIAS", ""
             ),
             parser_provider=keep_or_new("DOCUMENT_PARSER_PROVIDER", "gemini"),
             parser_api_key=keep_raw("DOCUMENT_PARSER_API_KEY", ""),
@@ -327,7 +333,8 @@ def write(force: bool) -> int:
                 "DOCUMENT_PARSER_API_BASE_URL",
                 "https://generativelanguage.googleapis.com",
             ),
-            parser_model=keep_or_new("DOCUMENT_PARSER_MODEL", "gemini-flash-latest"),
+            parser_model=keep_or_new("DOCUMENT_PARSER_MODEL",
+                keep_or_new("GENERATION_MODEL_ALIAS", "")),
             # section 2: generated
             rag_api_key=keep_or_new("RAG_API_KEYS", secrets.token_hex(32)),
             rag_admin_key=keep_or_new("RAG_ADMIN_API_KEYS", secrets.token_hex(32)),

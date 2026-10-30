@@ -68,6 +68,8 @@ def build_fingerprint(
     parser_model: str | None,
     chunk_size: object,
     chunk_overlap: object,
+    generation_model: str | None = None,
+    semantic_version: str = "nodes-v2",
 ) -> str:
     """Fingerprint everything that changes parse/chunk output for the same bytes."""
     payload = json.dumps(
@@ -77,6 +79,8 @@ def build_fingerprint(
             "parser_model": parser_model or "",
             "chunk_size": chunk_size,
             "chunk_overlap": chunk_overlap,
+            "generation_model": generation_model,
+            "semantic_version": semantic_version,
         },
         sort_keys=True,
         separators=(",", ":"),

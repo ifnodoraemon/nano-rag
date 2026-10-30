@@ -1,0 +1,151 @@
+{
+  "date": "2026-10-30",
+  "base_commit": "e63d405",
+  "ragflow_commit": "a609e62d05d8d077d7698d3760dba2f1472d5c1c",
+  "model_policy": {
+    "model_ids_from_env_only": true,
+    "built_in_model_id": false,
+    "parser_inherits_when_empty": true,
+    "different_parser_model_rejected": true,
+    "embedding_model_added": false,
+    "reranking_model_added": false,
+    "existing_compose_env": {
+      "generation_model_configured": true,
+      "parser_explicitly_configured": true,
+      "same_model_identity": true
+    }
+  },
+  "checks": {
+    "backend_tests": {
+      "command": "python -m pytest app/tests -q",
+      "passed": 615,
+      "failed": 0,
+      "warnings": 5,
+      "note": "Existing third-party jieba/pkg_resources warnings."
+    },
+    "lint": {
+      "command": "python -m ruff check app scripts/init_env.py scripts/live_single_model_smoke.py scripts/run_retrieval_eval.py",
+      "status": "passed"
+    },
+    "diff_whitespace": {
+      "command": "git diff --check",
+      "status": "passed"
+    },
+    "compose": {
+      "production": "passed",
+      "lite": "passed",
+      "mode": "config --quiet; no services started"
+    },
+    "yaml": {
+      "workflow": "parsed",
+      "model_config": "parsed"
+    },
+    "model_literal_scan": {
+      "scope": "Source, configs, Compose templates, CI and scripts; ignored live credentials, data and third-party model names cited in historical research.",
+      "status": "no concrete model IDs used as defaults"
+    }
+  },
+  "live_smokes": [
+    {
+      "lexical_backend": "sqlite",
+      "knowledge_compilation": true,
+      "status": "passed",
+      "model_from_env": true,
+      "distinct_model_ids": 1,
+      "answer": "The refund deadline is 17 days [C1].",
+      "grounded_claims": 1,
+      "query_usage": {
+        "prompt_tokens": 5856,
+        "completion_tokens": 958,
+        "total_tokens": 6814,
+        "model_calls": 5,
+        "provider_attempts": 5,
+        "retry_count": 0,
+        "structured_retries": 0,
+        "usage_complete": true
+      },
+      "compilation_usage": {
+        "prompt_tokens": 1923,
+        "completion_tokens": 816,
+        "total_tokens": 2739,
+        "model_calls": 2,
+        "provider_attempts": 2,
+        "retry_count": 0,
+        "structured_retries": 0,
+        "usage_complete": true
+      },
+      "query_latency_seconds": 10.5596,
+      "query_stages": [
+        "query_plan",
+        "reading_plan",
+        "evidence_audit",
+        "answer_synthesis",
+        "claim_grounding"
+      ],
+      "compilation_schema": "nodes-v2",
+      "rejected_questions": 0,
+      "evidence": {
+        "source_chars": 9514,
+        "answer_offset": 9452,
+        "visible_chars": 3031,
+        "all_exhausted": false,
+        "citation_source_start": 9452
+      },
+      "citation_integrity": 1,
+      "citation_precision": 1
+    },
+    {
+      "lexical_backend": "memory",
+      "knowledge_compilation": false,
+      "status": "passed",
+      "model_from_env": true,
+      "distinct_model_ids": 1,
+      "answer": "The refund deadline is 17 days [C1].",
+      "grounded_claims": 1,
+      "query_usage": {
+        "prompt_tokens": 5612,
+        "completion_tokens": 982,
+        "total_tokens": 6594,
+        "model_calls": 5,
+        "provider_attempts": 5,
+        "retry_count": 0,
+        "structured_retries": 0,
+        "usage_complete": true
+      },
+      "query_latency_seconds": 13.4198,
+      "query_stages": [
+        "query_plan",
+        "reading_plan",
+        "evidence_audit",
+        "answer_synthesis",
+        "claim_grounding"
+      ],
+      "evidence": {
+        "source_chars": 9514,
+        "answer_offset": 9452,
+        "visible_chars": 3031,
+        "all_exhausted": false,
+        "citation_source_start": 9452
+      },
+      "citation_integrity": 1,
+      "citation_precision": 1
+    }
+  ],
+  "issues_found_during_live_validation": [
+    "Provider could ignore native JSON Schema while returning syntactically valid JSON; new structured stages now also describe their schema in the prompt.",
+    "Natural-language term matching and repeated background could hide a tail answer; tokenize configured lexical terms and distribute evidence by distinct matches.",
+    "Widened excerpt windows could exceed the per-context cap; enforce the actual character allocation.",
+    "Citation label presentation brackets caused strict anchor lookup failures; normalize one label without changing its identity, and continue rejecting unknown labels and invented quotes.",
+    "Audit intermediate-fact instructions and their schema used inconsistent field names; align the contract and validate exact visible quotes."
+  ],
+  "runtime_modified": false,
+  "corpus_reingested": false,
+  "validation_limits": [
+    "Isolated Docker containers used the existing env credentials and temporary synthetic source artifacts.",
+    "The live smokes validate knowledge compilation and query-chain integration; binary document parser quality, production data and real image inference were not live-tested.",
+    "Image snapshot immutability, source offsets, table paging, collection fact visibility and both lexical backends are covered by offline tests.",
+    "The two live workloads differ because only the SQLite run compiled knowledge; their latencies are not a backend performance A/B.",
+    "No claim of general accuracy improvement; a held-out corpus and human checks are still needed.",
+    "Rebuild the running application to use the new code and re-ingest old documents to add derived node questions, aliases and summaries."
+  ]
+}
