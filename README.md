@@ -26,8 +26,9 @@ lite 模式使用 artifact 图扩展（无数据库）和 background ingest；�
 
 浏览器**不持有业务密钥**：nginx 只为 `/v1/rag/` 业务路由注入业务 key。
 但**运维路由**（注入、上传、追踪、评测、回放、`/health/detail`）需要调用方自备管理密钥，
-在前端「设置 → 运维密钥」里填入 `RAG_ADMIN_API_KEYS` 中的任意一个值即可（存在浏览器 localStorage，
-以 `X-Admin-API-Key` 发送）；不填则这些面板会明确提示“运维数据不可用”，而不是显示空数据。
+在前端「设置 → 运维密钥」里填入 `RAG_ADMIN_API_KEYS` 中的任意一个值，点击「验证并连接」。
+通过服务端校验后才保存到当前浏览器，并自动刷新运维数据；后续以 `X-Admin-API-Key` 发送。
+尚未连接时，注入和运维面板会提供连接入口，不自动请求受保护接口；已失效的密钥会提示重新连接。
 
 `RAG_API_KEYS` / `RAG_ADMIN_API_KEYS` / `RAG_PROXY_API_KEY` 都必须显式设置（见 `docker/.env.example`），
 compose 在缺失时会直接拒绝启动；不再有 `nano-rag-local` 这类默认密钥。
